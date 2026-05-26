@@ -1,0 +1,9 @@
+{
+  "typeCheckingMode": "standard",
+  "reportMissingImports": false,
+  "exclude": [
+    "gym/f110_gym/envs/f110_env_backup.py",
+    "gym/f110_gym/envs/rendering.py",
+    "scripts/**"
+  ]
+}

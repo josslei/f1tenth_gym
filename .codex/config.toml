@@ -1,0 +1,15 @@
+# Project-local hook configuration for Codex.
+#
+# Trust this file in Codex with /hooks so the PostToolUse hook can run.
+
+[hooks]
+
+[[hooks.PostToolUse]]
+matcher = "^(apply_patch|update_file|create_file|delete_file)$"
+
+  [[hooks.PostToolUse.hooks]]
+  type = "command"
+  async = false
+  command = 'bash -lc "python3 .codex/hooks/post_edit_checks.py"'
+  statusMessage = "Running pre-commit checks"
+  timeoutSec = 300

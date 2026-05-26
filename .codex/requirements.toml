@@ -1,0 +1,22 @@
+# Project-local hook requirements for Codex.
+#
+# Keep the hook scope narrow: only run after file-editing tools.
+PermissionRequest = []
+PostCompact = []
+PreCompact = []
+PreToolUse = []
+SessionStart = []
+Stop = []
+SubagentStart = []
+SubagentStop = []
+UserPromptSubmit = []
+
+[[PostToolUse]]
+matcher = '^(apply_patch|update_file|create_file|delete_file)$'
+
+  [[PostToolUse.hooks]]
+  type = 'command'
+  async = false
+  command = 'bash -lc "python3 .codex/hooks/post_edit_checks.py"'
+  statusMessage = 'Running pre-commit checks'
+  timeoutSec = 300

@@ -1,0 +1,31 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-merge-conflict
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.4.4
+    hooks:
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+      - id: ruff-format
+
+  - repo: https://github.com/RobertCraigie/pyright-python
+    rev: v1.1.363
+    hooks:
+      - id: pyright
+        additional_dependencies:
+          - gymnasium>=1.0
+          - numpy>=1.23
+          - numba>=0.59
+          - scipy>=1.10
+          - Pillow>=10.0
+          - PyYAML>=6.0
+          - pyglet>=2.0
+          - pytest>=8
+          - types-Pillow
+          - types-PyYAML
