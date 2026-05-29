@@ -31,7 +31,7 @@ include = ["f110_gym*", "controllers*", "utils*"]
 
 [tool.setuptools.package-data]
 f110_gym = [
-  "maps/*.yaml",
-  "maps/*.png",
-  "maps/*.pgm",
+  "envs/maps/*.yaml",
+  "envs/maps/*.png",
+  "envs/maps/*.pgm",
 ]

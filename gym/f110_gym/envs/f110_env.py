@@ -74,7 +74,7 @@ WINDOW_H = 800
 
 
 def _resolve_map_path(map_value):
-    package_maps = Path(__file__).resolve().parent.parent.parent.parent / "maps"
+    package_maps = Path(__file__).resolve().parent / "maps"
     candidate = Path(str(map_value))
 
     if candidate.suffix == ".yaml" and candidate.exists():
