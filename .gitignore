@@ -84,6 +84,9 @@ venv.bak/
 !.codex/hooks/
 !.codex/hooks/post_edit_checks.py
 
+# Generated outputs
+outputs/
+
 # Dev / backup files
 *_backup.py
 

@@ -1098,6 +1098,7 @@ def _plot(
     centerline: npt.NDArray[np.float64],
     race_line: npt.NDArray[np.float64],
     output_path: Path,
+    save_path: Path | None = None,
 ) -> None:
     try:
         import matplotlib.pyplot as plt
@@ -1122,7 +1123,12 @@ def _plot(
     ax.set_aspect("equal")
     ax.legend(loc="best")
     fig.tight_layout()
-    plt.show()
+
+    if save_path is not None:
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, dpi=150)
+    else:
+        plt.show()
 
 
 def parse_args() -> argparse.Namespace:
@@ -1175,6 +1181,12 @@ def parse_args() -> argparse.Namespace:
         dest="visualize",
         action="store_true",
         help="Show the map, centerline, and generated line after processing.",
+    )
+    parser.add_argument(
+        "--save_plot",
+        dest="save_plot",
+        action="store_true",
+        help="Save the visualization as a PNG next to the output CSV.",
     )
     return parser.parse_args()
 
@@ -1239,8 +1251,16 @@ def main() -> None:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     _write_waypoints(args.output, race_line, headings, speeds)
 
-    if args.visualize:
-        _plot(info, free, track_geometry.centerline, race_line, args.output)
+    if args.visualize or args.save_plot:
+        save_path = args.output.with_suffix(".png") if args.save_plot else None
+        _plot(
+            info,
+            free,
+            track_geometry.centerline,
+            race_line,
+            args.output,
+            save_path=save_path,
+        )
 
 
 if __name__ == "__main__":
