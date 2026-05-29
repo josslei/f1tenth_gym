@@ -67,10 +67,12 @@ The output is a CSV with `x,y,yaw,speed` columns in world coordinates. The
 script extracts a centerline, measures left/right track width at every
 centerline point, optimizes lateral offsets with L-BFGS-B, then computes a
 curvature and acceleration-limited speed profile. The optimizer uses
-interpolated control offsets by default; pass `--control_stride 1` to optimize
-every waypoint, or use a larger stride for faster generation. Add `--timing`
-to print elapsed time for each major processing step, and add `--visualize` to
-display the map, centerline, and generated line.
+interpolated control offsets by default; the conservative defaults use
+`--spacing 0.15`, `--safety_margin_extra 0.10`, and `--control_stride 2`.
+Pass `--control_stride 1` to optimize every waypoint, or use a larger stride
+for faster generation. Add `--timing` to print elapsed time for each major
+processing step, and add `--visualize` to display the map, centerline, and
+generated line.
 
 The script uses the image path stored in the YAML by default; pass `--map_ext`
 if you want to override the image extension explicitly. If required arguments

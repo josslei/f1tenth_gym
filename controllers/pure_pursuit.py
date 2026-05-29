@@ -7,12 +7,15 @@ from .controller_base import Controller, VehicleState, ControlCommand
 
 V_MIN = 0.0
 V_MAX = 20.0
-A_Y_MAX = 1.0489 * 9.81
+A_Y_MAX = 1.0489 * 9.81 / 2
 
 
 class PurePursuit(Controller):
     def __init__(
-        self, waypoints: np.ndarray, lookahead: float, wheelbase: float
+        self,
+        waypoints: np.ndarray,
+        lookahead: float,
+        wheelbase: float,
     ) -> None:
         self.vehicle_state = VehicleState(0, 0, 0, 0)
         self.waypoints = waypoints
@@ -29,7 +32,9 @@ class PurePursuit(Controller):
     def from_csv(
         cls, csv_path: str | Path, lookahead: float, wheelbase: float
     ) -> "PurePursuit":
-        return cls(np.zeros((0,)), lookahead, wheelbase)
+        waypoints = np.loadtxt(csv_path, delimiter=",", skiprows=1, dtype=np.float64)
+        waypoints = np.atleast_2d(waypoints)
+        return cls(waypoints[:, :2], lookahead, wheelbase)
 
     def reset(self) -> None:
         self.vehicle_state = VehicleState(0, 0, 0, 0)
@@ -70,8 +75,9 @@ def target_steering(curvature: float, L: float) -> float:
 
 
 @njit(cache=True)
-def target_speed(curvature: float, EPS: float = 1e-9) -> float:
-    return np.clip(np.sqrt(A_Y_MAX / (np.abs(curvature) + EPS)), V_MIN, V_MAX)
+def target_speed(curvature: float, eps: float = 1e-9) -> float:
+    speed = np.sqrt(A_Y_MAX / (np.abs(curvature) + eps))
+    return min(max(speed, V_MIN), V_MAX)
 
 
 @njit(cache=True)
@@ -118,17 +124,33 @@ def nearest_waypoint_index(
     start_idx: int,
     search_window: int = 200,
 ) -> int:
-    xy = waypoints[:, :2]
-    N = xy.shape[0]
+    point_count = waypoints.shape[0]
+    position_x = position[0]
+    position_y = position[1]
 
-    if search_window <= 0 or search_window >= N:
-        deltas = xy - position[:2]
-        distances_sq = np.einsum("ij,ij->i", deltas, deltas)
-        return int(np.argmin(distances_sq))
+    if search_window <= 0 or search_window >= point_count:
+        best_idx = 0
+        best_distance_sq = np.inf
+        for idx in range(point_count):
+            dx = waypoints[idx, 0] - position_x
+            dy = waypoints[idx, 1] - position_y
+            distance_sq = dx * dx + dy * dy
+            if distance_sq < best_distance_sq:
+                best_distance_sq = distance_sq
+                best_idx = idx
+        return best_idx
 
-    candidate_indices = (start_idx + np.arange(search_window)) % N
-    candidate_xy = xy[candidate_indices]
-    deltas = candidate_xy - position[:2]
-    distances_sq = np.einsum("ij,ij->i", deltas, deltas)
-    best_local_idx = int(np.argmin(distances_sq))
-    return int(candidate_indices[best_local_idx])
+    half_window = search_window // 2
+    first_offset = -half_window
+    last_offset = search_window - half_window
+    best_idx = start_idx % point_count
+    best_distance_sq = np.inf
+    for offset in range(first_offset, last_offset):
+        idx = (start_idx + offset) % point_count
+        dx = waypoints[idx, 0] - position_x
+        dy = waypoints[idx, 1] - position_y
+        distance_sq = dx * dx + dy * dy
+        if distance_sq < best_distance_sq:
+            best_distance_sq = distance_sq
+            best_idx = idx
+    return best_idx

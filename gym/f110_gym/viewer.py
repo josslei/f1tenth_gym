@@ -65,6 +65,7 @@ class F110Viewer:
         self._renderer: Any | None = None
         self._latest_obs: Observation | None = None
         self._last_render_time = 0.0
+        self._closed = False
 
     @classmethod
     def from_env(
@@ -113,8 +114,15 @@ class F110Viewer:
             "lap_counts": obs["lap_counts"],
         }
 
+    @property
+    def closed(self) -> bool:
+        """True after the window has been closed."""
+        return self._closed
+
     def render(self) -> None:
         """Draw the latest observation."""
+        if self._closed:
+            return
         if self._latest_obs is None:
             raise RuntimeError("F110Viewer.update() must be called before render().")
 
@@ -125,6 +133,11 @@ class F110Viewer:
             callback(renderer)
 
         renderer.dispatch_events()
+        if renderer.window_closed:
+            self._renderer = None
+            self._closed = True
+            return
+
         renderer.on_draw()
         renderer.flip()
         self._throttle()
@@ -133,14 +146,9 @@ class F110Viewer:
         """Release the pyglet window if it has been created."""
         if self._renderer is None:
             return
-
-        try:
-            self._renderer.close()
-        except Exception as exc:
-            if str(exc) != "Rendering window was closed.":
-                raise
-        finally:
-            self._renderer = None
+        self._renderer.close()
+        self._renderer = None
+        self._closed = True
 
     def _ensure_renderer(self) -> Any:
         if self._renderer is not None:

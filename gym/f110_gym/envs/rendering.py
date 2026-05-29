@@ -37,6 +37,8 @@ import yaml
 from f110_gym.envs.collision_models import get_vertices
 from PIL import Image
 from pyglet import gl
+from pyglet.graphics import get_default_shader
+from pyglet.math import Mat4
 
 # zooming constants
 ZOOM_IN_FACTOR = 1.2
@@ -45,6 +47,15 @@ ZOOM_OUT_FACTOR = 1 / ZOOM_IN_FACTOR
 # vehicle shape constants
 CAR_LENGTH = 0.58
 CAR_WIDTH = 0.31
+CAR_TRIANGLE_INDICES = (0, 1, 2, 0, 2, 3)
+RENDER_SCALE = 50.0
+
+
+def _flatten_vertices(vertices: np.ndarray) -> list[float]:
+    if vertices.shape[1] == 2:
+        zeros = np.zeros((vertices.shape[0], 1), dtype=vertices.dtype)
+        vertices = np.column_stack((vertices, zeros))
+    return vertices.flatten().tolist()
 
 
 class EnvRenderer(pyglet.window.Window):
@@ -76,21 +87,26 @@ class EnvRenderer(pyglet.window.Window):
         self.right = width / 2
         self.bottom = -height / 2
         self.top = height / 2
+        self.camera_x = 0.0
+        self.camera_y = 0.0
         self.zoom_level = 1.2
         self.zoomed_width = width
         self.zoomed_height = height
 
         # current batch that keeps track of all graphics
         self.batch = pyglet.graphics.Batch()
+        self.program = get_default_shader()
 
         # current env map
         self.map_points = None
+        self.map_vertices = None
 
         # current env agent poses, (num_agents, 3), columns are (x, y, theta)
         self.poses = None
 
         # current env agent vertices, (num_agents, 4, 2), 2nd and 3rd dimensions are the 4 corners in 2D
         self.vertices = None
+        self.cars = []
 
         # current score label
         self.score_label = pyglet.text.Label(
@@ -108,7 +124,19 @@ class EnvRenderer(pyglet.window.Window):
             batch=self.batch,
         )
 
+        self.window_closed = False
         self.fps_display = pyglet.window.FPSDisplay(self)
+
+    def _apply_camera_bounds(self) -> None:
+        self.left = self.camera_x - 0.5 * self.zoomed_width
+        self.right = self.camera_x + 0.5 * self.zoomed_width
+        self.bottom = self.camera_y - 0.5 * self.zoomed_height
+        self.top = self.camera_y + 0.5 * self.zoomed_height
+
+    def _set_camera_center(self, x: float, y: float) -> None:
+        self.camera_x = x
+        self.camera_y = y
+        self._apply_camera_bounds()
 
     def update_map(self, map_path, map_ext):
         """
@@ -152,15 +180,19 @@ class EnvRenderer(pyglet.window.Window):
         # mask and only leave the obstacle points
         map_mask = map_img == 0.0
         map_mask_flat = map_mask.flatten()
-        map_points = 50.0 * map_coords[:, map_mask_flat].T
-        for i in range(map_points.shape[0]):
-            self.batch.add(
-                1,
-                gl.GL_POINTS,
-                None,
-                ("v3f/stream", [map_points[i, 0], map_points[i, 1], map_points[i, 2]]),
-                ("c3B/stream", [183, 193, 222]),
-            )
+        map_points = RENDER_SCALE * map_coords[:, map_mask_flat].T
+        if self.map_vertices is not None:
+            self.map_vertices.delete()
+        map_point_count = map_points.shape[0]
+        map_positions = _flatten_vertices(map_points)
+        map_colors = [183, 193, 222, 255] * map_point_count
+        self.map_vertices = self.program.vertex_list(
+            map_point_count,
+            gl.GL_POINTS,
+            batch=self.batch,
+            position=("f", map_positions),
+            colors=("Bn", map_colors),
+        )
         self.map_points = map_points
 
     def on_resize(self, width, height):
@@ -182,12 +214,9 @@ class EnvRenderer(pyglet.window.Window):
 
         # update camera value
         (width, height) = self.get_size()
-        self.left = -self.zoom_level * width / 2
-        self.right = self.zoom_level * width / 2
-        self.bottom = -self.zoom_level * height / 2
-        self.top = self.zoom_level * height / 2
         self.zoomed_width = self.zoom_level * width
         self.zoomed_height = self.zoom_level * height
+        self._apply_camera_bounds()
 
     def on_mouse_drag(self, x, y, dx, dy, buttons, modifiers):
         """
@@ -206,10 +235,9 @@ class EnvRenderer(pyglet.window.Window):
         """
 
         # pan camera
-        self.left -= dx * self.zoom_level
-        self.right -= dx * self.zoom_level
-        self.bottom -= dy * self.zoom_level
-        self.top -= dy * self.zoom_level
+        self.camera_x -= dx * self.zoom_level
+        self.camera_y -= dy * self.zoom_level
+        self._apply_camera_bounds()
 
     def on_mouse_scroll(self, x, y, scroll_x, scroll_y):
         """
@@ -247,23 +275,14 @@ class EnvRenderer(pyglet.window.Window):
             self.right = mouse_x_in_world + (1 - mouse_x) * self.zoomed_width
             self.bottom = mouse_y_in_world - mouse_y * self.zoomed_height
             self.top = mouse_y_in_world + (1 - mouse_y) * self.zoomed_height
+            self.camera_x = 0.5 * (self.left + self.right)
+            self.camera_y = 0.5 * (self.bottom + self.top)
 
     def on_close(self):
-        """
-        Callback function when the 'x' is clicked on the window, overrides inherited method. Also throws exception to end the python program when in a loop.
-
-        Args:
-            None
-
-        Returns:
-            None
-
-        Raises:
-            Exception: with a message that indicates the rendering window was closed
-        """
+        """Callback when the window close button is clicked."""
 
         super().on_close()
-        raise Exception("Rendering window was closed.")
+        self.window_closed = True
 
     def on_draw(self):
         """
@@ -283,26 +302,17 @@ class EnvRenderer(pyglet.window.Window):
             raise Exception("Agent poses not updated for renderer.")
 
         # Initialize Projection matrix
-        gl.glMatrixMode(gl.GL_PROJECTION)
-        gl.glLoadIdentity()
-
-        # Initialize Modelview matrix
-        gl.glMatrixMode(gl.GL_MODELVIEW)
-        gl.glLoadIdentity()
-        # Save the default modelview matrix
-        gl.glPushMatrix()
+        self.view = Mat4()
+        self.projection = Mat4.orthogonal_projection(
+            self.left, self.right, self.bottom, self.top, -8192, 8192
+        )
 
         # Clear window with ClearColor
         gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT)
 
-        # Set orthographic projection matrix
-        gl.glOrtho(self.left, self.right, self.bottom, self.top, 1, -1)
-
         # Draw all batches
         self.batch.draw()
         self.fps_display.draw()
-        # Remove default modelview matrix
-        gl.glPopMatrix()
 
     def update_obs(self, obs):
         """
@@ -322,21 +332,41 @@ class EnvRenderer(pyglet.window.Window):
 
         num_agents = len(poses_x)
         if self.poses is None:
+            for car in self.cars:
+                car.delete()
             self.cars = []
             for i in range(num_agents):
                 if i == self.ego_idx:
                     vertices_np = get_vertices(
                         np.array([0.0, 0.0, 0.0]), CAR_LENGTH, CAR_WIDTH
                     )
-                    vertices = list(vertices_np.flatten())
-                    car = self.batch.add(
+                    vertices = _flatten_vertices(vertices_np)
+                    car = self.program.vertex_list_indexed(
                         4,
-                        gl.GL_QUADS,
-                        None,
-                        ("v2f", vertices),
-                        (
-                            "c3B",
-                            [172, 97, 185, 172, 97, 185, 172, 97, 185, 172, 97, 185],
+                        gl.GL_TRIANGLES,
+                        CAR_TRIANGLE_INDICES,
+                        batch=self.batch,
+                        position=("f", vertices),
+                        colors=(
+                            "Bn",
+                            [
+                                172,
+                                97,
+                                185,
+                                255,
+                                172,
+                                97,
+                                185,
+                                255,
+                                172,
+                                97,
+                                185,
+                                255,
+                                172,
+                                97,
+                                185,
+                                255,
+                            ],
                         ),
                     )
                     self.cars.append(car)
@@ -344,21 +374,48 @@ class EnvRenderer(pyglet.window.Window):
                     vertices_np = get_vertices(
                         np.array([0.0, 0.0, 0.0]), CAR_LENGTH, CAR_WIDTH
                     )
-                    vertices = list(vertices_np.flatten())
-                    car = self.batch.add(
+                    vertices = _flatten_vertices(vertices_np)
+                    car = self.program.vertex_list_indexed(
                         4,
-                        gl.GL_QUADS,
-                        None,
-                        ("v2f", vertices),
-                        ("c3B", [99, 52, 94, 99, 52, 94, 99, 52, 94, 99, 52, 94]),
+                        gl.GL_TRIANGLES,
+                        CAR_TRIANGLE_INDICES,
+                        batch=self.batch,
+                        position=("f", vertices),
+                        colors=(
+                            "Bn",
+                            [
+                                99,
+                                52,
+                                94,
+                                255,
+                                99,
+                                52,
+                                94,
+                                255,
+                                99,
+                                52,
+                                94,
+                                255,
+                                99,
+                                52,
+                                94,
+                                255,
+                            ],
+                        ),
                     )
                     self.cars.append(car)
 
         poses = np.stack((poses_x, poses_y, poses_theta)).T
+        self._set_camera_center(
+            RENDER_SCALE * float(poses_x[self.ego_idx]),
+            RENDER_SCALE * float(poses_y[self.ego_idx]),
+        )
         for j in range(poses.shape[0]):
-            vertices_np = 50.0 * get_vertices(poses[j, :], CAR_LENGTH, CAR_WIDTH)
-            vertices = list(vertices_np.flatten())
-            self.cars[j].vertices = vertices
+            vertices_np = RENDER_SCALE * get_vertices(
+                poses[j, :], CAR_LENGTH, CAR_WIDTH
+            )
+            vertices = _flatten_vertices(vertices_np)
+            self.cars[j].set_attribute_data("position", vertices)
         self.poses = poses
 
         self.score_label.text = (

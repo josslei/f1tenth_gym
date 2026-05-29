@@ -1157,14 +1157,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--acceleration_limit", type=float, default=5.0)
     parser.add_argument("--braking_limit", type=float, default=8.0)
     parser.add_argument("--car_width", type=float, default=0.31)
-    parser.add_argument("--safety_margin_extra", type=float, default=0.05)
+    parser.add_argument("--safety_margin_extra", type=float, default=0.45)
     parser.add_argument("--lambda_length", type=float, default=0.01)
-    parser.add_argument("--lambda_smooth", type=float, default=1.0)
+    parser.add_argument("--lambda_smooth", type=float, default=1.5)
     parser.add_argument("--max_iterations", type=int, default=1000)
     parser.add_argument(
         "--control_stride",
         type=int,
-        default=4,
+        default=2,
         help=(
             "Optimize every Nth lateral offset and interpolate between controls. "
             "Use 1 to optimize every waypoint."
