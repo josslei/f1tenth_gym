@@ -8,13 +8,16 @@ Gymnasium-compatible F1TENTH environment.
 pip install -e .
 pip install -e ".[render]"
 pip install -e ".[tools]"
-pip install -e ".[dev,render]"
+pip install -e ".[dev]"
 ```
 
 Use the core install for the simulation package only. Add `render` if you want
 the pyglet/OpenGL renderer, and add `dev` if you want the test tooling.
 Add `tools` if you want the plotting dependencies used by the race-line and
 legacy helper scripts.
+
+Combine extras when needed, for example `pip install -e ".[dev,render]"` if you
+want both the test tooling and the renderer in one install.
 
 ## Use
 
