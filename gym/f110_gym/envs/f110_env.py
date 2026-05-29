@@ -74,7 +74,7 @@ WINDOW_H = 800
 
 
 def _resolve_map_path(map_value):
-    package_maps = Path(__file__).resolve().parent / "maps"
+    package_maps = Path(__file__).resolve().parent.parent.parent.parent / "maps"
     candidate = Path(str(map_value))
 
     if candidate.suffix == ".yaml" and candidate.exists():
@@ -498,14 +498,14 @@ class F110Env(gym.Env):
                 "Legacy update_params requires at least 7 positional arguments."
             )
 
-        mu, h, lr, C_Sf, C_Sr, I, m = legacy_values[:7]
+        mu, h, lr, C_Sf, C_Sr, I_z, m = legacy_values[:7]
         mapped = {
             "mu": mu,
             "h": h,
             "lr": lr,
             "C_Sf": C_Sf,
             "C_Sr": C_Sr,
-            "I": I,
+            "I": I_z,
             "m": m,
         }
         self.params.update(mapped)

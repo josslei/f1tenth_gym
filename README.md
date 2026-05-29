@@ -51,7 +51,7 @@ with:
 
 ```bash
 python3 scripts/generate_race_line.py \
-  --map_path gym/f110_gym/envs/maps/berlin.yaml \
+  --map_path maps/berlin.yaml \
   --output /tmp/berlin_race_line.csv
 ```
 

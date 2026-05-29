@@ -38,11 +38,10 @@ from pathlib import Path
 
 import f110_gym  # noqa: F401  # registers the environment
 import gymnasium as gym
-import matplotlib.pyplot as plt
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[2]
-MAP_DIR = ROOT / "gym" / "f110_gym" / "envs" / "maps"
+MAP_DIR = ROOT / "maps"
 LEGACY_SCAN_PATH = ROOT / "tests" / "f110_gym" / "legacy_scan.npz"
 
 thetas = np.linspace(-2.35, 2.35, num=1080)

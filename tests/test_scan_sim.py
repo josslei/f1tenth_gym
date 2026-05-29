@@ -37,7 +37,7 @@ from PIL import Image
 from scipy.ndimage import distance_transform_edt as edt
 
 ROOT = Path(__file__).resolve().parents[1]
-MAP_DIR = ROOT / "gym" / "f110_gym" / "envs" / "maps"
+MAP_DIR = ROOT / "maps"
 LEGACY_SCAN_PATH = ROOT / "tests" / "f110_gym" / "legacy_scan.npz"
 
 
