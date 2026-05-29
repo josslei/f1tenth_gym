@@ -24,7 +24,6 @@
 Author: Hongrui Zheng
 """
 
-import time
 from pathlib import Path
 
 import gymnasium as gym
@@ -34,6 +33,7 @@ import numpy as np
 
 # base classes
 from f110_gym.envs.base_classes import Integrator, Simulator
+from f110_gym.viewer import F110Viewer
 from gymnasium import spaces
 
 # constants
@@ -125,7 +125,7 @@ class F110Env(gym.Env):
     metadata = {"render_modes": ["human", "human_fast"], "render_fps": 200}
 
     # rendering
-    renderer = None
+    viewer = None
     current_obs = None
     render_callbacks = []
 
@@ -473,6 +473,9 @@ class F110Env(gym.Env):
         self.map_stem = _default_map_stem(self.map_path)
         self.map_ext = map_ext
         self.sim.set_map(map_path, map_ext)
+        if F110Env.viewer is not None:
+            F110Env.viewer.close()
+            F110Env.viewer = None
 
     def update_params(self, params, index=-1, *legacy_args, **kwargs):
         """
@@ -529,6 +532,32 @@ class F110Env(gym.Env):
 
         F110Env.render_callbacks.append(callback_func)
 
+    def make_viewer(
+        self,
+        *,
+        width: int = WINDOW_W,
+        height: int = WINDOW_H,
+        target_fps: float | None = 60.0,
+    ) -> F110Viewer:
+        """Create a realtime viewer configured for this environment.
+
+        Args:
+            width: Viewer window width in pixels.
+            height: Viewer window height in pixels.
+            target_fps: Maximum draw rate. Use ``None`` to render as fast as
+                possible.
+
+        Returns:
+            F110Viewer: Viewer configured for this environment's current map.
+        """
+        return F110Viewer.from_env(
+            self,
+            width=width,
+            height=height,
+            target_fps=target_fps,
+            callbacks=F110Env.render_callbacks,
+        )
+
     def render(self, mode=None):
         """
         Renders the environment with pyglet. Use mouse scroll in the window to zoom in/out, use mouse click drag to pan. Shows the agents, the map, current fps (bottom left corner), and the race information near as text.
@@ -544,22 +573,24 @@ class F110Env(gym.Env):
         render_mode = mode or self.render_mode or "human"
         assert render_mode in ["human", "human_fast"]
 
-        if F110Env.renderer is None:
-            # first call, initialize everything
-            from f110_gym.envs.rendering import EnvRenderer
+        if F110Env.viewer is None:
+            target_fps = None if render_mode == "human_fast" else 200.0
+            F110Env.viewer = F110Viewer.from_env(
+                self,
+                width=WINDOW_W,
+                height=WINDOW_H,
+                target_fps=target_fps,
+                callbacks=F110Env.render_callbacks,
+            )
 
-            F110Env.renderer = EnvRenderer(WINDOW_W, WINDOW_H)
-            F110Env.renderer.update_map(self.map_stem, self.map_ext)
+        if self.render_obs is None:
+            raise RuntimeError("reset() must be called before render().")
 
-        F110Env.renderer.update_obs(self.render_obs)
+        F110Env.viewer.update(self.render_obs)
+        F110Env.viewer.render()
 
-        for render_callback in F110Env.render_callbacks:
-            render_callback(F110Env.renderer)
-
-        F110Env.renderer.dispatch_events()
-        F110Env.renderer.on_draw()
-        F110Env.renderer.flip()
-        if render_mode == "human":
-            time.sleep(0.005)
-        elif render_mode == "human_fast":
-            pass
+    def close(self):
+        """Close the realtime viewer if it is open."""
+        if F110Env.viewer is not None:
+            F110Env.viewer.close()
+            F110Env.viewer = None

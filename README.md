@@ -27,6 +27,11 @@ obs, info = env.reset(options={"poses": poses})
 obs, reward, terminated, truncated, info = env.step(action)
 ```
 
+## Realtime Visualization
+
+See [docs/realtime_visualization.md](/Users/josslei/projects/f1tenth_gym_jl/docs/realtime_visualization.md)
+for the viewer API and usage examples.
+
 ## Testing
 
 Run the pytest-native checks with:

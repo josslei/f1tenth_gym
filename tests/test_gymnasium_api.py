@@ -83,3 +83,18 @@ def test_legacy_reset_dict_and_update_params_aliases():
         )
     finally:
         env.close()
+
+
+def test_make_viewer_uses_environment_map_without_opening_window():
+    env = gym.make("f110-v0")
+    try:
+        f110_env = cast(F110Env, env.unwrapped)
+        viewer = f110_env.make_viewer(width=320, height=240, target_fps=None)
+
+        assert viewer.config.map_path == f110_env.map_stem
+        assert viewer.config.map_ext == f110_env.map_ext
+        assert viewer.config.width == 320
+        assert viewer.config.height == 240
+        assert viewer.config.target_fps is None
+    finally:
+        env.close()
