@@ -4,8 +4,8 @@ import numpy as np
 import pyglet
 import yaml
 from PIL import Image
-from pyglet import font, graphics, window
-from pyglet.gl import *
+from pyglet import graphics, window
+from pyglet import gl
 
 
 class Camera:
@@ -147,7 +147,7 @@ map_points = map_coords[:, map_mask_flat].T
 # prep opengl
 try:
     # Try and create a window with multisampling (antialiasing)
-    config = Config(
+    config = gl.Config(
         sample_buffers=1,
         samples=4,
         depth_size=16,
@@ -158,9 +158,9 @@ except window.NoSuchConfigException:
     # Fall back to no multisampling for old hardware
     window = window.Window(resizable=True)
 
-glClearColor(18 / 255, 4 / 255, 88 / 255, 1.0)
-glEnable(GL_DEPTH_TEST)
-glTranslatef(25, -5, -60)
+gl.glClearColor(18 / 255, 4 / 255, 88 / 255, 1.0)
+gl.glEnable(gl.GL_DEPTH_TEST)
+gl.glTranslatef(25, -5, -60)
 
 cam = Camera(window)
 
@@ -168,11 +168,11 @@ cam = Camera(window)
 @window.event
 def on_resize(width, height):
     # Override the default on_resize handler to create a 3D projection
-    glViewport(0, 0, width, height)
-    glMatrixMode(GL_PROJECTION)
-    glLoadIdentity()
-    gluPerspective(60.0, width / float(height), 0.1, 1000.0)
-    glMatrixMode(GL_MODELVIEW)
+    gl.glViewport(0, 0, width, height)
+    gl.glMatrixMode(gl.GL_PROJECTION)
+    gl.glLoadIdentity()
+    gl.gluPerspective(60.0, width / float(height), 0.1, 1000.0)
+    gl.glMatrixMode(gl.GL_MODELVIEW)
     return pyglet.event.EVENT_HANDLED
 
 
@@ -182,7 +182,7 @@ points = []
 for i in range(map_points.shape[0]):
     particle = batch.add(
         1,
-        GL_POINTS,
+        gl.GL_POINTS,
         None,
         ("v3f/stream", [map_points[i, 0], map_points[i, 1], map_points[i, 2]]),
     )
@@ -196,8 +196,8 @@ def loop(dt):
 
 @window.event
 def on_draw():
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
-    glColor3f(254 / 255, 117 / 255, 254 / 255)
+    gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT)
+    gl.glColor3f(254 / 255, 117 / 255, 254 / 255)
     cam.begin()
     batch.draw()
     cam.end()

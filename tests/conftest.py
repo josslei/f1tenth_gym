@@ -1,5 +1,6 @@
 """Pytest configuration for the F110 Gym test suite."""
 
+from importlib import import_module
 import sys
 from pathlib import Path
 
@@ -12,4 +13,4 @@ if str(PACKAGE_ROOT) not in sys.path:
 sys.modules.pop("f110_gym", None)
 sys.modules.pop("f110_gym.envs", None)
 
-import f110_gym  # noqa: F401
+import_module("f110_gym")

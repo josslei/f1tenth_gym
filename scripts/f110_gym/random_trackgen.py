@@ -35,8 +35,6 @@ import cv2
 import matplotlib.pyplot as plt
 import numpy as np
 import shapely.geometry as shp
-from matplotlib.collections import PatchCollection
-from matplotlib.patches import Polygon
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--seed", type=int, default=123, help="Seed for the numpy rng.")
@@ -82,7 +80,6 @@ def create_track():
             start_alpha = 2 * math.pi * (-0.5) / CHECKPOINTS
             rad = 1.5 * TRACK_RAD
         checkpoints.append((alpha, rad * math.cos(alpha), rad * math.sin(alpha)))
-    road = []
 
     # Go from one checkpoint to another to create track
     x, y, beta = 1.5 * TRACK_RAD, 0, 0
@@ -183,7 +180,6 @@ def create_track():
 
 
 def convert_track(track, track_int, track_ext, iter):
-
     # converts track to image and saves the centerline as waypoints
     fig, ax = plt.subplots()
     fig.set_size_inches(20, 20)
@@ -239,7 +235,7 @@ if __name__ == "__main__":
     for i in range(NUM_MAPS):
         try:
             track, track_int, track_ext = create_track()
-        except:
+        except Exception:
             print("Random generator failed, retrying")
             continue
         convert_track(track, track_int, track_ext, i)

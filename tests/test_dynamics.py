@@ -25,6 +25,8 @@ import unittest
 import numpy as np
 from numba import njit
 
+GRAVITY = 9.81
+
 
 @njit(cache=True)
 def accl_constraints(vel, accl, v_switch, a_max, v_min, v_max):
@@ -103,7 +105,7 @@ def vehicle_dynamics_ks(
     lr,
     h,
     m,
-    I,
+    inertia,
     s_min,
     s_max,
     sv_min,
@@ -165,7 +167,7 @@ def vehicle_dynamics_st(
     lr,
     h,
     m,
-    I,
+    inertia,
     s_min,
     s_max,
     sv_min,
@@ -196,7 +198,6 @@ def vehicle_dynamics_st(
     """
 
     # gravity constant m/s^2
-    g = 9.81
 
     # constraints
     u = np.array(
@@ -223,7 +224,7 @@ def vehicle_dynamics_st(
             lr,
             h,
             m,
-            I,
+            inertia,
             s_min,
             s_max,
             sv_min,
@@ -257,33 +258,42 @@ def vehicle_dynamics_st(
                 x[5],
                 -mu
                 * m
-                / (x[3] * I * (lr + lf))
+                / (x[3] * inertia * (lr + lf))
                 * (
-                    lf**2 * C_Sf * (g * lr - u[1] * h)
-                    + lr**2 * C_Sr * (g * lf + u[1] * h)
+                    lf**2 * C_Sf * (GRAVITY * lr - u[1] * h)
+                    + lr**2 * C_Sr * (GRAVITY * lf + u[1] * h)
                 )
                 * x[5]
                 + mu
                 * m
-                / (I * (lr + lf))
-                * (lr * C_Sr * (g * lf + u[1] * h) - lf * C_Sf * (g * lr - u[1] * h))
+                / (inertia * (lr + lf))
+                * (
+                    lr * C_Sr * (GRAVITY * lf + u[1] * h)
+                    - lf * C_Sf * (GRAVITY * lr - u[1] * h)
+                )
                 * x[6]
-                + mu * m / (I * (lr + lf)) * lf * C_Sf * (g * lr - u[1] * h) * x[2],
+                + mu
+                * m
+                / (inertia * (lr + lf))
+                * lf
+                * C_Sf
+                * (GRAVITY * lr - u[1] * h)
+                * x[2],
                 (
                     mu
                     / (x[3] ** 2 * (lr + lf))
                     * (
-                        C_Sr * (g * lf + u[1] * h) * lr
-                        - C_Sf * (g * lr - u[1] * h) * lf
+                        C_Sr * (GRAVITY * lf + u[1] * h) * lr
+                        - C_Sf * (GRAVITY * lr - u[1] * h) * lf
                     )
                     - 1
                 )
                 * x[5]
                 - mu
                 / (x[3] * (lr + lf))
-                * (C_Sr * (g * lf + u[1] * h) + C_Sf * (g * lr - u[1] * h))
+                * (C_Sr * (GRAVITY * lf + u[1] * h) + C_Sf * (GRAVITY * lr - u[1] * h))
                 * x[6]
-                + mu / (x[3] * (lr + lf)) * (C_Sf * (g * lr - u[1] * h)) * x[2],
+                + mu / (x[3] * (lr + lf)) * (C_Sf * (GRAVITY * lr - u[1] * h)) * x[2],
             ]
         )
 
@@ -317,7 +327,7 @@ def func_KS(
     lr,
     h,
     m,
-    I,
+    inertia,
     s_min,
     s_max,
     sv_min,
@@ -337,7 +347,7 @@ def func_KS(
         lr,
         h,
         m,
-        I,
+        inertia,
         s_min,
         s_max,
         sv_min,
@@ -361,7 +371,7 @@ def func_ST(
     lr,
     h,
     m,
-    I,
+    inertia,
     s_min,
     s_max,
     sv_min,
@@ -381,7 +391,7 @@ def func_ST(
         lr,
         h,
         m,
-        I,
+        inertia,
         s_min,
         s_max,
         sv_min,
@@ -438,7 +448,6 @@ class DynamicsTest(unittest.TestCase):
         ]
 
         # system dynamics
-        g = 9.81
         x_ks = np.array(
             [
                 3.9579422297936526,
@@ -460,7 +469,7 @@ class DynamicsTest(unittest.TestCase):
             ]
         )
         v_delta = 0.15
-        acc = 0.63 * g
+        acc = 0.63 * GRAVITY
         u = np.array([v_delta, acc])
 
         f_ks = vehicle_dynamics_ks(
@@ -537,7 +546,6 @@ class DynamicsTest(unittest.TestCase):
         from scipy.integrate import odeint
 
         # testing for zero initial state, zero input singularities
-        g = 9.81
         t_start = 0.0
         t_final = 1.0
         delta0 = 0.0
@@ -615,7 +623,6 @@ class DynamicsTest(unittest.TestCase):
         from scipy.integrate import odeint
 
         # testing for zero initial state, decelerating input singularities
-        g = 9.81
         t_start = 0.0
         t_final = 1.0
         delta0 = 0.0
@@ -633,7 +640,7 @@ class DynamicsTest(unittest.TestCase):
         t = np.arange(t_start, t_final, 1e-4)
 
         # set decel input
-        u = np.array([0.0, -0.7 * g])
+        u = np.array([0.0, -0.7 * GRAVITY])
 
         # simulate single-track model
         x_dec_st = odeint(
@@ -713,7 +720,6 @@ class DynamicsTest(unittest.TestCase):
 
         # testing for zero initial state, accelerating with left steer input singularities
         # wheel spin and velocity should increase more wheel spin at rear
-        g = 9.81
         t_start = 0.0
         t_final = 1.0
         delta0 = 0.0
@@ -731,7 +737,7 @@ class DynamicsTest(unittest.TestCase):
         t = np.arange(t_start, t_final, 1e-4)
 
         # set decel input
-        u = np.array([0.15, 0.63 * g])
+        u = np.array([0.15, 0.63 * GRAVITY])
 
         # simulate single-track model
         x_acc_st = odeint(
@@ -810,7 +816,6 @@ class DynamicsTest(unittest.TestCase):
         from scipy.integrate import odeint
 
         # testing for zero initial state, rolling and steering left input singularities
-        g = 9.81
         t_start = 0.0
         t_final = 1.0
         delta0 = 0.0

@@ -36,7 +36,7 @@ import yaml
 # helpers
 from f110_gym.envs.collision_models import get_vertices
 from PIL import Image
-from pyglet.gl import *
+from pyglet import gl
 
 # zooming constants
 ZOOM_IN_FACTOR = 1.2
@@ -63,13 +63,13 @@ class EnvRenderer(pyglet.window.Window):
         Returns:
             None
         """
-        conf = Config(sample_buffers=1, samples=4, depth_size=16, double_buffer=True)
+        conf = gl.Config(sample_buffers=1, samples=4, depth_size=16, double_buffer=True)
         super().__init__(
             width, height, config=conf, resizable=True, vsync=False, *args, **kwargs
         )
 
         # gl init
-        glClearColor(9 / 255, 32 / 255, 87 / 255, 1.0)
+        gl.glClearColor(9 / 255, 32 / 255, 87 / 255, 1.0)
 
         # initialize camera values
         self.left = -width / 2
@@ -156,7 +156,7 @@ class EnvRenderer(pyglet.window.Window):
         for i in range(map_points.shape[0]):
             self.batch.add(
                 1,
-                GL_POINTS,
+                gl.GL_POINTS,
                 None,
                 ("v3f/stream", [map_points[i, 0], map_points[i, 1], map_points[i, 2]]),
                 ("c3B/stream", [183, 193, 222]),
@@ -211,7 +211,7 @@ class EnvRenderer(pyglet.window.Window):
         self.bottom -= dy * self.zoom_level
         self.top -= dy * self.zoom_level
 
-    def on_mouse_scroll(self, x, y, dx, dy):
+    def on_mouse_scroll(self, x, y, scroll_x, scroll_y):
         """
         Callback function on mouse scroll, overrides inherited method.
 
@@ -226,11 +226,10 @@ class EnvRenderer(pyglet.window.Window):
         """
 
         # Get scale factor
-        f = ZOOM_IN_FACTOR if dy > 0 else ZOOM_OUT_FACTOR if dy < 0 else 1
+        f = ZOOM_IN_FACTOR if scroll_y > 0 else ZOOM_OUT_FACTOR if scroll_y < 0 else 1
 
         # If zoom_level is in the proper range
         if 0.01 < self.zoom_level * f < 10:
-
             self.zoom_level *= f
 
             (width, height) = self.get_size()
@@ -284,26 +283,26 @@ class EnvRenderer(pyglet.window.Window):
             raise Exception("Agent poses not updated for renderer.")
 
         # Initialize Projection matrix
-        glMatrixMode(GL_PROJECTION)
-        glLoadIdentity()
+        gl.glMatrixMode(gl.GL_PROJECTION)
+        gl.glLoadIdentity()
 
         # Initialize Modelview matrix
-        glMatrixMode(GL_MODELVIEW)
-        glLoadIdentity()
+        gl.glMatrixMode(gl.GL_MODELVIEW)
+        gl.glLoadIdentity()
         # Save the default modelview matrix
-        glPushMatrix()
+        gl.glPushMatrix()
 
         # Clear window with ClearColor
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+        gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT)
 
         # Set orthographic projection matrix
-        glOrtho(self.left, self.right, self.bottom, self.top, 1, -1)
+        gl.glOrtho(self.left, self.right, self.bottom, self.top, 1, -1)
 
         # Draw all batches
         self.batch.draw()
         self.fps_display.draw()
         # Remove default modelview matrix
-        glPopMatrix()
+        gl.glPopMatrix()
 
     def update_obs(self, obs):
         """
@@ -332,7 +331,7 @@ class EnvRenderer(pyglet.window.Window):
                     vertices = list(vertices_np.flatten())
                     car = self.batch.add(
                         4,
-                        GL_QUADS,
+                        gl.GL_QUADS,
                         None,
                         ("v2f", vertices),
                         (
@@ -348,7 +347,7 @@ class EnvRenderer(pyglet.window.Window):
                     vertices = list(vertices_np.flatten())
                     car = self.batch.add(
                         4,
-                        GL_QUADS,
+                        gl.GL_QUADS,
                         None,
                         ("v2f", vertices),
                         ("c3B", [99, 52, 94, 99, 52, 94, 99, 52, 94, 99, 52, 94]),
