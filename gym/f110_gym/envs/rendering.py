@@ -80,7 +80,7 @@ class EnvRenderer(pyglet.window.Window):
         )
 
         # gl init
-        gl.glClearColor(9 / 255, 32 / 255, 87 / 255, 1.0)
+        gl.glClearColor(9 / 255, 32 / 255, 87 / 255, 1.0)  # pyright: ignore[reportPrivateImportUsage]
 
         # initialize camera values
         self.left = -width / 2
@@ -159,11 +159,11 @@ class EnvRenderer(pyglet.window.Window):
                 origin_x = origin[0]
                 origin_y = origin[1]
             except yaml.YAMLError as ex:
-                print(ex)
+                raise RuntimeError(f"Failed to parse map YAML: {map_path}.yaml") from ex
 
         # load map image
         map_img = np.array(
-            Image.open(map_path + map_ext).transpose(Image.FLIP_TOP_BOTTOM)
+            Image.open(map_path + map_ext).transpose(Image.Transpose.FLIP_TOP_BOTTOM)
         ).astype(np.float64)
         map_height = map_img.shape[0]
         map_width = map_img.shape[1]
@@ -188,7 +188,7 @@ class EnvRenderer(pyglet.window.Window):
         map_colors = [183, 193, 222, 255] * map_point_count
         self.map_vertices = self.program.vertex_list(
             map_point_count,
-            gl.GL_POINTS,
+            gl.GL_POINTS,  # pyright: ignore[reportPrivateImportUsage]
             batch=self.batch,
             position=("f", map_positions),
             colors=("Bn", map_colors),
@@ -308,7 +308,7 @@ class EnvRenderer(pyglet.window.Window):
         )
 
         # Clear window with ClearColor
-        gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT)
+        gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT)  # pyright: ignore[reportPrivateImportUsage]
 
         # Draw all batches
         self.batch.draw()
@@ -343,7 +343,7 @@ class EnvRenderer(pyglet.window.Window):
                     vertices = _flatten_vertices(vertices_np)
                     car = self.program.vertex_list_indexed(
                         4,
-                        gl.GL_TRIANGLES,
+                        gl.GL_TRIANGLES,  # pyright: ignore[reportPrivateImportUsage]
                         CAR_TRIANGLE_INDICES,
                         batch=self.batch,
                         position=("f", vertices),
@@ -377,7 +377,7 @@ class EnvRenderer(pyglet.window.Window):
                     vertices = _flatten_vertices(vertices_np)
                     car = self.program.vertex_list_indexed(
                         4,
-                        gl.GL_TRIANGLES,
+                        gl.GL_TRIANGLES,  # pyright: ignore[reportPrivateImportUsage]
                         CAR_TRIANGLE_INDICES,
                         batch=self.batch,
                         position=("f", vertices),
