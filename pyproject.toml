@@ -18,7 +18,12 @@ dependencies = [
 
 [project.optional-dependencies]
 render = ["pyglet>=2.0"]
-tools = ["matplotlib>=3.8"]
+tools = [
+  "matplotlib>=3.8",
+  "casadi>=3.5",
+  "rich>=13.0",
+  "trajectory_planning_helpers @ git+https://github.com/CL2-UWaterloo/trajectory_planning_helpers.git",
+]
 dev = ["pytest>=8"]
 
 [tool.setuptools]

@@ -14,7 +14,7 @@ pip install -e ".[dev]"
 Use the core install for the simulation package only. Add `render` if you want
 the pyglet/OpenGL renderer, and add `dev` if you want the test tooling.
 Add `tools` if you want the plotting dependencies used by the race-line and
-legacy helper scripts.
+map-generation scripts.
 
 Combine extras when needed, for example `pip install -e ".[dev,render]"` if you
 want both the test tooling and the renderer in one install.
@@ -44,39 +44,51 @@ pytest -q
 ```
 
 The pytest suite exercises `F110Env` directly and ignores the old helper
-tests under `tests/`, while the manual helper programs live in
-[`scripts/f110_gym/`](/Users/josslei/projects/f1tenth_gym_jl/scripts/f110_gym).
-That keeps `pytest -q` focused on the real automated tests instead of the
-standalone demo and data-generation scripts.
+tests under `tests/`.
 
-If you want to run those helpers directly, execute the files in
-`scripts/f110_gym/` as scripts and pass the required arguments.
+## Race Line Optimization
 
-## Race Line Generation
-
-You can generate a minimum-curvature racing line from one of the bundled maps
-with:
+Generate a minimum-time optimized raceline from a track CSV with centerline
+and width columns:
 
 ```bash
-python3 scripts/generate_race_line.py \
-  --map_path gym/f110_gym/envs/maps/berlin.yaml \
-  --output /tmp/berlin_race_line.csv
+python scripts/optimize_mintime.py \
+  --track scripts/raceline_opt/inputs/tracks/berlin_2018.csv \
+  --output outputs/waypoints/berlin_mintime.csv \
+  --save_plot
 ```
 
-The output is a CSV with `x,y,yaw,speed` columns in world coordinates. The
-script extracts a centerline, measures left/right track width at every
-centerline point, optimizes lateral offsets with L-BFGS-B, then computes a
-curvature and acceleration-limited speed profile. The optimizer uses
-interpolated control offsets by default; the conservative defaults use
-`--spacing 0.15`, `--safety_margin_extra 0.10`, and `--control_stride 2`.
-Pass `--control_stride 1` to optimize every waypoint, or use a larger stride
-for faster generation. Add `--timing` to print elapsed time for each major
-processing step, and add `--visualize` to display the map, centerline, and
-generated line.
+Use `--stepsize_reg` to trade runtime for line quality. Smaller values create
+more mintime optimization nodes and consume exponentially more memory. The
+default config uses `1.0` m. Useful overrides are:
 
-The script uses the image path stored in the YAML by default; pass `--map_ext`
-if you want to override the image extension explicitly. If required arguments
-are missing or invalid, the script prints usage help before exiting.
+```bash
+# Very fast, rough line
+--stepsize_reg 10.0
+
+# Moderate quality, balanced speed
+--stepsize_reg 5.0
+
+# Default / higher quality
+--stepsize_reg 1.0
+```
+
+Use `--width_opt` to control boundary clearance. It is the effective vehicle
+width used by the optimizer, so larger values keep the optimized car center
+farther from the track edge. The default config uses `0.9` m.
+
+The script runs minimum-time optimization via CasADi + IPOPT. The output is
+a semicolon-delimited CSV in the standard raceline format:
+
+```text
+# s_m; x_m; y_m; psi_rad; kappa_radpm; vx_mps; ax_mps2
+```
+
+The input track is expected to provide the centerline and left/right widths;
+this script does not extract a centerline from an occupancy map. `--params`
+selects the vehicle and optimization config; the default is
+`configs/raceline/f110.ini`. Pass `--save_plot` to save a PNG next to the
+output CSV showing the raceline overlaid on the track boundaries and centerline.
 
 ## Notes
 
