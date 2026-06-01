@@ -142,6 +142,12 @@ def _parse_args() -> argparse.Namespace:
         help="Override config output trajectory spacing in meters",
     )
     p.add_argument(
+        "--step_non_reg",
+        type=int,
+        default=None,
+        help="Override config non-regular point sampling skip count",
+    )
+    p.add_argument(
         "--width_opt",
         type=float,
         default=None,
@@ -163,10 +169,12 @@ def main() -> None:
         pars["stepsize_opts"]["stepsize_prep"] = args.stepsize_prep
     if args.stepsize_reg is not None:
         pars["stepsize_opts"]["stepsize_reg"] = args.stepsize_reg
-    if args.stepsize_interp_after_opt is not None:
-        pars["stepsize_opts"]["stepsize_interp_after_opt"] = (
-            args.stepsize_interp_after_opt
-        )
+        if args.stepsize_interp_after_opt is not None:
+            pars["stepsize_opts"]["stepsize_interp_after_opt"] = (
+                args.stepsize_interp_after_opt
+            )
+        if args.step_non_reg is not None:
+            pars["optim_opts"]["step_non_reg"] = args.step_non_reg
     if args.width_opt is not None:
         pars["optim_opts"]["width_opt"] = args.width_opt
     if args.ipopt_tol is not None:

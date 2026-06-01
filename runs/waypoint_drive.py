@@ -9,13 +9,16 @@ import numpy as np
 
 import f110_gym  # noqa: F401 - registers f110-v0
 from controllers.controller_base import VehicleState
-from controllers.pure_pursuit import PurePursuit
+from controllers.pure_pursuit import DynamicLookaheadDistance, PurePursuit
 from f110_gym.viewer import F110Viewer
 from utils.waypoint_view import WaypointOverlay, initial_pose_from_waypoints
 
-MAP = "berlin"
-WAYPOINTS_CSV = "outputs/waypoints/berlin.csv"
-LOOKAHEAD = 1.0
+MAP = "outputs/maps/berlin_2018"
+WAYPOINTS_CSV = "outputs/waypoints/berlin_mintime.csv"
+MIN_LOOKAHEAD = 0.5
+MAX_LOOKAHEAD = 4.0
+LOOKAHEAD_RATIO = 8.0
+ZOOM = 2.0
 WINDOW_WIDTH = 1000
 WINDOW_HEIGHT = 800
 
@@ -36,16 +39,19 @@ def main() -> None:
     wheelbase = float(f110_env.params["lf"] + f110_env.params["lr"])
     controller = PurePursuit.from_csv(
         WAYPOINTS_CSV,
-        lookahead=LOOKAHEAD,
+        lookahead=DynamicLookaheadDistance(
+            MIN_LOOKAHEAD, MAX_LOOKAHEAD, LOOKAHEAD_RATIO
+        ),
         wheelbase=wheelbase,
     )
-    initial_pose = initial_pose_from_waypoints(controller.waypoints)
-    waypoint_overlay = WaypointOverlay(controller.waypoints)
+    initial_pose = initial_pose_from_waypoints(controller.waypoints[:, :2])
+    waypoint_overlay = WaypointOverlay(controller.waypoints[:, :2])
     viewer = F110Viewer.from_env(
         env.unwrapped,
         width=WINDOW_WIDTH,
         height=WINDOW_HEIGHT,
         target_fps=60.0,
+        initial_zoom=ZOOM,
         callbacks=[waypoint_overlay],
     )
 

@@ -1,27 +1,67 @@
 import numpy as np
 from pathlib import Path
 from numba import njit
-from typing import Optional
+from typing import Any, Optional
+from abc import ABC, abstractmethod
 
 from .controller_base import Controller, VehicleState, ControlCommand
 
-V_MIN = 0.0
-V_MAX = 20.0
-A_Y_MAX = 1.0489 * 9.81 / 2
+
+class LookaheadPolicy(ABC):
+    """Policy for determining the lookahead distance ahead of the vehicle."""
+
+    @abstractmethod
+    def get_lookahead_distance(self, *args: Any, **kwargs: Any) -> float: ...
+
+    def __call__(self, *args: Any, **kwargs: Any) -> float:
+        return self.get_lookahead_distance(*args, **kwargs)
+
+
+class FixedLookaheadDistance(LookaheadPolicy):
+    """Return a constant lookahead distance regardless of vehicle speed."""
+
+    def __init__(self, lookahead_distance: float = 1.0) -> None:
+        self.lookahead_distance = lookahead_distance
+
+    def get_lookahead_distance(self, *args: Any, **kwargs: Any) -> float:
+        return self.lookahead_distance
+
+
+class DynamicLookaheadDistance(LookaheadPolicy):
+    """Scale the lookahead distance proportionally to the current vehicle speed."""
+
+    def __init__(
+        self,
+        min_lookahead: float = 0.5,
+        max_lookahead: float = 4.0,
+        lookahead_ratio: float = 8.0,
+    ) -> None:
+        self.min = min_lookahead
+        self.max = max_lookahead
+        self.ratio = lookahead_ratio
+
+    def get_lookahead_distance(self, cur_speed: float) -> float:
+        return min(max(self.min, self.max * cur_speed / self.ratio), self.max)
 
 
 class PurePursuit(Controller):
     def __init__(
         self,
         waypoints: np.ndarray,
-        lookahead: float,
+        lookahead: float | LookaheadPolicy,
         wheelbase: float,
     ) -> None:
         self.vehicle_state = VehicleState(0, 0, 0, 0)
         self.waypoints = waypoints
-        self.l_d = lookahead
+        if isinstance(lookahead, (int, float)):
+            self.lookahead_policy: LookaheadPolicy = FixedLookaheadDistance(lookahead)
+        else:
+            self.lookahead_policy = lookahead
         self.L = wheelbase
 
+        # Index of the goal waypoint returned by the previous control step.
+        # Used as a search hint for nearest-waypoint lookup on the next step
+        # so we only scan a local window instead of the full track.
         self.last_idx: Optional[int] = None
 
         self.num_waypoints = waypoints.shape[0]
@@ -30,54 +70,68 @@ class PurePursuit(Controller):
 
     @classmethod
     def from_csv(
-        cls, csv_path: str | Path, lookahead: float, wheelbase: float
+        cls, csv_path: str | Path, lookahead: float | LookaheadPolicy, wheelbase: float
     ) -> "PurePursuit":
-        waypoints = np.loadtxt(csv_path, delimiter=",", skiprows=1, dtype=np.float64)
+        """Construct a controller from a semicolon-delimited waypoint CSV.
+
+        The CSV is expected to have columns s_m; x_m; y_m; psi_rad;
+        kappa_radpm; vx_mps; ax_mps2 (with a header row). Only x_m (col 1),
+        y_m (col 2), and vx_mps (col 5) are used.
+        """
+        waypoints = np.loadtxt(csv_path, delimiter=";", skiprows=1, dtype=np.float64)
         waypoints = np.atleast_2d(waypoints)
-        return cls(waypoints[:, :2], lookahead, wheelbase)
+        return cls(waypoints[:, [1, 2, 5]], lookahead, wheelbase)
 
     def reset(self) -> None:
+        """Reset internal state to origin and clear the cached waypoint index."""
         self.vehicle_state = VehicleState(0, 0, 0, 0)
         self.last_idx = None
 
     def update(self, vehicle_state: VehicleState) -> None:
+        """Receive the latest vehicle state from the environment."""
         self.vehicle_state = vehicle_state
 
     def control(self) -> ControlCommand:
-        p: np.ndarray = self._get_next_waypoint()
-        R = np.dot(p, p) / (2 * p[1])  # \frac{(p^x)^2 + (p^y)^2}{2p^y}
+        """Compute the steering and velocity command for the current state."""
+        p_goal, target_speed = self._lookahead_target()
+        R = np.dot(p_goal, p_goal) / (2 * p_goal[1])
         kappa = 1 / R
 
         delta = target_steering(kappa, self.L)
-        speed = target_speed(kappa)
-        return ControlCommand(steering=delta, velocity=speed)
+        return ControlCommand(steering=delta, velocity=target_speed)
 
-    def _get_next_waypoint(self) -> np.ndarray:
+    def _lookahead_target(self) -> tuple[np.ndarray, float]:
+        """Find the goal waypoint ahead of the vehicle and its target speed.
+
+        Uses the previously cached goal index as a hint for nearest-waypoint
+        search. On the first call (after reset) the full track is scanned;
+        subsequent calls search a local window around the last known position.
+        """
         position = np.array(
             (self.vehicle_state.x, self.vehicle_state.y), dtype=np.float64
         )
+        # On the first control cycle there is no prior goal index, so we pass
+        # -1 to signal nearest_waypoint_index to scan the entire track.
         last_idx = -1 if self.last_idx is None else self.last_idx
+        start_idx = nearest_waypoint_index(self.waypoints[:, :2], position, last_idx)
+        target_speed = float(self.waypoints[start_idx, 2])
+        lookahead = self.lookahead_policy(self.vehicle_state.speed)
         p_goal, goal_idx = get_goal_waypoint(
             self.waypoints,
             position,
             self.vehicle_state.yaw,
-            last_idx,
-            self.l_d,
+            start_idx,
+            lookahead,
             self.num_waypoints,
         )
         self.last_idx = goal_idx
-        return p_goal
+        return p_goal, target_speed
 
 
 @njit(cache=True)
 def target_steering(curvature: float, L: float) -> float:
+    """Steering angle for the given path curvature with the bicycle model."""
     return np.arctan(L * curvature)
-
-
-@njit(cache=True)
-def target_speed(curvature: float, eps: float = 1e-9) -> float:
-    speed = np.sqrt(A_Y_MAX / (np.abs(curvature) + eps))
-    return min(max(speed, V_MIN), V_MAX)
 
 
 @njit(cache=True)
@@ -85,15 +139,13 @@ def get_goal_waypoint(
     waypoints: np.ndarray,
     position: np.ndarray,
     yaw: float,
-    last_idx: int,
+    start_idx: int,
     lookahead: float,
     num_waypoints: int,
 ) -> tuple[np.ndarray, int]:
-    if last_idx < 0:
-        start_idx = nearest_waypoint_index(waypoints, position, 0, num_waypoints)
-    else:
-        start_idx = nearest_waypoint_index(waypoints, position, last_idx)
-
+    """Walk forward from start_idx, accumulating distance until the
+    lookahead threshold is reached. Return the resulting waypoint expressed
+    in the vehicle body frame and its index."""
     goal_idx = start_idx
     accumulated_distance = 0.0
     while accumulated_distance < lookahead:
@@ -105,7 +157,6 @@ def get_goal_waypoint(
 
     goal_world = waypoints[goal_idx, :2]
 
-    # Transpose to the body frame
     dx = goal_world[0] - position[0]
     dy = goal_world[1] - position[1]
 
@@ -124,6 +175,11 @@ def nearest_waypoint_index(
     start_idx: int,
     search_window: int = 200,
 ) -> int:
+    """Index of the waypoint closest to the vehicle position.
+
+    Searches a sliding window of size search_window around start_idx.
+    When start_idx is -1 the entire track is scanned.
+    """
     point_count = waypoints.shape[0]
     position_x = position[0]
     position_y = position[1]

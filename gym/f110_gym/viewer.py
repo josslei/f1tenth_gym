@@ -35,6 +35,7 @@ class ViewerConfig:
         width: Viewer window width in pixels.
         height: Viewer window height in pixels.
         target_fps: Maximum draw rate. Use ``None`` to render as fast as possible.
+        initial_zoom: Initial zoom multiplier (>1 zooms out, <1 zooms in).
     """
 
     map_path: str | Path
@@ -42,6 +43,7 @@ class ViewerConfig:
     width: int = 1000
     height: int = 800
     target_fps: float | None = 60.0
+    initial_zoom: float = 1.0
 
 
 class F110Viewer:
@@ -75,6 +77,7 @@ class F110Viewer:
         width: int = 1000,
         height: int = 800,
         target_fps: float | None = 60.0,
+        initial_zoom: float = 1.0,
         callbacks: list[RenderCallback] | None = None,
     ) -> F110Viewer:
         """Create a viewer configured from an ``F110Env`` instance.
@@ -85,6 +88,7 @@ class F110Viewer:
             height: Viewer window height in pixels.
             target_fps: Maximum draw rate. Use ``None`` to render as fast as
                 possible.
+            initial_zoom: Initial zoom multiplier (>1 zooms out).
             callbacks: Optional drawing callbacks.
 
         Returns:
@@ -96,6 +100,7 @@ class F110Viewer:
             width=width,
             height=height,
             target_fps=target_fps,
+            initial_zoom=initial_zoom,
         )
         return cls(config, callbacks=callbacks)
 
@@ -159,6 +164,10 @@ class F110Viewer:
         renderer = EnvRenderer(self.config.width, self.config.height)
         map_stem = str(Path(self.config.map_path).with_suffix(""))
         renderer.update_map(map_stem, self.config.map_ext)
+        if self.config.initial_zoom != 1.0:
+            renderer.zoom_level = self.config.initial_zoom
+            renderer.zoomed_width = self.config.initial_zoom * self.config.width
+            renderer.zoomed_height = self.config.initial_zoom * self.config.height
         self._renderer = renderer
         return renderer
 
