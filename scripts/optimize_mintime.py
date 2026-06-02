@@ -7,7 +7,7 @@ and produces a raceline CSV:
 
 Example:
     python scripts/optimize_mintime.py \\
-        --track scripts/raceline_opt/inputs/tracks/berlin_2018.csv \\
+        --track tracks/Spielberg/Spielberg_map.csv \\
         --output outputs/waypoints/berlin_mintime.csv \\
         --save_plot
 """
@@ -169,12 +169,12 @@ def main() -> None:
         pars["stepsize_opts"]["stepsize_prep"] = args.stepsize_prep
     if args.stepsize_reg is not None:
         pars["stepsize_opts"]["stepsize_reg"] = args.stepsize_reg
-        if args.stepsize_interp_after_opt is not None:
-            pars["stepsize_opts"]["stepsize_interp_after_opt"] = (
-                args.stepsize_interp_after_opt
-            )
-        if args.step_non_reg is not None:
-            pars["optim_opts"]["step_non_reg"] = args.step_non_reg
+    if args.stepsize_interp_after_opt is not None:
+        pars["stepsize_opts"]["stepsize_interp_after_opt"] = (
+            args.stepsize_interp_after_opt
+        )
+    if args.step_non_reg is not None:
+        pars["optim_opts"]["step_non_reg"] = args.step_non_reg
     if args.width_opt is not None:
         pars["optim_opts"]["width_opt"] = args.width_opt
     if args.ipopt_tol is not None:
@@ -210,8 +210,6 @@ def main() -> None:
         f"[green]{reftrack_interp.shape[0]}[/] optimization nodes"
     )
 
-    tpamap = str(_MODULE / "inputs" / "frictionmaps" / f"{args.track.stem}_tpamap.csv")
-
     pars["optim_opts"]["max_iter"] = args.mintime_max_iter
 
     _CONSOLE.log("Building and solving mintime NLP with IPOPT...")
@@ -224,7 +222,7 @@ def main() -> None:
                 coeffs_y=coeffs_y,
                 normvectors=normvec,
                 pars=pars,
-                tpamap_path=tpamap,
+                tpamap_path="",
                 tpadata_path=None,
                 export_path=None,
                 print_debug=False,

@@ -53,24 +53,21 @@ and width columns:
 
 ```bash
 python scripts/optimize_mintime.py \
-  --track scripts/raceline_opt/inputs/tracks/berlin_2018.csv \
-  --output outputs/waypoints/berlin_mintime.csv \
+  --track tracks/Spielberg/Spielberg_centerline.csv \
+  --output outputs/waypoints/Spielberg_mintime.csv \
   --save_plot
 ```
 
-Use `--stepsize_reg` to trade runtime for line quality. Smaller values create
-more mintime optimization nodes and consume exponentially more memory. The
-default config uses `1.0` m. Useful overrides are:
+Use `--stepsize_reg` and related flags to trade runtime for line quality.
+Smaller values create more optimization nodes and consume exponentially more
+memory. Useful presets are:
 
 ```bash
-# Very fast, rough line
---stepsize_reg 10.0
+# Fastest, coarsest line
+--stepsize_prep 1.0 --stepsize_reg 5.0 --stepsize_interp_after_opt 1.0 --step_non_reg 10
 
-# Moderate quality, balanced speed
---stepsize_reg 5.0
-
-# Default / higher quality
---stepsize_reg 1.0
+# Current defaults, finest quality (no flags needed)
+# --stepsize_prep 0.1 --stepsize_reg 0.3 --stepsize_interp_after_opt 0.2 --step_non_reg 0
 ```
 
 Use `--width_opt` to control boundary clearance. It is the effective vehicle
@@ -85,10 +82,30 @@ a semicolon-delimited CSV in the standard raceline format:
 ```
 
 The input track is expected to provide the centerline and left/right widths;
-this script does not extract a centerline from an occupancy map. `--params`
+this script does not extract a centerline from an occupancy map. Place external
+track CSVs under `tracks/`. `--params`
 selects the vehicle and optimization config; the default is
 `configs/raceline/f110.ini`. Pass `--save_plot` to save a PNG next to the
 output CSV showing the raceline overlaid on the track boundaries and centerline.
+
+### Generating a Compatible Map
+
+If a track does not ship with its own `map.yaml` and `map.png`, create them
+from the centerline CSV:
+
+```bash
+python scripts/generate_map.py \
+  tracks/Spielberg/Spielberg_centerline.csv \
+  -o outputs/maps/Spielberg \
+  -r 1.0
+```
+
+- `-o` sets the output prefix (produces `<prefix>.yaml` and `<prefix>.png`).
+- `-r` controls the resolution in meters per pixel (default 0.05; use a larger
+  value for big tracks to keep image dimensions reasonable).
+
+Pass the resulting YAML path (or the track's own map YAML) to the waypoint
+drive script, e.g. `MAP = "tracks/Spielberg/Spielberg_map"`.
 
 ## Notes
 

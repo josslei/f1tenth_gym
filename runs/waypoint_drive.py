@@ -13,12 +13,12 @@ from controllers.pure_pursuit import DynamicLookaheadDistance, PurePursuit
 from f110_gym.viewer import F110Viewer
 from utils.waypoint_view import WaypointOverlay, initial_pose_from_waypoints
 
-MAP = "outputs/maps/berlin_2018"
-WAYPOINTS_CSV = "outputs/waypoints/berlin_mintime.csv"
-MIN_LOOKAHEAD = 0.5
-MAX_LOOKAHEAD = 4.0
+MAP = "tracks/Spielberg/Spielberg_map"
+WAYPOINTS_CSV = "outputs/waypoints/Spielberg_mintime.csv"
+MIN_LOOKAHEAD = 1.0
+MAX_LOOKAHEAD = 2.0
 LOOKAHEAD_RATIO = 8.0
-ZOOM = 2.0
+ZOOM = 1.0  # > 1 -> Zoom out; < 1 -> Zoom in
 WINDOW_WIDTH = 1000
 WINDOW_HEIGHT = 800
 
@@ -37,11 +37,12 @@ def main() -> None:
     env = gym.make("f110-v0", map=MAP, num_agents=1)
     f110_env: Any = env.unwrapped
     wheelbase = float(f110_env.params["lf"] + f110_env.params["lr"])
+    lookahead_policy = DynamicLookaheadDistance(
+        MIN_LOOKAHEAD, MAX_LOOKAHEAD, LOOKAHEAD_RATIO
+    )
     controller = PurePursuit.from_csv(
         WAYPOINTS_CSV,
-        lookahead=DynamicLookaheadDistance(
-            MIN_LOOKAHEAD, MAX_LOOKAHEAD, LOOKAHEAD_RATIO
-        ),
+        lookahead=lookahead_policy,
         wheelbase=wheelbase,
     )
     initial_pose = initial_pose_from_waypoints(controller.waypoints[:, :2])

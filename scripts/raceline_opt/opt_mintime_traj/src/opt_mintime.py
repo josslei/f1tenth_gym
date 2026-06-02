@@ -6,15 +6,8 @@ import numpy as np
 import casadi as ca
 import trajectory_planning_helpers.calc_head_curv_num as calc_head_curv_num
 import trajectory_planning_helpers.calc_spline_lengths as calc_spline_lengths
-import trajectory_planning_helpers.calc_splines as calc_splines_tph
 import trajectory_planning_helpers.nonreg_sampling as nonreg_sampling_mod
-
-import opt_mintime_traj
-from opt_mintime_traj.src import (
-    approx_friction_map,
-    export_mintime_solution,
-    result_plots_mintime,
-)
+from helper_funcs_glob.src.prep_track import _calc_closed_splines_sparse
 
 
 def opt_mintime(
@@ -86,8 +79,8 @@ def opt_mintime(
 
         # relcalculate splines
         refpath_cl = np.vstack((reftrack[:, :2], reftrack[0, :2]))
-        coeffs_x, coeffs_y, a_interp, normvectors = calc_splines_tph.calc_splines(
-            path=refpath_cl
+        coeffs_x, coeffs_y, a_interp, normvectors = _calc_closed_splines_sparse(
+            refpath_cl
         )
 
     else:
@@ -147,24 +140,8 @@ def opt_mintime(
         "w_tr_right_interp", "linear", [steps], w_tr_right_cl
     )
 
-    # describe friction coefficients from friction map with linear equations or gaussian basis functions
-    if pars["optim_opts"]["var_friction"] is not None:
-        w_mue_fl, w_mue_fr, w_mue_rl, w_mue_rr, center_dist = (
-            approx_friction_map.approx_friction_map(
-                reftrack=reftrack,
-                normvectors=normvectors,
-                tpamap_path=tpamap_path,
-                tpadata_path=tpadata_path,
-                pars=pars,
-                dn=pars["optim_opts"]["dn"],
-                n_gauss=pars["optim_opts"]["n_gauss"],
-                print_debug=print_debug,
-                plot_debug=plot_debug,
-            )
-        )
-
     # ------------------------------------------------------------------------------------------------------------------
-    # DIRECT GAUSS-LEGENDRE COLLOCATION --------------------------------------------------------------------------------
+    # DIRECT GAUSS-LEGENDRE COLLOCATION -------------------------------------------------------------------------------
     # ------------------------------------------------------------------------------------------------------------------
 
     # degree of interpolating polynomial
@@ -240,25 +217,22 @@ def opt_mintime(
     xi = xi_s * xi_n
 
     if pars["pwr_params_mintime"]["pwr_behavior"]:
+        from opt_mintime_traj.powertrain_src.src.Battery import BattModel
+        from opt_mintime_traj.powertrain_src.src.EMachine import EMachineModel
+        from opt_mintime_traj.powertrain_src.src.Inverter import InverterModel
+        from opt_mintime_traj.powertrain_src.src.Radiators import RadiatorModel
+
         # Initialize e-machine object
-        machine = opt_mintime_traj.powertrain_src.src.EMachine.EMachineModel(
-            pwr_pars=pars["pwr_params_mintime"]
-        )
+        machine = EMachineModel(pwr_pars=pars["pwr_params_mintime"])
 
         # Initialize battery object
-        batt = opt_mintime_traj.powertrain_src.src.Battery.BattModel(
-            pwr_pars=pars["pwr_params_mintime"]
-        )
+        batt = BattModel(pwr_pars=pars["pwr_params_mintime"])
 
         # Initialize inverter object
-        inverter = opt_mintime_traj.powertrain_src.src.Inverter.InverterModel(
-            pwr_pars=pars["pwr_params_mintime"]
-        )
+        inverter = InverterModel(pwr_pars=pars["pwr_params_mintime"])
 
         # Initialize radiator objects (2 in total)
-        radiators = opt_mintime_traj.powertrain_src.src.Radiators.RadiatorModel(
-            pwr_pars=pars["pwr_params_mintime"]
-        )
+        radiators = RadiatorModel(pwr_pars=pars["pwr_params_mintime"])
 
         # scaling factors for state variables
         x_s = np.array(
@@ -995,43 +969,10 @@ def opt_mintime(
         ubg.append([veh["power_max"] / (f_drive_s * v_s)])
 
         # get constant friction coefficient
-        if pars["optim_opts"]["var_friction"] is None:
-            mue_fl = pars["optim_opts"]["mue"]
-            mue_fr = pars["optim_opts"]["mue"]
-            mue_rl = pars["optim_opts"]["mue"]
-            mue_rr = pars["optim_opts"]["mue"]
-
-        # calculate variable friction coefficients along the reference line (regression with linear equations)
-        elif pars["optim_opts"]["var_friction"] == "linear":
-            # friction coefficient for each tire
-            mue_fl = w_mue_fl[k + 1, 0] * Xk[3] * n_s + w_mue_fl[k + 1, 1]
-            mue_fr = w_mue_fr[k + 1, 0] * Xk[3] * n_s + w_mue_fr[k + 1, 1]
-            mue_rl = w_mue_rl[k + 1, 0] * Xk[3] * n_s + w_mue_rl[k + 1, 1]
-            mue_rr = w_mue_rr[k + 1, 0] * Xk[3] * n_s + w_mue_rr[k + 1, 1]
-
-        # calculate variable friction coefficients along the reference line (regression with gaussian basis functions)
-        elif pars["optim_opts"]["var_friction"] == "gauss":
-            # gaussian basis functions
-            sigma = 2.0 * center_dist[k + 1, 0]
-            n_gauss = pars["optim_opts"]["n_gauss"]
-            n_q = (
-                np.linspace(-n_gauss, n_gauss, 2 * n_gauss + 1) * center_dist[k + 1, 0]
-            )
-
-            gauss_basis = []
-            for i in range(2 * n_gauss + 1):
-                gauss_basis.append(
-                    ca.exp(-((Xk[3] * n_s - n_q[i]) ** 2) / (2 * (sigma**2)))
-                )
-            gauss_basis = ca.vertcat(*gauss_basis)
-
-            mue_fl = ca.dot(w_mue_fl[k + 1, :-1], gauss_basis) + w_mue_fl[k + 1, -1]
-            mue_fr = ca.dot(w_mue_fr[k + 1, :-1], gauss_basis) + w_mue_fr[k + 1, -1]
-            mue_rl = ca.dot(w_mue_rl[k + 1, :-1], gauss_basis) + w_mue_rl[k + 1, -1]
-            mue_rr = ca.dot(w_mue_rr[k + 1, :-1], gauss_basis) + w_mue_rr[k + 1, -1]
-
-        else:
-            raise ValueError("No friction coefficients are available!")
+        mue_fl = pars["optim_opts"]["mue"]
+        mue_fr = pars["optim_opts"]["mue"]
+        mue_rl = pars["optim_opts"]["mue"]
+        mue_rr = pars["optim_opts"]["mue"]
 
         # path constraint: Kamm's Circle for each wheel
         g.append(
@@ -1381,6 +1322,8 @@ def opt_mintime(
 
     # export data to CSVs
     if export_path is not None:
+        import opt_mintime_traj.src.export_mintime_solution as export_mintime_solution
+
         export_mintime_solution.export_mintime_solution(
             file_path=export_path,
             pars=pars,
@@ -1403,6 +1346,8 @@ def opt_mintime(
     # ------------------------------------------------------------------------------------------------------------------
 
     if plot_debug:
+        import opt_mintime_traj.src.result_plots_mintime as result_plots_mintime
+
         result_plots_mintime.result_plots_mintime(
             pars=pars,
             reftrack=reftrack,
