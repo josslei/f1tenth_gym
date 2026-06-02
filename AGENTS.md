@@ -1,84 +1,90 @@
-# AGENTS.md
+# PROJECT KNOWLEDGE BASE
 
-## Setup
+**Generated:** 2026-06-02 11:47:11 CDT
+**Commit:** cbab2fa
+**Branch:** main
 
-```bash
-pip install -e ".[dev,render]"   # full dev install with renderer
-pip install -e .                 # core only
+## OVERVIEW
+
+Gymnasium-compatible F1TENTH simulator with optional realtime rendering, pure-pursuit control, map generation, and minimum-time raceline tooling. Python 3.11+; package source is split across non-standard top-level directories.
+
+## STRUCTURE
+
+```text
+./
+├── gym/f110_gym/          # installed as f110_gym; env, models, viewer, bundled maps
+├── controllers/           # installed as controllers; controller ABC + PurePursuit
+├── utils/                 # installed as utils; waypoint/viewer helpers
+├── scripts/               # CLI tools; raceline optimizer and map generation
+├── configs/raceline/      # minimum-time optimization parameters
+├── tests/                 # pytest suite; injects gym/ into sys.path
+├── tracks/                # git submodule: f1tenth racetrack CSV/YAML/PNG assets
+└── outputs/               # gitignored generated racelines, plots, maps
 ```
 
-Requires Python 3.11+.
+## WHERE TO LOOK
 
-## Lint / TypeCheck / Test
+| Task | Location | Notes |
+|------|----------|-------|
+| Gymnasium env API | `gym/f110_gym/envs/f110_env.py` | `F110Env`; `reset`, `step`, map resolution, rendering hooks |
+| Simulator internals | `gym/f110_gym/envs/` | See local `AGENTS.md`; numba-heavy dynamics/scan/collision code |
+| Realtime viewer | `gym/f110_gym/viewer.py`, `gym/f110_gym/envs/rendering.py` | `pyglet` is optional via `render` extra |
+| Controllers | `controllers/controller_base.py`, `controllers/pure_pursuit.py` | Waypoint CSV format consumed by `PurePursuit.from_csv` |
+| Waypoint demo | `runs/waypoint_drive.py` | Uses `outputs/waypoints/Spielberg_mintime.csv` and `tracks` submodule map |
+| Raceline CLI | `scripts/optimize_mintime.py` | Public wrapper around nested legacy optimizer |
+| Raceline internals | `scripts/raceline_opt/` | See local `AGENTS.md`; CasADi/IPOPT, helper imports, constant friction |
+| Map generation | `scripts/generate_map.py` | Converts centerline CSV to YAML+PNG occupancy-grid assets |
+| Tests | `tests/` | Gym API, dynamics, scan sim, collision checks |
 
-Coding style is enforced by pre-commit hooks defined in `.pre-commit-config.yaml`:
-ruff (default rules), ruff-format, pyright, and basic checks (trailing-whitespace,
-end-of-file-fixer, check-yaml, check-merge-conflict). No custom `[tool.ruff]`
-section — ruff uses its defaults.
+## CODE MAP
 
-After file-editing tool use, `.codex/hooks/post_edit_checks.py` runs pre-commit
-on only the changed files. To verify manually, run pre-commit on just the files
-you touched:
+| Symbol | Type | Location | Role |
+|--------|------|----------|------|
+| `F110Env` | class | `gym/f110_gym/envs/f110_env.py` | Main Gymnasium environment; registered as `f110-v0` |
+| `Simulator` | class | `gym/f110_gym/envs/base_classes.py` | Multi-agent stepping, observations, collision checks |
+| `RaceCar` | class | `gym/f110_gym/envs/base_classes.py` | Per-agent state, scan update, TTC, control integration |
+| `Integrator` | enum-like class | `gym/f110_gym/envs/base_classes.py` | `Euler` / `RK4` selector |
+| `ScanSimulator2D` | class | `gym/f110_gym/envs/laser_models.py` | Distance-transform scan model |
+| `vehicle_dynamics_st` | numba function | `gym/f110_gym/envs/dynamic_models.py` | Single-track vehicle dynamics |
+| `collision_multiple` | numba function | `gym/f110_gym/envs/collision_models.py` | Multi-agent collision checks |
+| `F110Viewer` | class | `gym/f110_gym/viewer.py` | Realtime viewer facade over renderer |
+| `Controller` | ABC | `controllers/controller_base.py` | Controller contract |
+| `PurePursuit` | class | `controllers/pure_pursuit.py` | Reference waypoint follower |
+| `main` | function | `scripts/optimize_mintime.py` | Minimum-time raceline command |
+
+## CONVENTIONS
+
+- Source layout is non-standard: `pyproject.toml` maps `gym/f110_gym` to `f110_gym`, plus top-level `controllers` and `utils` packages.
+- Importing `f110_gym` registers `f110-v0`; tests and demos rely on that import side effect.
+- `tests/conftest.py` inserts `gym/` into `sys.path` and reloads `f110_gym`; run pytest from repo root.
+- `scripts/optimize_mintime.py` inserts `scripts/raceline_opt` into `sys.path` for legacy nested imports.
+- `pyrightconfig.json` adds `scripts/raceline_opt` to `extraPaths` and excludes `gym/f110_gym/envs/f110_env_backup.py`.
+- Ruff has no custom config; defaults come from the pre-commit hook.
+- Bundled package map data must stay under `gym/f110_gym/envs/maps/` to be included by setuptools package-data.
+
+## ANTI-PATTERNS (THIS PROJECT)
+
+- Do not copy from `gym/f110_gym/envs/f110_env_backup.py`; it is a legacy snapshot excluded from pyright.
+- Do not commit generated outputs, waypoints, plots, numba cache, or backup/scratch files; `.gitignore` covers `outputs/`, `*.nbc`, `*.nbi`, `*_backup.py`.
+- Do not assume `tracks/` is ordinary source; it is a git submodule (`git@github.com:f1tenth/f1tenth_racetracks`).
+- Do not move raceline internals without updating `sys.path` insertion, pyright extra paths, and nested imports together.
+- Do not document variable-friction raceline support unless code and assets are restored; current wrapper forces constant friction.
+
+## COMMANDS
 
 ```bash
-pre-commit run --files <changed-file>...
-```
-
-To run the tests:
-
-```bash
+pip install -e .
+pip install -e ".[dev,render]"
+pip install -e ".[tools]"
 pytest -q
+pre-commit run --files <changed-file>...
+python scripts/optimize_mintime.py --track tracks/Spielberg/Spielberg_centerline.csv --output outputs/waypoints/Spielberg_mintime.csv --save_plot
+python scripts/generate_map.py tracks/Spielberg/Spielberg_centerline.csv -o outputs/maps/Spielberg -r 1.0
 ```
 
-## Architecture
+## NOTES
 
-Single-package repo. Source lives in non-standard locations:
-
-| Source dir          | Installed as    | Key contents                          |
-|---------------------|-----------------|---------------------------------------|
-| `gym/f110_gym/`     | `f110_gym`      | `F110Env`, viewer, env models, maps   |
-| `controllers/`      | `controllers`   | `Controller` ABC, `PurePursuit`       |
-| `utils/`            | `utils`         | utility helpers                       |
-
-`gym/f110_gym/__init__.py` registers `f110-v0` with Gymnasium on import.
-
-## Key files
-
-- `gym/f110_gym/envs/f110_env.py` — `F110Env(gym.Env)`, the main environment
-- `gym/f110_gym/envs/base_classes.py` — `Simulator`, `Integrator` (Euler/RK4)
-- `gym/f110_gym/envs/dynamic_models.py` — single-track vehicle dynamics (numba `@njit`)
-- `gym/f110_gym/envs/collision_models.py` — GJK collision detection (numba)
-- `gym/f110_gym/envs/laser_models.py` — 2D LIDAR simulation (numba)
-- `gym/f110_gym/viewer.py` — `F110Viewer`, `ViewerConfig` for realtime rendering
-- `controllers/controller_base.py` — `VehicleState`, `ControlCommand`, `Controller` ABC
-- `controllers/pure_pursuit.py` — reference pure pursuit controller
-
-## Excluded from type checking
-
-- `gym/f110_gym/envs/f110_env_backup.py` — legacy env snapshot
-
-Listed in `pyrightconfig.json` excludes.
-
-## Testing notes
-
-- `tests/conftest.py` injects `gym/` into `sys.path` so `f110_gym` import works; run tests from repo root
-- `test_gymnasium_api.py` tests the Gymnasium registration, `reset`, `step`, and `make_viewer`
-- `test_dynamics.py`, `test_scan_sim.py`, `test_collision_checks.py` are `unittest.TestCase`-style tests that pytest collects automatically
-- `tests/f110_gym/legacy_scan.npz` is a binary test fixture for scan simulator benchmarks
-
-## Maps
-
-Maps live in `gym/f110_gym/envs/maps/`. Each map is a YAML file with metadata plus a PNG or PGM image. Bundled maps: `berlin`, `levine`, `skirk`, `stata_basement`, `vegas`.
-
-## Numba
-
-Performance-critical models use `@njit(cache=True)`. If you change these functions, delete `__pycache__/` and any `.nbc`/`.nbi` files so numba re-JITs.
-
-## Race line scripts
-
-- `scripts/optimize_raceline.py` — main CLI for minimum-curvature raceline generation. Requires `pip install -e ".[tools]"` (matplotlib, casadi, rich, trajectory_planning_helpers).
-- `scripts/raceline_opt/` — legacy raceline optimization pipeline (global traj optimization, friction mapping, helper functions).
-
-## Outputs
-
-- `outputs/` is gitignored; use it for generated race lines, plots, etc.
+- Performance-critical models use `@njit(cache=True)`. If numba-backed behavior seems stale after edits, clear `__pycache__/` plus `.nbc`/`.nbi` artifacts.
+- Raceline defaults live in `configs/raceline/f110.ini`; CLI flags override step sizes, `width_opt`, `step_non_reg`, IPOPT iterations, and tolerance.
+- Finer raceline step sizes can trigger `prep_track()` normal-crossing failures before IPOPT starts; increasing `reg_smooth_opts.s_reg` or coarsening spacing changes geometry.
+- `tests/f110_gym/legacy_scan.npz` is an intentional binary fixture for scan regression checks.
