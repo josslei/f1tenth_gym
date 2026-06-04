@@ -5,6 +5,10 @@ from typing import Any, Optional
 from abc import ABC, abstractmethod
 
 from .controller_base import Controller, VehicleState, ControlCommand
+from utils.waypoint_utils import nearest_waypoint_index
+
+
+SEARCH_WINDOW: int = 200
 
 
 class LookaheadPolicy(ABC):
@@ -110,10 +114,9 @@ class PurePursuit(Controller):
         position = np.array(
             (self.vehicle_state.x, self.vehicle_state.y), dtype=np.float64
         )
-        # On the first control cycle there is no prior goal index, so we pass
-        # -1 to signal nearest_waypoint_index to scan the entire track.
-        last_idx = -1 if self.last_idx is None else self.last_idx
-        start_idx = nearest_waypoint_index(self.waypoints[:, :2], position, last_idx)
+        start_idx = nearest_waypoint_index(
+            self.waypoints[:, :2], position, self.last_idx, SEARCH_WINDOW
+        )
         target_speed = float(self.waypoints[start_idx, 2])
         lookahead = self.lookahead_policy(self.vehicle_state.speed)
         p_goal, goal_idx = get_goal_waypoint(
@@ -166,47 +169,3 @@ def get_goal_waypoint(
     p_goal[0] = cos_yaw * dx + sin_yaw * dy
     p_goal[1] = -sin_yaw * dx + cos_yaw * dy
     return p_goal, goal_idx
-
-
-@njit(cache=True)
-def nearest_waypoint_index(
-    waypoints: np.ndarray,
-    position: np.ndarray,
-    start_idx: int,
-    search_window: int = 200,
-) -> int:
-    """Index of the waypoint closest to the vehicle position.
-
-    Searches a sliding window of size search_window around start_idx.
-    When start_idx is -1 the entire track is scanned.
-    """
-    point_count = waypoints.shape[0]
-    position_x = position[0]
-    position_y = position[1]
-
-    if search_window <= 0 or search_window >= point_count:
-        best_idx = 0
-        best_distance_sq = np.inf
-        for idx in range(point_count):
-            dx = waypoints[idx, 0] - position_x
-            dy = waypoints[idx, 1] - position_y
-            distance_sq = dx * dx + dy * dy
-            if distance_sq < best_distance_sq:
-                best_distance_sq = distance_sq
-                best_idx = idx
-        return best_idx
-
-    half_window = search_window // 2
-    first_offset = -half_window
-    last_offset = search_window - half_window
-    best_idx = start_idx % point_count
-    best_distance_sq = np.inf
-    for offset in range(first_offset, last_offset):
-        idx = (start_idx + offset) % point_count
-        dx = waypoints[idx, 0] - position_x
-        dy = waypoints[idx, 1] - position_y
-        distance_sq = dx * dx + dy * dy
-        if distance_sq < best_distance_sq:
-            best_distance_sq = distance_sq
-            best_idx = idx
-    return best_idx
