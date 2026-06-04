@@ -20,10 +20,10 @@ export const PostEditChecks: Plugin = async ({ $, directory }) => {
 
       let files: string[] = []
 
-      if (input.tool === "apply_patch" && output.args?.patchText) {
-        files = extractPatchFiles(output.args.patchText)
-      } else if (output.args?.filePath) {
-        files = [output.args.filePath]
+      if (input.tool === "apply_patch" && input.args?.patchText) {
+        files = extractPatchFiles(input.args.patchText)
+      } else if (input.args?.filePath) {
+        files = [input.args.filePath]
       }
 
       if (files.length === 0) return
