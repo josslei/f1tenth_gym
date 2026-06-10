@@ -54,27 +54,31 @@ Install the optional RL and dev dependencies with:
 pip install -e ".[rl,dev]"
 ```
 
-Run a tiny Lightning PPO smoke train with:
+Train a Lightning PPO policy with:
 
 ```bash
-python runs/train_ppo.py --epochs 10 --total-timesteps 64 --rollout-steps 32 --output-dir outputs/rl/smoke --no-progress-bar
+python runs/train_ppo.py \
+  --epochs 100 \
+  --total-timesteps 4096 \
+  --rollout-steps 128 \
+  --output-dir outputs/rl/ppo_vegas
 ```
 
-Load `outputs/rl/smoke/final_model.pt` with `controllers.PPOController` to drive
+Load `outputs/rl/ppo_vegas/final_model.pt` with `controllers.PPOController` to drive
 the trained policy in the simulator viewer.
 
-The 64 timesteps smoke train only tests integration. It does not prove driving
-quality. It does not prove policy quality. The first signal is the episode
-return in `outputs/rl/smoke/metrics.jsonl`, and improvement is not guaranteed.
+This is still an experimental baseline, not a tuned controller. The first signal
+is the episode return in `outputs/rl/ppo_vegas/metrics.jsonl`; improvement is
+not guaranteed without reward and hyperparameter tuning.
 Per-update reward, loss, action, value, entropy, KL, and clip-fraction metrics
-are written to `outputs/rl/smoke/updates.jsonl`, Lightning CSV logs under
-`outputs/rl/smoke/lightning_csv/`, and TensorBoard event files under
-`outputs/rl/smoke/tensorboard/`.
+are written to `outputs/rl/ppo_vegas/updates.jsonl`, Lightning CSV logs under
+`outputs/rl/ppo_vegas/lightning_csv/`, and TensorBoard event files under
+`outputs/rl/ppo_vegas/tensorboard/`.
 
 Visualize the training metrics with TensorBoard:
 
 ```bash
-tensorboard --logdir outputs/rl/smoke/tensorboard
+tensorboard --logdir outputs/rl/ppo_vegas/tensorboard
 ```
 
 Generated PPO outputs live under ignored `outputs/rl/` paths and should not be

@@ -480,41 +480,14 @@ def _make_module(
                 "value/prediction_mean": rollout_stats["value_mean"],
                 "value/prediction_std": rollout_stats["value_std"],
             }
-            progress_key = (
-                "reward/mean_episode_return_10"
-                if rollout_stats["mean_episode_return"] is not None
-                else "reward/rollout_mean"
-            )
             loggable_metrics = {
-                key: value
-                for key, value in update_metrics.items()
-                if value is not None and key not in {progress_key, "train/loss_total"}
+                key: value for key, value in update_metrics.items() if value is not None
             }
             self.log_dict(
-                loggable_metrics, prog_bar=False, on_step=True, on_epoch=False
-            )
-            if rollout_stats["mean_episode_return"] is not None:
-                self.log(
-                    progress_key,
-                    rollout_stats["mean_episode_return"],
-                    prog_bar=True,
-                    on_step=True,
-                    on_epoch=False,
-                )
-            else:
-                self.log(
-                    progress_key,
-                    rollout_stats["reward_mean"],
-                    prog_bar=True,
-                    on_step=True,
-                    on_epoch=False,
-                )
-            self.log(
-                "train/loss_total",
-                loss,
-                prog_bar=True,
+                loggable_metrics,
                 on_step=True,
                 on_epoch=False,
+                prog_bar=False,
             )
             update_metrics["global_step"] = int(self.global_step)
             self._write_update_metrics(update_metrics)
