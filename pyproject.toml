@@ -25,6 +25,7 @@ tools = [
   "trajectory_planning_helpers @ git+https://github.com/CL2-UWaterloo/trajectory_planning_helpers.git",
 ]
 dev = ["pytest>=8"]
+rl = ["torch>=2.2", "lightning>=2.2", "tensorboard>=2.16"]
 
 [tool.setuptools]
 package-dir = {f110_gym = "gym/f110_gym", controllers = "controllers"}

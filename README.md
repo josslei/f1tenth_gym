@@ -46,6 +46,40 @@ pytest -q
 The pytest suite exercises `F110Env` directly and ignores the old helper
 tests under `tests/`.
 
+## PPO Controller Experiment
+
+Install the optional RL and dev dependencies with:
+
+```bash
+pip install -e ".[rl,dev]"
+```
+
+Run a tiny Lightning PPO smoke train with:
+
+```bash
+python runs/train_ppo.py --epochs 10 --total-timesteps 64 --rollout-steps 32 --output-dir outputs/rl/smoke --no-progress-bar
+```
+
+Load `outputs/rl/smoke/final_model.pt` with `controllers.PPOController` to drive
+the trained policy in the simulator viewer.
+
+The 64 timesteps smoke train only tests integration. It does not prove driving
+quality. It does not prove policy quality. The first signal is the episode
+return in `outputs/rl/smoke/metrics.jsonl`, and improvement is not guaranteed.
+Per-update reward, loss, action, value, entropy, KL, and clip-fraction metrics
+are written to `outputs/rl/smoke/updates.jsonl`, Lightning CSV logs under
+`outputs/rl/smoke/lightning_csv/`, and TensorBoard event files under
+`outputs/rl/smoke/tensorboard/`.
+
+Visualize the training metrics with TensorBoard:
+
+```bash
+tensorboard --logdir outputs/rl/smoke/tensorboard
+```
+
+Generated PPO outputs live under ignored `outputs/rl/` paths and should not be
+committed.
+
 ## Race Line Optimization
 
 Generate a minimum-time optimized raceline from a track CSV with centerline
