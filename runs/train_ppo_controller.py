@@ -51,11 +51,35 @@ def parse_args() -> argparse.Namespace:
 # ── Task-specific reward ──────────────────────────────────────────────────────
 
 
-def reward_controller(obs: dict[str, Any], terminated: bool) -> float:
-    ego = int(obs["ego_idx"])
-    speed = float(obs["linear_vels_x"][ego])
-    collision = float(obs["collisions"][ego])
-    return speed - 10.0 * collision + (10.0 if terminated and collision == 0.0 else 0.0)
+def make_reward_controller(
+    reward_cfg: dict[str, Any],
+) -> Any:
+    speed_coef = float(reward_cfg.get("speed_coef", 2.0))
+    clearance_threshold = float(reward_cfg.get("clearance_threshold", 1.5))
+    proximity_threshold = float(reward_cfg.get("proximity_threshold", 0.5))
+    proximity_coef = float(reward_cfg.get("proximity_coef", 2.0))
+    collision_penalty = float(reward_cfg.get("collision_penalty", 1.0))
+    lap_bonus = float(reward_cfg.get("lap_bonus", 1.0))
+
+    def _reward(obs: dict[str, Any], terminated: bool) -> float:
+        ego = int(obs["ego_idx"])
+        speed = float(obs["linear_vels_x"][ego])
+        collision = float(obs["collisions"][ego])
+
+        if collision:
+            return -collision_penalty
+        if terminated:
+            return lap_bonus
+
+        min_scan = float(np.min(obs["scans"][ego]))
+        clearance_factor = np.clip(min_scan / clearance_threshold, 0.0, 1.0)
+        proximity_penalty = 0.0
+        if min_scan < proximity_threshold:
+            proximity_penalty = (proximity_threshold - min_scan) * proximity_coef
+
+        return speed * speed_coef * clearance_factor - proximity_penalty
+
+    return _reward
 
 
 # ── Checkpointing ─────────────────────────────────────────────────────────────
@@ -124,7 +148,7 @@ def main() -> None:
         action_fn=lambda a_t, e: scale_action(
             a_t.squeeze(0).detach().cpu().numpy(), e, action_config
         ),
-        reward_fn=reward_controller,
+        reward_fn=make_reward_controller(config.reward),
         reset_fn=lambda: {"poses": reset_pose.copy()},
         episode_returns=episode_returns,
         k_epochs=config.training.k_epochs,

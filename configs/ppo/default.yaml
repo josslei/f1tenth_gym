@@ -17,7 +17,13 @@ action:
   velocity_min: 0.0
   velocity_max: 8.0
 
-reward: {}
+reward:
+  speed_coef: 2.0               # multiplier for forward speed reward
+  clearance_threshold: 1.5      # min scan (m) at which clearance_factor = 1.0
+  proximity_threshold: 0.5      # scan (m) below which proximity penalty activates
+  proximity_coef: 2.0           # multiplier for proximity penalty
+  collision_penalty: 1.0        # penalty for collision
+  lap_bonus: 1.0                # bonus for clean lap completion
 
 policy:
   name: GaussianActorCritic
