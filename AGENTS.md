@@ -61,6 +61,7 @@ Gymnasium-compatible F1TENTH simulator with optional realtime rendering, pure-pu
 - `pyrightconfig.json` adds `scripts/raceline_opt` to `extraPaths` and excludes `gym/f110_gym/envs/f110_env_backup.py`.
 - Ruff has no custom config; defaults come from the pre-commit hook.
 - Bundled package map data must stay under `gym/f110_gym/envs/maps/` to be included by setuptools package-data.
+- **Assume-correct, don't guard.** Functions define a fixed input contract (shape, type, format) documented in their signatures and docstrings. They trust callers to honour it. Do **not** write `if x is not None` guards, `isinstance` checks, shape validation, or defensive `ValueError`s inside implementation code.
 
 ## ANTI-PATTERNS (THIS PROJECT)
 

@@ -79,6 +79,7 @@ venv.bak/
 .cursor/
 .claude/
 .codex/*
+.omo/
 !.codex/config.toml
 !.codex/requirements.toml
 !.codex/hooks/
