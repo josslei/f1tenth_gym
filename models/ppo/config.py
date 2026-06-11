@@ -36,6 +36,7 @@ class RuntimeConfig:
     rollout_steps: int
     progress_bar: bool
     num_envs: int
+    checkpoint_every_n_epochs: int = 50
 
 
 @dataclass(frozen=True)

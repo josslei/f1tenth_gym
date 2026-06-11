@@ -12,13 +12,14 @@ import argparse
 import json
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import gymnasium as gym
 import lightning as pl
 import numpy as np
 import torch
 from lightning.pytorch.loggers import TensorBoardLogger
+from lightning.pytorch.callbacks import Callback
 
 import f110_gym  # noqa: F401 - registers f110-v0
 from models.policies import Policy, make_policy
@@ -86,12 +87,50 @@ def make_reward_controller(
 # ── Checkpointing ─────────────────────────────────────────────────────────────
 
 
+class DeployableCheckpoint(Callback):
+    """Save deployable policy ``.pt`` checkpoints every N epochs.
+
+    Each checkpoint is a flat dict loadable by ``PPOController.from_checkpoint()``,
+    identical to what ``save_policy()`` produces at the end of training.
+    """
+
+    def __init__(
+        self,
+        dirpath: Path,
+        every_n_epochs: int,
+        policy_config: PolicyConfig,
+        obs_dim: int,
+        action_dim: int,
+    ) -> None:
+        self.dirpath = Path(dirpath)
+        self.every_n_epochs = every_n_epochs
+        self.policy_config = policy_config
+        self.obs_dim = obs_dim
+        self.action_dim = action_dim
+
+    def on_train_epoch_end(
+        self, trainer: pl.Trainer, pl_module: pl.LightningModule
+    ) -> None:
+        epoch = trainer.current_epoch + 1
+        if epoch % self.every_n_epochs == 0:
+            self.dirpath.mkdir(parents=True, exist_ok=True)
+            save_policy(
+                self.dirpath,
+                cast(Policy, pl_module.policy),
+                policy_config=self.policy_config,
+                obs_dim=self.obs_dim,
+                action_dim=self.action_dim,
+                filename=f"policy-epoch-{epoch:04d}.pt",
+            )
+
+
 def save_policy(
     output_dir: Path,
     policy: Policy,
     policy_config: PolicyConfig,
     obs_dim: int,
     action_dim: int,
+    filename: str = "final_model.pt",
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     torch.save(
@@ -106,7 +145,7 @@ def save_policy(
             "policy": asdict(policy_config),
             "policy_state_dict": policy.state_dict(),
         },
-        output_dir / "final_model.pt",
+        output_dir / filename,
     )
 
 
@@ -178,11 +217,18 @@ def main() -> None:
     )
     datamodule = RolloutDataModule(dataset)
     logger = TensorBoardLogger(save_dir=output_dir, name="tensorboard")
+    checkpoint_callback = DeployableCheckpoint(
+        dirpath=output_dir / "checkpoints",
+        every_n_epochs=config.runtime.checkpoint_every_n_epochs,
+        policy_config=config.policy,
+        obs_dim=obs_dim,
+        action_dim=action_dim,
+    )
     trainer = pl.Trainer(
         max_epochs=ppo_iterations,
         enable_progress_bar=config.runtime.progress_bar,
         logger=logger,
-        enable_checkpointing=False,
+        callbacks=[checkpoint_callback],
     )
     trainer.fit(module, datamodule=datamodule)
 
