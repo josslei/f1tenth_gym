@@ -57,28 +57,25 @@ pip install -e ".[rl,dev]"
 Train a Lightning PPO policy with:
 
 ```bash
-python runs/train_ppo.py \
-  --epochs 100 \
-  --total-timesteps 4096 \
-  --rollout-steps 128 \
-  --output-dir outputs/rl/ppo_vegas
+python runs/train_ppo_controller.py --config configs/ppo/default.yaml
 ```
 
-Load `outputs/rl/ppo_vegas/final_model.pt` with `controllers.PPOController` to drive
-the trained policy in the simulator viewer.
+The config owns the map, PPO iteration count, rollout length, seed, output path,
+observation settings, action bounds, policy selection, and PPO hyperparameters.
+The default config uses `map: Spielberg`, resolved from `tracks/Spielberg/`, and writes
+`outputs/rl/ppo_spielberg/final_model.pt` with the policy state
+dict and selected policy config. A runtime controller loader is not yet implemented.
 
 This is still an experimental baseline, not a tuned controller. The first signal
-is the episode return in `outputs/rl/ppo_vegas/metrics.jsonl`; improvement is
+is the episode return in `outputs/rl/ppo_spielberg/metrics.jsonl`; improvement is
 not guaranteed without reward and hyperparameter tuning.
-Per-update reward, loss, action, value, entropy, KL, and clip-fraction metrics
-are written to `outputs/rl/ppo_vegas/updates.jsonl`, Lightning CSV logs under
-`outputs/rl/ppo_vegas/lightning_csv/`, and TensorBoard event files under
-`outputs/rl/ppo_vegas/tensorboard/`.
-
-Visualize the training metrics with TensorBoard:
+Per-update episode returns are appended to
+`outputs/rl/ppo_spielberg/metrics.jsonl`.
+TensorBoard event files are written under
+`outputs/rl/ppo_spielberg/tensorboard/` and can be monitored with:
 
 ```bash
-tensorboard --logdir outputs/rl/ppo_vegas/tensorboard
+tensorboard --logdir outputs/rl/ppo_spielberg/tensorboard
 ```
 
 Generated PPO outputs live under ignored `outputs/rl/` paths and should not be

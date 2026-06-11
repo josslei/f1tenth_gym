@@ -75,6 +75,7 @@ WINDOW_H = 800
 
 def _resolve_map_path(map_value):
     package_maps = Path(__file__).resolve().parent / "maps"
+    track_maps = Path(__file__).resolve().parents[3] / "tracks"
     candidate = Path(str(map_value))
 
     if candidate.suffix == ".yaml" and candidate.exists():
@@ -85,6 +86,10 @@ def _resolve_map_path(map_value):
 
     if str(map_value) in BUILTIN_MAPS:
         return package_maps / BUILTIN_MAPS[str(map_value)]
+
+    track_candidate = track_maps / str(map_value) / f"{map_value}_map.yaml"
+    if track_candidate.exists():
+        return track_candidate
 
     if candidate.is_absolute():
         if candidate.suffix == ".yaml":

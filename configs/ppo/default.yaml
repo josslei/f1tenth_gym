@@ -1,0 +1,45 @@
+env:
+  map: Spielberg
+  map_ext: .png
+  num_agents: 1
+  render_mode:
+  initial_pose:
+    - [0.0, 0.0, 0.0]
+
+observation:
+  scan_size: 108
+  scan_max_m: 30.0
+  include_ego_state: true
+  speed_scale: 8.0
+  yaw_rate_scale: 10.0
+
+action:
+  velocity_min: 0.0
+  velocity_max: 8.0
+
+reward: {}
+
+policy:
+  name: GaussianActorCritic
+  kwargs:
+    hidden_size: 128
+
+training:
+  k_epochs: 10
+  mini_batch_size: 128
+  learning_rate: 0.0003
+  epsilon: 0.2
+  c1: 0.5
+  c2: 0.01
+  normalize_advantages: true
+  max_grad_norm: 0.5
+
+runtime:
+  seed: 42
+  ppo_iterations: 100
+  rollout_steps: 512
+  progress_bar: true
+  num_envs: 8
+
+output:
+  dir: outputs/rl/ppo_spielberg

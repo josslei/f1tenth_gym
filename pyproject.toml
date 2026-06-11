@@ -33,7 +33,7 @@ include-package-data = true
 
 [tool.setuptools.packages.find]
 where = ["gym", "."]
-include = ["f110_gym*", "controllers*", "utils*"]
+include = ["f110_gym*", "controllers*", "models*", "utils*"]
 
 [tool.setuptools.package-data]
 f110_gym = [
