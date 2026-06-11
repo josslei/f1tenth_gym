@@ -32,6 +32,7 @@ from utils.f110_env import (
     obs_tensor,
     scale_action,
 )
+from utils.track_scheduler import TrackScheduler, make_track_reset_fn
 
 DEFAULT_DEVICE = torch.device(
     "cuda"
@@ -126,7 +127,6 @@ def main() -> None:
     np.random.seed(config.runtime.seed)
 
     env_config = dict(config.env)
-    reset_pose = np.asarray(env_config.pop("initial_pose"), dtype=np.float64)
     output_dir = Path(config.output["dir"])
     observation_config = F1TenthObservationConfig(**config.observation)
     action_config = F1TenthActionConfig(**config.action)
@@ -134,10 +134,29 @@ def main() -> None:
     action_dim = 2
     policy = make_policy(config.policy, obs_dim=obs_dim, action_dim=action_dim)
     module = LightningPPO(policy=policy, config=config)
-
-    envs = [gym.make("f110-v0", **env_config) for _ in range(config.runtime.num_envs)]
-    rollout_steps = config.runtime.rollout_steps
     ppo_iterations = config.runtime.ppo_iterations
+    rollout_steps = config.runtime.rollout_steps
+
+    # ── Multi-track setup ─────────────────────────────────────────────────
+    track_cfg = config.tracks
+    cur_cfg = track_cfg["curriculum"]
+    scheduler = TrackScheduler(
+        root="tracks",
+        holdout=track_cfg.get("holdout", []),
+        test_ratio=float(track_cfg.get("test_ratio", 0.2)),
+        seed=config.runtime.seed,
+        initial=int(cur_cfg.get("initial", 4)),
+        increment=int(cur_cfg.get("increment", 4)),
+        interval_frac=float(cur_cfg.get("interval_frac", 0.1)),
+    )
+    print(f"TrackScheduler: {scheduler}")
+    print(f"  Train: {scheduler.train_tracks}")
+    print(f"  Test:  {scheduler.test_tracks}")
+    print(f"  Holdout: {scheduler.holdout_tracks}")
+
+    # Envs initialized with dummy map — reset_fn overwrites it before first step
+    track_map_ext = env_config.get("map_ext", ".png")
+    envs = [gym.make("f110-v0", **env_config) for _ in range(config.runtime.num_envs)]
 
     episode_returns: list[float] = []
     dataset = RolloutDataset(
@@ -149,12 +168,13 @@ def main() -> None:
             a_t.squeeze(0).detach().cpu().numpy(), e, action_config
         ),
         reward_fn=make_reward_controller(config.reward),
-        reset_fn=lambda: {"poses": reset_pose.copy()},
+        reset_fn=make_track_reset_fn(scheduler, ppo_iterations, track_map_ext),
         episode_returns=episode_returns,
         k_epochs=config.training.k_epochs,
         mini_batch_size=config.training.mini_batch_size,
         normalize_advantages=config.training.normalize_advantages,
         device=DEFAULT_DEVICE,
+        track_scheduler=scheduler,
     )
     datamodule = RolloutDataModule(dataset)
     logger = TensorBoardLogger(save_dir=output_dir, name="tensorboard")

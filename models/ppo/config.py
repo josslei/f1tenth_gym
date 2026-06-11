@@ -46,6 +46,7 @@ class PPOConfig:
     observation: dict[str, Any]
     action: dict[str, Any]
     reward: dict[str, Any]
+    tracks: dict[str, Any]
     policy: PolicyConfig
     training: PPOTrainingConfig
     runtime: RuntimeConfig
@@ -59,6 +60,7 @@ class PPOConfig:
             observation=data["observation"],
             action=data["action"],
             reward=data["reward"],
+            tracks=data.get("tracks", {}),
             policy=PolicyConfig(**data["policy"]),
             training=PPOTrainingConfig(**data["training"]),
             runtime=RuntimeConfig(**data["runtime"]),

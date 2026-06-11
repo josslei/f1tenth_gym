@@ -161,10 +161,10 @@ def rollout(
     obs_fn: Callable[[dict[str, Any]], Tensor],
     action_fn: Callable[[Tensor, gym.Env], np.ndarray],
     reward_fn: Callable[[dict[str, Any], bool], float],
-    reset_fn: Callable[[], dict[str, Any]],
+    reset_fn: Callable[[gym.Env], dict[str, Any]],
     device: torch.device = DEFAULT_DEVICE,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
-    obs, _info = env.reset(options=reset_fn())
+    obs, _info = env.reset(options=reset_fn(env))
 
     s_values: list[Tensor] = []
     a_values: list[Tensor] = []
@@ -194,7 +194,7 @@ def rollout(
 
         obs = next_obs
         if terminal:
-            obs, _info = env.reset(options=reset_fn())
+            obs, _info = env.reset(options=reset_fn(env))
 
     final_s = obs_fn(obs).to(device)
     with torch.no_grad():
@@ -232,12 +232,13 @@ class RolloutDataset(
         obs_fn: Callable[[dict[str, Any]], Tensor],
         action_fn: Callable[[Tensor, gym.Env], np.ndarray],
         reward_fn: Callable[[dict[str, Any], bool], float],
-        reset_fn: Callable[[], dict[str, Any]],
+        reset_fn: Callable[[gym.Env], dict[str, Any]],
         episode_returns: list[float],
         k_epochs: int,
         mini_batch_size: int,
         normalize_advantages: bool,
         device: torch.device = DEFAULT_DEVICE,
+        track_scheduler: Any | None = None,
     ) -> None:
         self.envs = envs
         self.policy = policy
@@ -251,10 +252,14 @@ class RolloutDataset(
         self.mini_batch_size = mini_batch_size
         self.normalize_advantages = normalize_advantages
         self.device = device
+        self.track_scheduler = track_scheduler
 
     def __iter__(
         self,
     ) -> Iterator[tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]]:
+        if self.track_scheduler is not None:
+            self.track_scheduler.step_iteration()
+
         all_s: list[Tensor] = []
         all_a: list[Tensor] = []
         all_log_p_cur: list[Tensor] = []

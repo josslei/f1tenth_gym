@@ -1,10 +1,7 @@
 env:
-  map: Spielberg
   map_ext: .png
   num_agents: 1
   render_mode:
-  initial_pose:
-    - [0.0, 0.0, 0.0]
 
 observation:
   scan_size: 108
@@ -42,10 +39,18 @@ training:
 
 runtime:
   seed: 42
-  ppo_iterations: 100
+  ppo_iterations: 300
   rollout_steps: 512
   progress_bar: true
   num_envs: 8
 
+tracks:
+  holdout: [Spielberg]   # never trained on
+  test_ratio: 0.2        # split remaining tracks into train/test
+  curriculum:
+    initial: 4            # tracks in pool at start
+    increment: 4          # added per milestone
+    interval_frac: 0.1    # milestone every 10% of iterations
+
 output:
-  dir: outputs/rl/ppo_spielberg
+  dir: outputs/rl/ppo_multitrack
