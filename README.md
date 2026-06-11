@@ -60,22 +60,19 @@ Train a Lightning PPO policy with:
 python runs/train_ppo_controller.py --config configs/ppo/default.yaml
 ```
 
-The config owns the map, PPO iteration count, rollout length, seed, output path,
-observation settings, action bounds, policy selection, and PPO hyperparameters.
-The default config uses `map: Spielberg`, resolved from `tracks/Spielberg/`, and writes
-`outputs/rl/ppo_spielberg/final_model.pt` with the policy state
-dict and selected policy config. A runtime controller loader is not yet implemented.
+The config owns the PPO iteration count, rollout length, seed, output path,
+observation settings, action bounds, policy selection, reward parameters,
+tracks (train/test split, holdout, curriculum schedule), and PPO hyperparameters.
+The default config uses a multi-track curriculum (all `tracks/` except Spielberg)
+and writes to `outputs/rl/ppo_multitrack/`.
 
-This is still an experimental baseline, not a tuned controller. The first signal
-is the episode return in `outputs/rl/ppo_spielberg/metrics.jsonl`; improvement is
-not guaranteed without reward and hyperparameter tuning.
-Per-update episode returns are appended to
-`outputs/rl/ppo_spielberg/metrics.jsonl`.
+The scheduler prints the train/test split at launch. Per-update episode returns
+are appended to `outputs/rl/ppo_multitrack/metrics.jsonl`.
 TensorBoard event files are written under
-`outputs/rl/ppo_spielberg/tensorboard/` and can be monitored with:
+`outputs/rl/ppo_multitrack/tensorboard/` and can be monitored with:
 
 ```bash
-tensorboard --logdir outputs/rl/ppo_spielberg/tensorboard
+tensorboard --logdir outputs/rl/ppo_multitrack/tensorboard
 ```
 
 Generated PPO outputs live under ignored `outputs/rl/` paths and should not be
