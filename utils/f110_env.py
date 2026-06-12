@@ -149,11 +149,13 @@ def _env_worker(
     env_fn: Callable[[], gym.Env],
     pipe: Connection,
     action_config: F1TenthActionConfig,
+    max_episode_steps: int,
 ) -> None:
     env = env_fn()
     f110_env: Any = env.unwrapped
     params = f110_env.params
     current_reset_options: dict[str, Any] | None = None
+    episode_steps = 0
     while True:
         try:
             cmd, data = pipe.recv()
@@ -162,6 +164,7 @@ def _env_worker(
 
         if cmd == "reset":
             current_reset_options = data
+            episode_steps = 0
             obs_dict, info = (
                 env.reset(options=data) if data is not None else env.reset()
             )
@@ -186,12 +189,15 @@ def _env_worker(
                 dtype=np.float64,
             )
             obs_dict, _, terminated, truncated, info = env.step(env_action)
-            terminal = bool(terminated or truncated)
-            if terminal:
+            episode_steps += 1
+            if episode_steps >= max_episode_steps:
+                truncated = True
+            if terminated or truncated:
+                episode_steps = 0
                 reset_obs, _ = env.reset(options=current_reset_options)
-                pipe.send((obs_dict, terminal, reset_obs))
+                pipe.send((obs_dict, terminated, truncated, reset_obs))
             else:
-                pipe.send((obs_dict, terminal, None))
+                pipe.send((obs_dict, terminated, truncated, None))
         elif cmd == "close":
             break
 
@@ -210,6 +216,7 @@ class SubprocVecEnv:
         self,
         env_fns: list[Callable[[], gym.Env]],
         action_config: F1TenthActionConfig,
+        max_episode_steps: int,
     ) -> None:
         self.n_envs = len(env_fns)
         self.pipes: list[Connection] = []
@@ -219,7 +226,7 @@ class SubprocVecEnv:
             parent_pipe, child_pipe = mp.Pipe()
             proc = mp.Process(
                 target=_env_worker,
-                args=(env_fn, child_pipe, action_config),
+                args=(env_fn, child_pipe, action_config, max_episode_steps),
                 daemon=True,
             )
             proc.start()
@@ -234,18 +241,20 @@ class SubprocVecEnv:
 
     def step(
         self, normalized_actions: np.ndarray
-    ) -> tuple[list[dict], list[bool], list[dict | None]]:
+    ) -> tuple[list[dict], list[bool], list[bool], list[dict | None]]:
         for i in range(self.n_envs):
             self.pipes[i].send(("step", normalized_actions[i]))
         obs_list: list[dict] = []
-        terminal_list: list[bool] = []
+        terminated_list: list[bool] = []
+        truncated_list: list[bool] = []
         reset_obs_list: list[dict | None] = []
         for i in range(self.n_envs):
             result = self.pipes[i].recv()
             obs_list.append(result[0])
-            terminal_list.append(result[1])
-            reset_obs_list.append(result[2])
-        return obs_list, terminal_list, reset_obs_list
+            terminated_list.append(result[1])
+            truncated_list.append(result[2])
+            reset_obs_list.append(result[3])
+        return obs_list, terminated_list, truncated_list, reset_obs_list
 
     def close(self) -> None:
         for p in self.pipes:
@@ -302,9 +311,10 @@ class RolloutDataset(
         mini_batch_size: int,
         normalize_advantages: bool,
         action_config: F1TenthActionConfig,
+        max_episode_steps: int,
         device: torch.device = DEFAULT_DEVICE,
     ) -> None:
-        self.sve = SubprocVecEnv(env_fns, action_config)
+        self.sve = SubprocVecEnv(env_fns, action_config, max_episode_steps)
         self.policy = policy
         self.rollout_steps = rollout_steps
         self.reward_fns = reward_fns
@@ -316,6 +326,7 @@ class RolloutDataset(
         self.normalize_advantages = normalize_advantages
         self.device = device
         self.current_obs: list[dict[str, Any] | None] = [None] * self.sve.n_envs
+        self.ep_return: list[float] = []
 
     def __iter__(
         self,
@@ -334,6 +345,8 @@ class RolloutDataset(
         r_buf: list[list[float]] = [[] for _ in range(n)]
         terminal_buf: list[list[float]] = [[] for _ in range(n)]
         completed_episode_returns: list[float] = []
+        if len(self.ep_return) != n:
+            self.ep_return = [0.0] * n
 
         for _step in range(self.rollout_steps):
             obs_list: list[dict[str, Any]] = cast(
@@ -348,20 +361,28 @@ class RolloutDataset(
 
             # Step all envs in parallel (child processes, separate GILs).
             actions_np = action_batch.cpu().numpy()
-            next_obs_list, terminal_list, reset_obs_list = self.sve.step(actions_np)
+            (
+                next_obs_list,
+                terminated_list,
+                truncated_list,
+                reset_obs_list,
+            ) = self.sve.step(actions_np)
 
             # Store transitions, compute rewards.
             for i in range(n):
-                r_t = self.reward_fns[i](next_obs_list[i], terminal_list[i])
+                any_terminal = terminated_list[i] or truncated_list[i]
+                r_t = self.reward_fns[i](next_obs_list[i], any_terminal)
+                self.ep_return[i] += r_t
                 s_buf[i].append(obs_batch[i])
                 a_buf[i].append(action_batch[i])
                 log_p_buf[i].append(log_prob_batch[i])
                 V_buf[i].append(value_batch[i])
                 r_buf[i].append(r_t)
-                terminal_buf[i].append(float(terminal_list[i]))
+                terminal_buf[i].append(float(terminated_list[i]))
 
-                if terminal_list[i]:
-                    completed_episode_returns.append(r_t)
+                if any_terminal:
+                    completed_episode_returns.append(self.ep_return[i])
+                    self.ep_return[i] = 0.0
                     self.current_obs[i] = reset_obs_list[i]
                 else:
                     self.current_obs[i] = next_obs_list[i]
@@ -404,6 +425,11 @@ class RolloutDataset(
             A_hat = (A_hat - A_hat.mean()) / (A_hat.std() + 1e-8)
 
         self.episode_returns.extend(completed_episode_returns)
+        mean_ep_return = (
+            float(np.mean(completed_episode_returns))
+            if completed_episode_returns
+            else 0.0
+        )
 
         n_total = s.shape[0]
         for _ in range(self.k_epochs):
@@ -416,7 +442,7 @@ class RolloutDataset(
                     log_p_cur[B],
                     A_hat[B],
                     R_hat[B],
-                    torch.as_tensor(0.0, device=s.device),
+                    torch.as_tensor(mean_ep_return, device=s.device),
                 )
 
     def __len__(self) -> int:

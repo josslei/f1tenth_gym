@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Tuple
 
+import numpy as np
 import torch
 import torch.nn as nn
 from torch import Tensor
@@ -27,7 +28,7 @@ class ResidualMLPPolicy(Policy):
             nn.Tanh(),
         )
         self.action_mean = nn.Linear(hidden_size, action_dim)
-        self.log_std = nn.Parameter(torch.zeros(action_dim))
+        self.log_std = nn.Parameter(torch.full((action_dim,), float(np.log(0.5))))
         self.value_head = nn.Linear(hidden_size, 1)
 
     def forward(self, obs: Tensor) -> Tuple[Tensor, Tensor]:
@@ -42,19 +43,31 @@ class ResidualMLPPolicy(Policy):
         dist = torch.distributions.Normal(mean, std)
         return dist, value
 
+    def _tanh_correction(self, action: Tensor) -> Tensor:
+        return torch.log(1.0 - action.pow(2) + 1e-6).sum(dim=-1)
+
     def act(
         self, obs: Tensor, deterministic: bool = False
     ) -> Tuple[Tensor, Tensor, Tensor]:
         dist, value = self._distribution(obs)
-        raw_action = dist.mean if deterministic else dist.rsample()
-        log_prob = dist.log_prob(raw_action).sum(dim=-1)
-        return raw_action, log_prob, value
+        if deterministic:
+            action = dist.mean
+            log_prob = dist.log_prob(action).sum(dim=-1)
+            return action, log_prob, value
+
+        raw_action = dist.rsample()
+        action = torch.tanh(raw_action)
+        log_prob = dist.log_prob(raw_action).sum(dim=-1) - self._tanh_correction(action)
+        return action, log_prob, value
 
     def evaluate_actions(
         self, obs: Tensor, actions: Tensor
     ) -> Tuple[Tensor, Tensor, Tensor]:
         dist, value = self._distribution(obs)
-        log_prob = dist.log_prob(actions).sum(dim=-1)
+        raw_actions = torch.atanh(torch.clamp(actions, -1.0 + 1e-6, 1.0 - 1e-6))
+        log_prob = dist.log_prob(raw_actions).sum(dim=-1) - self._tanh_correction(
+            actions
+        )
         entropy = dist.entropy().sum(dim=-1)
         return log_prob, entropy, value
 

@@ -75,8 +75,10 @@ class F1TenthPPOReward:
         collision = bool(obs["collisions"][ego])
         theta = float(obs["poses_theta"][ego])
 
-        if collision or abs(theta) > self.spin_threshold:
+        if terminated:
             self.idx = 0
+
+        if collision or abs(theta) > self.spin_threshold:
             return -self.collision_penalty
 
         vel_magnitude = np.sqrt(vx * vx + vy * vy)
@@ -206,6 +208,7 @@ def main() -> None:
         mini_batch_size=config.training.mini_batch_size,
         normalize_advantages=config.training.normalize_advantages,
         action_config=action_config,
+        max_episode_steps=rollout_steps,
         device=DEFAULT_DEVICE,
     )
     datamodule = RolloutDataModule(dataset)
