@@ -1,0 +1,32 @@
+# metadata
+run_name: 'f110_gym'
+perf_num: 6
+
+# Source: f1tenth_gym/examples/example_map; centerline extracted via
+# scripts/build_track_package.py. Lap 163.8 m,
+# min half-width 1.44 m (set controller lane_width <= this).
+track_name: f110_gym
+mu_id: '10'
+
+# map paths ({track_name} and {mu_id} are expanded by the loader)
+map_path: ./{track_name}_{mu_id}/{track_name}_map
+map_ext: '.png'
+
+# starting pose - widest-clearance centerline point (mid-corridor).
+# NOTE: starting ON the raceline first point (1.07, -0.15) wall-hugs into the
+# first corner at speed and crashes — keep the mid-corridor start.
+sx: 0.0455511
+sy: -3.0731001
+stheta: 1.5847864
+
+# existing optimized raceline shipped with f1tenth_gym (examples/example_waypoints.csv)
+wpt_path: ./{track_name}_{mu_id}/example_waypoints.csv
+wpt_delim: ';'
+wpt_rowskip: 3
+wpt_xind: 1
+wpt_yind: 2
+wpt_thind: 3
+wpt_vind: 5
+
+# centerline for track-boundary detection
+centerline_path: ./{track_name}_{mu_id}/{track_name}_centerline.csv

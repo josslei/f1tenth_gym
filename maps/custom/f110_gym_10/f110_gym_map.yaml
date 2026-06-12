@@ -1,0 +1,6 @@
+image: f110_gym_map.png
+resolution: 0.0625
+origin: [-78.21853769831466, -44.37590462453829, 0.0]
+negate: 0
+occupied_thresh: 0.45
+free_thresh: 0.196

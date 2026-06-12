@@ -21,7 +21,7 @@ from utils.waypoint_view import initial_pose_from_waypoints
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 
-MAP = "tracks/Spielberg/Spielberg_map"
+MAP = "maps/f1tenth_racetracks/Spielberg/Spielberg_map"
 CHECKPOINT = "outputs/rl/ppo_spielberg/final_model.pt"
 ZOOM = 2.0
 WINDOW_WIDTH = 1000

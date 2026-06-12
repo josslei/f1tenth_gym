@@ -1,0 +1,31 @@
+# metadata
+run_name: 'blackbox2022_2'
+perf_num: 6
+
+# Source: CPS-TUWien/f1tenth_maps; centerline extracted via
+# scripts/build_track_package.py. Lap 169.1 m,
+# min half-width 0.05 m (set controller lane_width <= this).
+track_name: blackbox2022_2
+mu_id: '10'
+
+# map paths ({track_name} and {mu_id} are expanded by the loader)
+map_path: ./{track_name}_{mu_id}/{track_name}_map
+map_ext: '.png'
+
+# starting pose - widest-clearance centerline point (idx 1523)
+sx: -2.8155013
+sy: 0.0018849
+stheta: -0.0028260
+
+# centerline-based reference trajectory (curvature-capped speed;
+# replace with TUM raceline optimizer output for a real raceline)
+wpt_path: ./{track_name}_{mu_id}/traj_race_cl_centerline_{track_name}_{mu_id}_map.csv
+wpt_delim: ';'
+wpt_rowskip: 3
+wpt_xind: 1
+wpt_yind: 2
+wpt_thind: 3
+wpt_vind: 5
+
+# centerline for track-boundary detection
+centerline_path: ./{track_name}_{mu_id}/{track_name}_centerline.csv

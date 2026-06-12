@@ -18,8 +18,10 @@ Gymnasium-compatible F1TENTH simulator with optional realtime rendering, pure-pu
 ├── scripts/               # CLI tools; raceline optimizer and map generation
 ├── configs/raceline/      # minimum-time optimization parameters
 ├── tests/                 # pytest suite; injects gym/ into sys.path
-├── tracks/                # git submodule: f1tenth racetrack CSV/YAML/PNG assets
-└── outputs/               # gitignored generated racelines, plots, maps
+├── maps/                         # map assets (submodules + custom)
+│   ├── f1tenth_racetracks/       # git submodule: f1tenth racetrack CSV/YAML/PNG assets
+│   └── custom/                   # user-provided maps
+└── outputs/                      # gitignored generated racelines, plots, maps
 ```
 
 ## WHERE TO LOOK
@@ -30,7 +32,7 @@ Gymnasium-compatible F1TENTH simulator with optional realtime rendering, pure-pu
 | Simulator internals | `gym/f110_gym/envs/` | See local `AGENTS.md`; numba-heavy dynamics/scan/collision code |
 | Realtime viewer | `gym/f110_gym/viewer.py`, `gym/f110_gym/envs/rendering.py` | `pyglet` is optional via `render` extra |
 | Controllers | `controllers/controller_base.py`, `controllers/pure_pursuit.py` | Waypoint CSV format consumed by `PurePursuit.from_csv` |
-| Waypoint demo | `runs/waypoint_drive.py` | Uses `outputs/waypoints/Spielberg_mintime.csv` and `tracks` submodule map |
+| Waypoint demo | `runs/waypoint_drive.py` | Uses `outputs/waypoints/Spielberg_mintime.csv` and `maps/f1tenth_racetracks` submodule map |
 | Raceline CLI | `scripts/optimize_mintime.py` | Public wrapper around nested legacy optimizer |
 | Raceline internals | `scripts/raceline_opt/` | See local `AGENTS.md`; CasADi/IPOPT, helper imports, constant friction |
 | Map generation | `scripts/generate_map.py` | Converts centerline CSV to YAML+PNG occupancy-grid assets |
@@ -67,7 +69,7 @@ Gymnasium-compatible F1TENTH simulator with optional realtime rendering, pure-pu
 
 - Do not copy from `gym/f110_gym/envs/f110_env_backup.py`; it is a legacy snapshot excluded from pyright.
 - Do not commit generated outputs, waypoints, plots, numba cache, or backup/scratch files; `.gitignore` covers `outputs/`, `*.nbc`, `*.nbi`, `*_backup.py`.
-- Do not assume `tracks/` is ordinary source; it is a git submodule (`git@github.com:f1tenth/f1tenth_racetracks`).
+- Do not assume `maps/f1tenth_racetracks/` is ordinary source; it is a git submodule (`git@github.com:f1tenth/f1tenth_racetracks`).
 - Do not move raceline internals without updating `sys.path` insertion, pyright extra paths, and nested imports together.
 - Do not document variable-friction raceline support unless code and assets are restored; current wrapper forces constant friction.
 
@@ -79,8 +81,8 @@ pip install -e ".[dev,render]"
 pip install -e ".[tools]"
 pytest -q
 pre-commit run --files <changed-file>...
-python scripts/optimize_mintime.py --track tracks/Spielberg/Spielberg_centerline.csv --output outputs/waypoints/Spielberg_mintime.csv --save_plot
-python scripts/generate_map.py tracks/Spielberg/Spielberg_centerline.csv -o outputs/maps/Spielberg -r 1.0
+python scripts/optimize_mintime.py --track maps/f1tenth_racetracks/Spielberg/Spielberg_centerline.csv --output outputs/waypoints/Spielberg_mintime.csv --save_plot
+python scripts/generate_map.py maps/f1tenth_racetracks/Spielberg/Spielberg_centerline.csv -o outputs/maps/Spielberg -r 1.0
 ```
 
 ## NOTES

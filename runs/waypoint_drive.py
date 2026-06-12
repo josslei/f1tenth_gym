@@ -12,7 +12,7 @@ from controllers.stanley import Stanley
 from f110_gym.viewer import F110Viewer
 from utils.waypoint_view import WaypointOverlay, initial_pose_from_waypoints
 
-MAP = "tracks/Spielberg/Spielberg_map"
+MAP = "maps/f1tenth_racetracks/Spielberg/Spielberg_map"
 WAYPOINTS_CSV = "outputs/waypoints/Spielberg_mintime.csv"
 ZOOM = 1.0  # > 1 -> Zoom out; < 1 -> Zoom in
 WINDOW_WIDTH = 1000

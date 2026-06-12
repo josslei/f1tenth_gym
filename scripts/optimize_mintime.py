@@ -7,7 +7,7 @@ and produces a raceline CSV:
 
 Example:
     python scripts/optimize_mintime.py \\
-        --track tracks/Spielberg/Spielberg_map.csv \\
+        --track maps/f1tenth_racetracks/Spielberg/Spielberg_map.csv \\
         --output outputs/waypoints/berlin_mintime.csv \\
         --save_plot
 """

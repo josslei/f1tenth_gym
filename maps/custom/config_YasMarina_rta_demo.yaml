@@ -1,0 +1,25 @@
+# RTA demo map config — YasMarina, all paths pinned to the 10489 variant
+# (explicit, no {mu} templating; mirrors what the experiment harness generates).
+run_name: 'rta_demo'
+perf_num: 6
+
+track_name: YasMarina
+mu_id: '10489'
+
+map_path: ./YasMarina_10489/YasMarina_map
+map_ext: '.png'
+
+# starting pose (raceline start, 10489 variant)
+sx: -2.07e-05
+sy: 0.1489505
+stheta: 0.0925943241614839
+
+wpt_path: ./YasMarina_10489/traj_race_cl_centerline_mintime_mue1.0489_YasMarina_map.csv
+wpt_delim: ';'
+wpt_rowskip: 3
+wpt_xind: 1
+wpt_yind: 2
+wpt_thind: 3
+wpt_vind: 5
+
+centerline_path: ./YasMarina_10489/YasMarina_centerline.csv

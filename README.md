@@ -84,7 +84,7 @@ and width columns:
 
 ```bash
 python scripts/optimize_mintime.py \
-  --track tracks/Spielberg/Spielberg_centerline.csv \
+  --track maps/f1tenth_racetracks/Spielberg/Spielberg_centerline.csv \
   --output outputs/waypoints/Spielberg_mintime.csv \
   --save_plot
 ```
@@ -114,7 +114,7 @@ a semicolon-delimited CSV in the standard raceline format:
 
 The input track is expected to provide the centerline and left/right widths;
 this script does not extract a centerline from an occupancy map. Place external
-track CSVs under `tracks/`. `--params`
+track CSVs under `maps/`. `--params`
 selects the vehicle and optimization config; the default is
 `configs/raceline/f110.ini`. Pass `--save_plot` to save a PNG next to the
 output CSV showing the raceline overlaid on the track boundaries and centerline.
@@ -126,7 +126,7 @@ from the centerline CSV:
 
 ```bash
 python scripts/generate_map.py \
-  tracks/Spielberg/Spielberg_centerline.csv \
+  maps/f1tenth_racetracks/Spielberg/Spielberg_centerline.csv \
   -o outputs/maps/Spielberg \
   -r 1.0
 ```
@@ -136,7 +136,7 @@ python scripts/generate_map.py \
   value for big tracks to keep image dimensions reasonable).
 
 Pass the resulting YAML path (or the track's own map YAML) to the waypoint
-drive script, e.g. `MAP = "tracks/Spielberg/Spielberg_map"`.
+drive script, e.g. `MAP = "maps/f1tenth_racetracks/Spielberg/Spielberg_map"`.
 
 ## Notes
 
