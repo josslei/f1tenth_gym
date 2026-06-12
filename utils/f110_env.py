@@ -1,19 +1,11 @@
-"""F1TENTH environment helpers for RL orchestration scripts.
-
-Observation / action conversion, config dataclasses, and replay utilities
-that translate between the Gym ``f110-v0`` interface and tensor-based RL
-algorithms.  The ``rollout`` collector is parameterized with callbacks so
-it can be reused across different tasks (controller, planner, …) — only
-the callbacks need to know about the domain.
-"""
-
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import math
-from typing import Any
+import multiprocessing as mp
+from multiprocessing.connection import Connection
+from typing import Any, cast
 
 import gymnasium as gym
 import lightning as pl
@@ -150,177 +142,285 @@ def scale_action(
     )
 
 
-# ── PPO rollout ────────────────────────────────────────────────────────────────
+# ── SubprocVecEnv – multi-process environment runner ──────────────────────────
 
 
-def rollout(
-    env: gym.Env,
-    policy: Policy,
-    rollout_steps: int,
-    *,
-    obs_fn: Callable[[dict[str, Any]], Tensor],
-    action_fn: Callable[[Tensor, gym.Env], np.ndarray],
-    reward_fn: Callable[[dict[str, Any], bool], float],
-    reset_fn: Callable[[gym.Env], dict[str, Any]],
-    device: torch.device = DEFAULT_DEVICE,
-) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
-    obs, _info = env.reset(options=reset_fn(env))
+def _env_worker(
+    env_fn: Callable[[], gym.Env],
+    pipe: Connection,
+    action_config: F1TenthActionConfig,
+) -> None:
+    env = env_fn()
+    f110_env: Any = env.unwrapped
+    params = f110_env.params
+    current_reset_options: dict[str, Any] | None = None
+    while True:
+        try:
+            cmd, data = pipe.recv()
+        except (EOFError, BrokenPipeError):
+            break
 
-    s_values: list[Tensor] = []
-    a_values: list[Tensor] = []
-    log_p_cur_values: list[Tensor] = []
-    V_phi_values: list[Tensor] = []
-    r_values: list[float] = []
-    terminal_values: list[float] = []
-    episode_return = 0.0
+        if cmd == "reset":
+            current_reset_options = data
+            obs_dict, info = (
+                env.reset(options=data) if data is not None else env.reset()
+            )
+            pipe.send(obs_dict)
+        elif cmd == "step":
+            norm = np.asarray(data, dtype=np.float64).reshape(2)
+            steering = np.interp(
+                norm[0], [-1.0, 1.0], [params["s_min"], params["s_max"]]
+            )
+            velocity = np.interp(
+                norm[1],
+                [-1.0, 1.0],
+                [action_config.velocity_min, action_config.velocity_max],
+            )
+            env_action = np.array(
+                [
+                    [
+                        float(np.clip(steering, params["s_min"], params["s_max"])),
+                        float(np.clip(velocity, params["v_min"], params["v_max"])),
+                    ]
+                ],
+                dtype=np.float64,
+            )
+            obs_dict, _, terminated, truncated, info = env.step(env_action)
+            terminal = bool(terminated or truncated)
+            if terminal:
+                reset_obs, _ = env.reset(options=current_reset_options)
+                pipe.send((obs_dict, terminal, reset_obs))
+            else:
+                pipe.send((obs_dict, terminal, None))
+        elif cmd == "close":
+            break
 
-    for _t in range(rollout_steps):
-        s_t = obs_fn(obs).to(device)
-        with torch.no_grad():
-            a_t, log_p_cur_t, V_phi_t = policy.act(s_t)
+    env.close()
 
-        env_action = action_fn(a_t, env)
-        next_obs, _env_reward, terminated, truncated, _info = env.step(env_action)
-        terminal = bool(terminated or truncated)
-        r_t = reward_fn(next_obs, terminal)
 
-        s_values.append(s_t.squeeze(0))
-        a_values.append(a_t.squeeze(0).detach())
-        log_p_cur_values.append(log_p_cur_t.squeeze(0).detach())
-        V_phi_values.append(V_phi_t.squeeze(0).detach())
-        r_values.append(r_t)
-        terminal_values.append(float(terminal))
-        episode_return += r_t
+class SubprocVecEnv:
+    """Multi-process environment runner for lockstep parallel rollout.
 
-        obs = next_obs
-        if terminal:
-            obs, _info = env.reset(options=reset_fn(env))
+    Mirrors Stable-Baselines3 ``SubprocVecEnv``: child processes step envs
+    in true parallelism (separate GILs), main process handles policy inference
+    and reward computation.
+    """
 
-    final_s = obs_fn(obs).to(device)
-    with torch.no_grad():
-        _action, _log_p, final_V_phi = policy.act(final_s, deterministic=True)
-    V_phi_values.append(final_V_phi.squeeze(0).detach())
+    def __init__(
+        self,
+        env_fns: list[Callable[[], gym.Env]],
+        action_config: F1TenthActionConfig,
+    ) -> None:
+        self.n_envs = len(env_fns)
+        self.pipes: list[Connection] = []
+        self.processes: list[mp.Process] = []
 
-    s = torch.stack(s_values).unsqueeze(0)
-    a = torch.stack(a_values).unsqueeze(0)
-    log_p_cur = torch.stack(log_p_cur_values).unsqueeze(0)
-    r = torch.as_tensor(r_values, dtype=torch.float32, device=device).unsqueeze(0)
-    terminal = torch.as_tensor(
-        terminal_values, dtype=torch.float32, device=device
-    ).unsqueeze(0)
-    V_phi = torch.stack(V_phi_values).unsqueeze(0)
+        for env_fn in env_fns:
+            parent_pipe, child_pipe = mp.Pipe()
+            proc = mp.Process(
+                target=_env_worker,
+                args=(env_fn, child_pipe, action_config),
+                daemon=True,
+            )
+            proc.start()
+            child_pipe.close()
+            self.pipes.append(parent_pipe)
+            self.processes.append(proc)
 
-    A_hat, R_hat = compute_gae(r=r, V_phi=V_phi, terminal=terminal)
-    return (
-        s.reshape(-1, s.shape[-1]),
-        a.reshape(-1, a.shape[-1]),
-        log_p_cur.reshape(-1),
-        A_hat.reshape(-1),
-        R_hat.reshape(-1),
-        torch.as_tensor(episode_return, dtype=torch.float32, device=device),
-    )
+    def reset_all(self, reset_fns: list[Callable[[], dict]]) -> list[dict]:
+        for pipe, fn in zip(self.pipes, reset_fns):
+            pipe.send(("reset", fn()))
+        return [pipe.recv() for pipe in self.pipes]
+
+    def step(
+        self, normalized_actions: np.ndarray
+    ) -> tuple[list[dict], list[bool], list[dict | None]]:
+        for i in range(self.n_envs):
+            self.pipes[i].send(("step", normalized_actions[i]))
+        obs_list: list[dict] = []
+        terminal_list: list[bool] = []
+        reset_obs_list: list[dict | None] = []
+        for i in range(self.n_envs):
+            result = self.pipes[i].recv()
+            obs_list.append(result[0])
+            terminal_list.append(result[1])
+            reset_obs_list.append(result[2])
+        return obs_list, terminal_list, reset_obs_list
+
+    def close(self) -> None:
+        for p in self.pipes:
+            try:
+                p.send(("close", None))
+            except (BrokenPipeError, EOFError):
+                pass
+        for proc in self.processes:
+            proc.join(timeout=5)
+
+
+# ── Lockstep PPO rollout ──────────────────────────────────────────────────────
 
 
 class RolloutDataset(
     IterableDataset[tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]]
 ):
+    """Collects ``rollout_steps`` from N parallel envs in lockstep.
+
+    Parameters
+    ----------
+    env_fns:
+        Factory callables — one per parallel environment.
+    policy:
+        Policy used for action selection during rollout.
+    rollout_steps:
+        Number of steps collected from each environment per iteration.
+    reward_fns:
+        One reward functor per environment (each maintains its own state).
+    obs_fn:
+        Converts a raw gym observation dict into a ``(1, obs_dim)`` tensor.
+    episode_returns:
+        External list to which completed episode returns are appended.
+    k_epochs:
+        Number of PPO update epochs on the collected batch.
+    mini_batch_size:
+        Minibatch size for each gradient step.
+    normalize_advantages:
+        Whether to normalise advantage estimates across the batch.
+    device:
+        Torch device for policy inference and tensor storage.
+    """
+
     def __init__(
         self,
-        envs: list[gym.Env],
+        env_fns: list[Callable[[], gym.Env]],
         policy: Policy,
         rollout_steps: int,
+        reward_fns: list[Callable[[dict[str, Any], bool], float]],
         obs_fn: Callable[[dict[str, Any]], Tensor],
-        action_fn: Callable[[Tensor, gym.Env], np.ndarray],
-        reward_fn: Callable[[dict[str, Any], bool], float],
-        reset_fn: Callable[[gym.Env], dict[str, Any]],
+        reset_fn: Callable[[], dict[str, Any]],
         episode_returns: list[float],
         k_epochs: int,
         mini_batch_size: int,
         normalize_advantages: bool,
+        action_config: F1TenthActionConfig,
         device: torch.device = DEFAULT_DEVICE,
-        track_scheduler: Any | None = None,
     ) -> None:
-        self.envs = envs
+        self.sve = SubprocVecEnv(env_fns, action_config)
         self.policy = policy
         self.rollout_steps = rollout_steps
+        self.reward_fns = reward_fns
         self.obs_fn = obs_fn
-        self.action_fn = action_fn
-        self.reward_fn = reward_fn
         self.reset_fn = reset_fn
         self.episode_returns = episode_returns
         self.k_epochs = k_epochs
         self.mini_batch_size = mini_batch_size
         self.normalize_advantages = normalize_advantages
         self.device = device
-        self.track_scheduler = track_scheduler
+        self.current_obs: list[dict[str, Any] | None] = [None] * self.sve.n_envs
 
     def __iter__(
         self,
     ) -> Iterator[tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]]:
-        if self.track_scheduler is not None:
-            self.track_scheduler.step_iteration()
+        n = self.sve.n_envs
 
-        all_s: list[Tensor] = []
-        all_a: list[Tensor] = []
-        all_log_p_cur: list[Tensor] = []
-        all_A_hat: list[Tensor] = []
-        all_R_hat: list[Tensor] = []
-        total_episode_return = 0.0
+        if self.current_obs[0] is None:
+            obs_dicts = self.sve.reset_all([self.reset_fn] * self.sve.n_envs)
+            self.current_obs = list(obs_dicts)
 
-        with ThreadPoolExecutor(max_workers=len(self.envs)) as executor:
-            futures = [
-                executor.submit(
-                    rollout,
-                    env=env,
-                    policy=self.policy,
-                    rollout_steps=self.rollout_steps,
-                    obs_fn=self.obs_fn,
-                    action_fn=self.action_fn,
-                    reward_fn=self.reward_fn,
-                    reset_fn=self.reset_fn,
-                    device=self.device,
-                )
-                for env in self.envs
-            ]
-            for future in futures:
-                s, a, log_p_cur, A_hat, R_hat, episode_return = future.result()
-                all_s.append(s)
-                all_a.append(a)
-                all_log_p_cur.append(log_p_cur)
-                all_A_hat.append(A_hat)
-                all_R_hat.append(R_hat)
-                total_episode_return += episode_return.item()
+        # Per-env transition buffers.
+        s_buf: list[list[Tensor]] = [[] for _ in range(n)]
+        a_buf: list[list[Tensor]] = [[] for _ in range(n)]
+        log_p_buf: list[list[Tensor]] = [[] for _ in range(n)]
+        V_buf: list[list[Tensor]] = [[] for _ in range(n)]
+        r_buf: list[list[float]] = [[] for _ in range(n)]
+        terminal_buf: list[list[float]] = [[] for _ in range(n)]
+        completed_episode_returns: list[float] = []
 
-        avg_episode_return = total_episode_return / len(self.envs)
-        self.episode_returns.append(avg_episode_return)
+        for _step in range(self.rollout_steps):
+            obs_list: list[dict[str, Any]] = cast(
+                list[dict[str, Any]], self.current_obs
+            )
+            obs_tensors = [self.obs_fn(d).to(self.device) for d in obs_list]
+            obs_batch = torch.cat(obs_tensors)  # (n, obs_dim)
+
+            # Batched policy inference (single no_grad context).
+            with torch.no_grad():
+                action_batch, log_prob_batch, value_batch = self.policy.act(obs_batch)
+
+            # Step all envs in parallel (child processes, separate GILs).
+            actions_np = action_batch.cpu().numpy()
+            next_obs_list, terminal_list, reset_obs_list = self.sve.step(actions_np)
+
+            # Store transitions, compute rewards.
+            for i in range(n):
+                r_t = self.reward_fns[i](next_obs_list[i], terminal_list[i])
+                s_buf[i].append(obs_batch[i])
+                a_buf[i].append(action_batch[i])
+                log_p_buf[i].append(log_prob_batch[i])
+                V_buf[i].append(value_batch[i])
+                r_buf[i].append(r_t)
+                terminal_buf[i].append(float(terminal_list[i]))
+
+                if terminal_list[i]:
+                    completed_episode_returns.append(r_t)
+                    self.current_obs[i] = reset_obs_list[i]
+                else:
+                    self.current_obs[i] = next_obs_list[i]
+
+        final_obs_list: list[dict[str, Any]] = cast(
+            list[dict[str, Any]], self.current_obs
+        )
+        final_obs_batch = torch.cat(
+            [self.obs_fn(d).to(self.device) for d in final_obs_list]
+        )
+        with torch.no_grad():
+            _, _, final_values = self.policy.act(final_obs_batch, deterministic=True)
+
+        # Compute GAE per env and concatenate.
+        all_s, all_a, all_log_p, all_A, all_R = [], [], [], [], []
+        for i in range(n):
+            V_buf[i].append(final_values[i])
+            s = torch.stack(s_buf[i]).unsqueeze(0)
+            a = torch.stack(a_buf[i]).unsqueeze(0)
+            log_p = torch.stack(log_p_buf[i]).unsqueeze(0)
+            r = torch.as_tensor(r_buf[i], device=self.device).unsqueeze(0)
+            terminal = torch.as_tensor(terminal_buf[i], device=self.device).unsqueeze(0)
+            V = torch.stack(V_buf[i]).unsqueeze(0)
+
+            A, R = compute_gae(r=r, V_phi=V, terminal=terminal)
+
+            all_s.append(s.reshape(-1, s.shape[-1]))
+            all_a.append(a.reshape(-1, a.shape[-1]))
+            all_log_p.append(log_p.reshape(-1))
+            all_A.append(A.reshape(-1))
+            all_R.append(R.reshape(-1))
 
         s = torch.cat(all_s)
         a = torch.cat(all_a)
-        log_p_cur = torch.cat(all_log_p_cur)
-        A_hat = torch.cat(all_A_hat)
-        R_hat = torch.cat(all_R_hat)
+        log_p_cur = torch.cat(all_log_p)
+        A_hat = torch.cat(all_A)
+        R_hat = torch.cat(all_R)
 
         if self.normalize_advantages:
             A_hat = (A_hat - A_hat.mean()) / (A_hat.std() + 1e-8)
 
-        n = s.shape[0]
-        for _k_epoch in range(self.k_epochs):
-            index_set_I = torch.randperm(n, device=s.device)
-            for start in range(0, n, self.mini_batch_size):
-                B = index_set_I[start : start + self.mini_batch_size]
+        self.episode_returns.extend(completed_episode_returns)
+
+        n_total = s.shape[0]
+        for _ in range(self.k_epochs):
+            index_set = torch.randperm(n_total, device=s.device)
+            for start in range(0, n_total, self.mini_batch_size):
+                B = index_set[start : start + self.mini_batch_size]
                 yield (
                     s[B],
                     a[B],
                     log_p_cur[B],
                     A_hat[B],
                     R_hat[B],
-                    torch.as_tensor(
-                        avg_episode_return, dtype=torch.float32, device=s.device
-                    ),
+                    torch.as_tensor(0.0, device=s.device),
                 )
 
     def __len__(self) -> int:
-        total_samples = len(self.envs) * self.rollout_steps
+        total_samples = self.sve.n_envs * self.rollout_steps
         return self.k_epochs * math.ceil(total_samples / self.mini_batch_size)
 
 
@@ -340,10 +440,10 @@ __all__ = [
     "F1TenthObservationConfig",
     "RolloutDataModule",
     "RolloutDataset",
+    "SubprocVecEnv",
     "build_observation",
     "initial_pose",
     "observation_dim",
     "obs_tensor",
-    "rollout",
     "scale_action",
 ]

@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 from dataclasses import asdict
+from functools import partial
 from pathlib import Path
 from typing import Any, cast
 
@@ -31,9 +32,7 @@ from utils.f110_env import (
     RolloutDataset,
     observation_dim,
     obs_tensor,
-    scale_action,
 )
-from utils.track_scheduler import TrackScheduler, make_track_reset_fn
 
 DEFAULT_DEVICE = torch.device(
     "cuda"
@@ -50,38 +49,51 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-# ── Task-specific reward ──────────────────────────────────────────────────────
+class F1TenthPPOReward:
+    def __init__(
+        self,
+        *,
+        waypoints_path: str | Path,
+        waypoint_proximity: float = 2.0,
+        waypoint_bonus_weight: float = 0.5,
+        collision_penalty: float = 1.0,
+        spin_threshold: float = 100.0,
+    ) -> None:
+        self.waypoint_proximity = waypoint_proximity
+        self.waypoint_bonus_weight = waypoint_bonus_weight
+        self.collision_penalty = collision_penalty
+        self.spin_threshold = spin_threshold
+        self.waypoints = np.genfromtxt(
+            str(waypoints_path), delimiter=";", comments="#", usecols=(1, 2)
+        ).reshape(-1, 2)
+        self.idx = 0
 
-
-def make_reward_controller(
-    reward_cfg: dict[str, Any],
-) -> Any:
-    speed_coef = float(reward_cfg.get("speed_coef", 2.0))
-    clearance_threshold = float(reward_cfg.get("clearance_threshold", 1.5))
-    proximity_threshold = float(reward_cfg.get("proximity_threshold", 0.5))
-    proximity_coef = float(reward_cfg.get("proximity_coef", 2.0))
-    collision_penalty = float(reward_cfg.get("collision_penalty", 1.0))
-    lap_bonus = float(reward_cfg.get("lap_bonus", 1.0))
-
-    def _reward(obs: dict[str, Any], terminated: bool) -> float:
+    def __call__(self, obs: dict[str, Any], terminated: bool) -> float:
         ego = int(obs["ego_idx"])
-        speed = float(obs["linear_vels_x"][ego])
-        collision = float(obs["collisions"][ego])
+        vx = float(obs["linear_vels_x"][ego])
+        vy = float(obs["linear_vels_y"][ego])
+        collision = bool(obs["collisions"][ego])
+        theta = float(obs["poses_theta"][ego])
 
-        if collision:
-            return -collision_penalty
-        if terminated:
-            return lap_bonus
+        if collision or abs(theta) > self.spin_threshold:
+            self.idx = 0
+            return -self.collision_penalty
 
-        min_scan = float(np.min(obs["scans"][ego]))
-        clearance_factor = np.clip(min_scan / clearance_threshold, 0.0, 1.0)
-        proximity_penalty = 0.0
-        if min_scan < proximity_threshold:
-            proximity_penalty = (proximity_threshold - min_scan) * proximity_coef
+        vel_magnitude = np.sqrt(vx * vx + vy * vy)
+        reward = float(vel_magnitude)
 
-        return speed * speed_coef * clearance_factor - proximity_penalty
+        if self.idx < len(self.waypoints):
+            wx, wy = self.waypoints[self.idx, :2]
+            px = float(obs["poses_x"][ego])
+            py = float(obs["poses_y"][ego])
+            dist = np.sqrt((px - wx) ** 2 + (py - wy) ** 2)
+            if dist < self.waypoint_proximity:
+                self.idx += 1
+                if self.idx <= len(self.waypoints):
+                    lap_frac = self.idx / len(self.waypoints)
+                    reward += float(lap_frac * self.waypoint_bonus_weight)
 
-    return _reward
+        return reward
 
 
 # ── Checkpointing ─────────────────────────────────────────────────────────────
@@ -166,6 +178,7 @@ def main() -> None:
     np.random.seed(config.runtime.seed)
 
     env_config = dict(config.env)
+    reset_pose = np.asarray(env_config.pop("initial_pose"), dtype=np.float64)
     output_dir = Path(config.output["dir"])
     observation_config = F1TenthObservationConfig(**config.observation)
     action_config = F1TenthActionConfig(**config.action)
@@ -175,45 +188,25 @@ def main() -> None:
     module = LightningPPO(policy=policy, config=config)
     ppo_iterations = config.runtime.ppo_iterations
     rollout_steps = config.runtime.rollout_steps
+    num_envs = config.runtime.num_envs
+    env_fn = partial(gym.make, "f110-v0", **env_config)
+    env_fns = [env_fn] * num_envs
 
-    # ── Multi-track setup ─────────────────────────────────────────────────
-    track_cfg = config.tracks
-    cur_cfg = track_cfg["curriculum"]
-    scheduler = TrackScheduler(
-        root="tracks",
-        holdout=track_cfg.get("holdout", []),
-        test_ratio=float(track_cfg.get("test_ratio", 0.2)),
-        seed=config.runtime.seed,
-        initial=int(cur_cfg.get("initial", 4)),
-        increment=int(cur_cfg.get("increment", 4)),
-        interval_frac=float(cur_cfg.get("interval_frac", 0.1)),
-    )
-    print(f"TrackScheduler: {scheduler}")
-    print(f"  Train: {scheduler.train_tracks}")
-    print(f"  Test:  {scheduler.test_tracks}")
-    print(f"  Holdout: {scheduler.holdout_tracks}")
-
-    # Envs initialized with dummy map — reset_fn overwrites it before first step
-    track_map_ext = env_config.get("map_ext", ".png")
-    envs = [gym.make("f110-v0", **env_config) for _ in range(config.runtime.num_envs)]
-
+    reward_params = dict(config.reward)
     episode_returns: list[float] = []
     dataset = RolloutDataset(
-        envs=envs,
+        env_fns=env_fns,
         policy=policy,
         rollout_steps=rollout_steps,
+        reward_fns=[F1TenthPPOReward(**reward_params) for _ in range(num_envs)],
         obs_fn=lambda obs: obs_tensor(obs, observation_config),
-        action_fn=lambda a_t, e: scale_action(
-            a_t.squeeze(0).detach().cpu().numpy(), e, action_config
-        ),
-        reward_fn=make_reward_controller(config.reward),
-        reset_fn=make_track_reset_fn(scheduler, ppo_iterations, track_map_ext),
+        reset_fn=lambda: {"poses": reset_pose.copy()},
         episode_returns=episode_returns,
         k_epochs=config.training.k_epochs,
         mini_batch_size=config.training.mini_batch_size,
         normalize_advantages=config.training.normalize_advantages,
+        action_config=action_config,
         device=DEFAULT_DEVICE,
-        track_scheduler=scheduler,
     )
     datamodule = RolloutDataModule(dataset)
     logger = TensorBoardLogger(save_dir=output_dir, name="tensorboard")
@@ -232,10 +225,10 @@ def main() -> None:
     )
     trainer.fit(module, datamodule=datamodule)
 
-    for update_idx, episode_return in enumerate(episode_returns):
+    for episode_idx, episode_return in enumerate(episode_returns):
         append_jsonl(
             output_dir / "metrics.jsonl",
-            {"update": update_idx, "episode_return": episode_return},
+            {"episode": episode_idx, "episode_return": episode_return},
         )
 
     save_policy(
@@ -245,8 +238,7 @@ def main() -> None:
         obs_dim=obs_dim,
         action_dim=action_dim,
     )
-    for e in envs:
-        e.close()
+    dataset.sve.close()
 
 
 if __name__ == "__main__":

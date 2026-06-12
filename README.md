@@ -62,17 +62,16 @@ python runs/train_ppo_controller.py --config configs/ppo/default.yaml
 
 The config owns the PPO iteration count, rollout length, seed, output path,
 observation settings, action bounds, policy selection, reward parameters,
-tracks (train/test split, holdout, curriculum schedule), and PPO hyperparameters.
-The default config uses a multi-track curriculum (all `tracks/` except Spielberg)
-and writes to `outputs/rl/ppo_multitrack/`.
+single training map, initial pose, and PPO hyperparameters.
+The default config trains on Spielberg and writes to `outputs/rl/ppo_spielberg/`.
 
-The scheduler prints the train/test split at launch. Per-update episode returns
-are appended to `outputs/rl/ppo_multitrack/metrics.jsonl`.
+Per-update episode returns are appended to
+`outputs/rl/ppo_spielberg/metrics.jsonl`.
 TensorBoard event files are written under
-`outputs/rl/ppo_multitrack/tensorboard/` and can be monitored with:
+`outputs/rl/ppo_spielberg/tensorboard/` and can be monitored with:
 
 ```bash
-tensorboard --logdir outputs/rl/ppo_multitrack/tensorboard
+tensorboard --logdir outputs/rl/ppo_spielberg/tensorboard
 ```
 
 Generated PPO outputs live under ignored `outputs/rl/` paths and should not be
