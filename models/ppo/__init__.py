@@ -5,6 +5,7 @@ from .config import (
     PolicyConfig,
     PPOTrainingConfig,
     RuntimeConfig,
+    ValidationConfig,
     load_ppo_config,
 )
 from .data import PPOBatch, make_update_dataset
@@ -21,6 +22,7 @@ __all__ = [
     "PolicyConfig",
     "PPOTrainingConfig",
     "RuntimeConfig",
+    "ValidationConfig",
     "compute_gae",
     "load_ppo_config",
     "make_update_dataset",

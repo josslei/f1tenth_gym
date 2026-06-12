@@ -48,3 +48,9 @@ runtime:
 
 output:
   dir: outputs/rl/ppo_f110_gym_10
+
+validation:
+  map: maps/custom/Operngasse_10/Operngasse_map
+  map_ext: .png
+  episodes: 2
+  centerline_csv: maps/custom/Operngasse_10/Operngasse_centerline.csv

@@ -40,6 +40,14 @@ class RuntimeConfig:
 
 
 @dataclass(frozen=True)
+class ValidationConfig:
+    map: str
+    map_ext: str = ".png"
+    episodes: int = 2
+    centerline_csv: str = ""
+
+
+@dataclass(frozen=True)
 class PPOConfig:
     """Structured PPO config loaded from ``configs/ppo/*.yaml``."""
 
@@ -51,6 +59,7 @@ class PPOConfig:
     training: PPOTrainingConfig
     runtime: RuntimeConfig
     output: dict[str, Any]
+    validation: ValidationConfig | None = None
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> Self:
@@ -64,6 +73,9 @@ class PPOConfig:
             training=PPOTrainingConfig(**data["training"]),
             runtime=RuntimeConfig(**data["runtime"]),
             output=data["output"],
+            validation=ValidationConfig(**data["validation"])
+            if "validation" in data
+            else None,
         )
 
     def with_policy_kwargs(self, **kwargs: Any) -> PPOConfig:
@@ -83,5 +95,6 @@ __all__ = [
     "PolicyConfig",
     "PPOTrainingConfig",
     "RuntimeConfig",
+    "ValidationConfig",
     "load_ppo_config",
 ]

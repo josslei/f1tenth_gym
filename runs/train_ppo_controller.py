@@ -32,7 +32,9 @@ from utils.f110_env import (
     RolloutDataset,
     observation_dim,
     obs_tensor,
+    scale_action,
 )
+from utils.waypoint_view import initial_pose_from_waypoints
 
 DEFAULT_DEVICE = torch.device(
     "cuda"
@@ -138,6 +140,74 @@ class DeployableCheckpoint(Callback):
             )
 
 
+class ValidationCallback(Callback):
+    def __init__(
+        self,
+        val_map: str,
+        val_map_ext: str,
+        val_episodes: int,
+        centerline_csv: str,
+        observation_config: F1TenthObservationConfig,
+        action_config: F1TenthActionConfig,
+        max_episode_steps: int,
+        device: torch.device,
+    ) -> None:
+        self.val_map = val_map
+        self.val_map_ext = val_map_ext
+        self.val_episodes = val_episodes
+        self.observation_config = observation_config
+        self.action_config = action_config
+        self.max_episode_steps = max_episode_steps
+        self.device = device
+
+        waypoints = np.loadtxt(centerline_csv, delimiter=",", skiprows=1)
+        self.val_pose = initial_pose_from_waypoints(waypoints[:, :2])
+
+    def on_train_epoch_end(
+        self, trainer: pl.Trainer, pl_module: pl.LightningModule
+    ) -> None:
+        policy: Policy = cast(Policy, pl_module.policy)
+        policy.eval()
+
+        env = gym.make(
+            "f110-v0",
+            map=self.val_map,
+            map_ext=self.val_map_ext,
+            num_agents=1,
+        )
+        val_returns: list[float] = []
+
+        for _ in range(self.val_episodes):
+            obs, _ = env.reset(options={"poses": self.val_pose.copy()})
+            ep_steps = 0
+
+            for _ in range(self.max_episode_steps):
+                obs_t = obs_tensor(obs, self.observation_config).to(self.device)
+                with torch.no_grad():
+                    action, _, _ = policy.act(obs_t, deterministic=True)
+                env_action = scale_action(
+                    action.squeeze(0).cpu().numpy(),
+                    env,
+                    self.action_config,
+                )
+                obs, _, terminated, truncated, _ = env.step(env_action)
+                ep_steps += 1
+                if terminated or truncated:
+                    break
+
+            val_returns.append(float(ep_steps))
+
+        env.close()
+        policy.train()
+
+        mean_return = float(np.mean(val_returns))
+        if trainer.logger is not None:
+            trainer.logger.log_metrics(
+                {"val/episode_return": mean_return},
+                step=trainer.current_epoch,
+            )
+
+
 def save_policy(
     output_dir: Path,
     policy: Policy,
@@ -220,11 +290,26 @@ def main() -> None:
         obs_dim=obs_dim,
         action_dim=action_dim,
     )
+    callbacks: list[Callback] = [checkpoint_callback]
+
+    if config.validation is not None:
+        val_cb = ValidationCallback(
+            val_map=config.validation.map,
+            val_map_ext=config.validation.map_ext,
+            val_episodes=config.validation.episodes,
+            centerline_csv=config.validation.centerline_csv,
+            observation_config=observation_config,
+            action_config=action_config,
+            max_episode_steps=rollout_steps,
+            device=DEFAULT_DEVICE,
+        )
+        callbacks.append(val_cb)
+
     trainer = pl.Trainer(
         max_epochs=ppo_iterations,
         enable_progress_bar=config.runtime.progress_bar,
         logger=logger,
-        callbacks=[checkpoint_callback],
+        callbacks=callbacks,
     )
     trainer.fit(module, datamodule=datamodule)
 
