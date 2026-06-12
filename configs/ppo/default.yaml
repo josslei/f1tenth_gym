@@ -1,10 +1,10 @@
 env:
-  map: Spielberg
+  map: maps/custom/f110_gym_10/f110_gym_map.yaml
   map_ext: .png
   num_agents: 1
   render_mode:
   initial_pose:
-    - [0.0, 0.0, 0.0]
+    - [1.0748956, -0.1528569, 0.0349893]
 
 observation:
   scan_size: 108
@@ -18,14 +18,14 @@ action:
   velocity_max: 8.0
 
 reward:
-  waypoints_path: outputs/waypoints/Spielberg_mintime.csv
+  waypoints_path: maps/custom/f110_gym_10/example_waypoints.csv
   waypoint_proximity: 2.0
   waypoint_bonus_weight: 0.5
   collision_penalty: 1.0
   spin_threshold: 100.0
 
 policy:
-  name: ResidualMLPPolicy
+  name: GaussianMLPPolicy
   kwargs:
     hidden_size: 64
 
@@ -47,4 +47,4 @@ runtime:
   num_envs: 4
 
 output:
-  dir: outputs/rl/ppo_spielberg
+  dir: outputs/rl/ppo_f110_gym_10

@@ -2,26 +2,26 @@ from pathlib import Path
 
 import torch.nn as nn
 
-from models.policies import Policy, ResidualMLPPolicy, make_policy
+from models.policies import GaussianMLPPolicy, Policy, make_policy
 from models.ppo import PPOConfig, PolicyConfig
 
 
-def test_default_ppo_config_selects_residual_mlp_policy():
+def test_default_ppo_config_selects_gaussian_mlp_policy():
     config = PPOConfig.from_yaml(Path("configs/ppo/default.yaml"))
 
-    assert config.policy.name == "ResidualMLPPolicy"
+    assert config.policy.name == "GaussianMLPPolicy"
     assert config.policy.kwargs == {"hidden_size": 64}
 
 
 def test_make_policy_instantiates_configured_policy():
     policy_config = PolicyConfig(
-        name="ResidualMLPPolicy",
+        name="GaussianMLPPolicy",
         kwargs={"hidden_size": 64},
     )
 
     policy = make_policy(policy_config, obs_dim=10, action_dim=2)
 
-    assert isinstance(policy, ResidualMLPPolicy)
+    assert isinstance(policy, GaussianMLPPolicy)
     assert isinstance(policy, Policy)
     assert policy.obs_dim == 10
     assert policy.action_dim == 2

@@ -63,16 +63,16 @@ python runs/train_ppo_controller.py --config configs/ppo/default.yaml
 The config owns the PPO iteration count, rollout length, seed, output path,
 observation settings, action bounds, policy selection, reward parameters,
 single training map, initial pose, and PPO hyperparameters.
-The default config trains on Spielberg and writes to `outputs/rl/ppo_spielberg/`.
+The default config trains on ``f110_gym_10`` and writes to ``outputs/rl/ppo_f110_gym_10/``.
 
 Per-update episode returns are appended to
-`outputs/rl/ppo_spielberg/metrics.jsonl`.
+``outputs/rl/ppo_f110_gym_10/metrics.jsonl``.
 TensorBoard event files are written under
-`outputs/rl/ppo_spielberg/tensorboard/` and can be monitored with:
+``outputs/rl/ppo_f110_gym_10/tensorboard/`` and can be monitored with:
 
-```bash
-tensorboard --logdir outputs/rl/ppo_spielberg/tensorboard
-```
+.. code:: bash
+
+   tensorboard --logdir outputs/rl/ppo_f110_gym_10/tensorboard
 
 Generated PPO outputs live under ignored `outputs/rl/` paths and should not be
 committed.
@@ -136,7 +136,7 @@ python scripts/generate_map.py \
   value for big tracks to keep image dimensions reasonable).
 
 Pass the resulting YAML path (or the track's own map YAML) to the waypoint
-drive script, e.g. `MAP = "maps/f1tenth_racetracks/Spielberg/Spielberg_map"`.
+drive script, e.g. ``MAP = "maps/custom/f110_gym_10/f110_gym_map"``.
 
 ## Notes
 

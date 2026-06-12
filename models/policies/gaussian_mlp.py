@@ -10,7 +10,7 @@ from torch import Tensor
 from .base import Policy
 
 
-class ResidualMLPPolicy(Policy):
+class GaussianMLPPolicy(Policy):
     def __init__(
         self,
         obs_dim: int,
@@ -72,4 +72,4 @@ class ResidualMLPPolicy(Policy):
         return log_prob, entropy, value
 
 
-__all__ = ["ResidualMLPPolicy"]
+__all__ = ["GaussianMLPPolicy"]

@@ -21,8 +21,8 @@ from utils.waypoint_view import initial_pose_from_waypoints
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 
-MAP = "maps/f1tenth_racetracks/Spielberg/Spielberg_map"
-CHECKPOINT = "outputs/rl/ppo_spielberg/final_model.pt"
+MAP = "maps/custom/f110_gym_10/f110_gym_map"
+CHECKPOINT = "outputs/rl/ppo_f110_gym_10/final_model.pt"
 ZOOM = 2.0
 WINDOW_WIDTH = 1000
 WINDOW_HEIGHT = 800
@@ -58,7 +58,8 @@ def main() -> None:
 
     # Derive initial pose from the track centerline (mirrors waypoint_drive.py)
     map_path = Path(MAP)
-    centerline_csv = map_path.parent / f"{map_path.parent.name}_centerline.csv"
+    track_name = map_path.stem.removesuffix("_map")
+    centerline_csv = map_path.parent / f"{track_name}_centerline.csv"
     waypoints = np.loadtxt(centerline_csv, delimiter=",", skiprows=1)
     initial_pose = initial_pose_from_waypoints(waypoints[:, :2])
 
