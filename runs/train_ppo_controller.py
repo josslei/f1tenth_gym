@@ -250,7 +250,12 @@ def main() -> None:
     np.random.seed(config.runtime.seed)
 
     env_config = dict(config.env)
-    reset_pose = np.asarray(env_config.pop("initial_pose"), dtype=np.float64)
+    centerline_csv = env_config.pop("centerline_csv", None)
+    if centerline_csv:
+        centerline_data = np.loadtxt(centerline_csv, delimiter=",", skiprows=1)
+        reset_pose = initial_pose_from_waypoints(centerline_data[:, :2])
+    else:
+        reset_pose = np.asarray(env_config.pop("initial_pose"), dtype=np.float64)
     output_dir = Path(config.output["dir"])
     observation_config = F1TenthObservationConfig(**config.observation)
     action_config = F1TenthActionConfig(**config.action)

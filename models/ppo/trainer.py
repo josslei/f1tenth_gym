@@ -96,14 +96,21 @@ class LightningPPO(pl.LightningModule):
         nn.utils.clip_grad_norm_(self.parameters(), training_config.max_grad_norm)
         optimizer.step()
 
-        self.log("train/loss", loss)
-        self.log("train/L_PPO", loss_dict["L_PPO"])
-        self.log("train/L_clip", loss_dict["L_clip"])
-        self.log("train/L_V", loss_dict["L_V"])
-        self.log("train/L_H", loss_dict["L_H"])
-        self.log("train/rho", loss_dict["rho"])
-        self.log("train/approx_kl", loss_dict["approx_kl"])
-        self.log("train/clip_fraction", loss_dict["clip_fraction"])
+        self.log("train/loss", loss, on_step=False, on_epoch=True)
+        self.log("train/L_PPO", loss_dict["L_PPO"], on_step=False, on_epoch=True)
+        self.log("train/L_clip", loss_dict["L_clip"], on_step=False, on_epoch=True)
+        self.log("train/L_V", loss_dict["L_V"], on_step=False, on_epoch=True)
+        self.log("train/L_H", loss_dict["L_H"], on_step=False, on_epoch=True)
+        self.log("train/rho", loss_dict["rho"], on_step=False, on_epoch=True)
+        self.log(
+            "train/approx_kl", loss_dict["approx_kl"], on_step=False, on_epoch=True
+        )
+        self.log(
+            "train/clip_fraction",
+            loss_dict["clip_fraction"],
+            on_step=False,
+            on_epoch=True,
+        )
         self.log("train/episode_return", episode_return, on_step=False, on_epoch=True)
 
         return loss
