@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from .base import Policy
 from .gaussian_actor_critic import GaussianActorCritic
+from .residual_mlp import ResidualMLPPolicy
 
 if TYPE_CHECKING:
     from models.ppo.config import PolicyConfig
@@ -13,6 +14,7 @@ if TYPE_CHECKING:
 
 POLICY_REGISTRY: dict[str, type[Policy]] = {
     "GaussianActorCritic": GaussianActorCritic,
+    "ResidualMLPPolicy": ResidualMLPPolicy,
 }
 
 
@@ -21,4 +23,10 @@ def make_policy(config: PolicyConfig, obs_dim: int, action_dim: int) -> Policy:
     return policy_type(obs_dim=obs_dim, action_dim=action_dim, **config.kwargs)
 
 
-__all__ = ["GaussianActorCritic", "POLICY_REGISTRY", "Policy", "make_policy"]
+__all__ = [
+    "GaussianActorCritic",
+    "POLICY_REGISTRY",
+    "Policy",
+    "ResidualMLPPolicy",
+    "make_policy",
+]

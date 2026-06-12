@@ -15,17 +15,23 @@ action:
   velocity_max: 8.0
 
 reward:
-  speed_coef: 2.0               # multiplier for forward speed reward
-  clearance_threshold: 1.5      # min scan (m) at which clearance_factor = 1.0
-  proximity_threshold: 0.5      # scan (m) below which proximity penalty activates
-  proximity_coef: 2.0           # multiplier for proximity penalty
-  collision_penalty: 1.0        # penalty for collision
-  lap_bonus: 1.0                # bonus for clean lap completion
+  # Reference PPO reward from F1Tenth-RL (ref/F1Tenth-RL/code/wrappers.py):
+  #   reward = ||v||_2  +  (count/N) * waypoint_bonus_weight  -  collision_penalty
+  # with spin termination at |poses_theta| > spin_threshold.
+  waypoint_proximity: 2.0       # m — distance to trigger waypoint progress bonus
+  waypoint_bonus_weight: 0.5    # max bonus fraction per reached waypoint
+  collision_penalty: 1.0        # hard penalty on collision (returned as -value)
+  spin_threshold: 100.0         # |poses_theta| beyond which episode terminates
 
 policy:
-  name: GaussianActorCritic
+  name: ResidualMLPPolicy
   kwargs:
-    hidden_size: 128
+    scan_size: 108
+    state_dim: 6
+    width: 192
+    head_width: 96
+    num_residual_blocks: 1
+    activation: relu
 
 training:
   k_epochs: 10
