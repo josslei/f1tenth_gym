@@ -19,7 +19,9 @@ action:
   velocity_max: 8.0
 
 reward:
-  waypoints_path: maps/custom/f110_gym_10/example_waypoints.csv
+  waypoints_path: maps/custom/f110_gym_10/f110_gym_centerline.csv
+  delimiter: ","
+  usecols: [0, 1]
   waypoint_proximity: 2.0
   waypoint_bonus_weight: 0.5
   collision_penalty: 1.0
@@ -32,7 +34,7 @@ policy:
 
 training:
   k_epochs: 10
-  mini_batch_size: 128
+  mini_batch_size: 256
   learning_rate: 0.0003
   epsilon: 0.2
   c1: 0.5
@@ -42,7 +44,7 @@ training:
 
 runtime:
   seed: 42
-  ppo_iterations: 500
+  ppo_iterations: 1000
   rollout_steps: 2048
   progress_bar: true
   num_envs: 4

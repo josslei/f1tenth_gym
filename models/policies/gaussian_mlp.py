@@ -9,6 +9,9 @@ from torch import Tensor
 
 from .base import Policy
 
+LOG_STD_MIN = -20.0
+LOG_STD_MAX = 2.0
+
 
 class GaussianMLPPolicy(Policy):
     def __init__(
@@ -39,7 +42,8 @@ class GaussianMLPPolicy(Policy):
 
     def _distribution(self, obs: Tensor) -> Tuple[Any, Tensor]:
         mean, value = self(obs)
-        std = torch.exp(self.log_std).expand_as(mean)
+        log_std = torch.clamp(self.log_std, LOG_STD_MIN, LOG_STD_MAX)
+        std = torch.exp(log_std).expand_as(mean)
         dist = torch.distributions.Normal(mean, std)
         return dist, value
 

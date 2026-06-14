@@ -60,22 +60,24 @@ class F1TenthPPOReward:
         waypoint_bonus_weight: float = 0.5,
         collision_penalty: float = 1.0,
         spin_threshold: float = 100.0,
+        delimiter: str = ";",
+        usecols: tuple[int, int] = (1, 2),
     ) -> None:
         self.waypoint_proximity = waypoint_proximity
         self.waypoint_bonus_weight = waypoint_bonus_weight
         self.collision_penalty = collision_penalty
         self.spin_threshold = spin_threshold
         self.waypoints = np.genfromtxt(
-            str(waypoints_path), delimiter=";", comments="#", usecols=(1, 2)
+            str(waypoints_path), delimiter=delimiter, comments="#", usecols=usecols
         ).reshape(-1, 2)
         self.idx = 0
 
     def __call__(self, obs: dict[str, Any], terminated: bool) -> float:
         ego = int(obs["ego_idx"])
-        vx = float(obs["linear_vels_x"][ego])
-        vy = float(obs["linear_vels_y"][ego])
+        vx = float(np.nan_to_num(obs["linear_vels_x"][ego], nan=0.0))
+        vy = float(np.nan_to_num(obs["linear_vels_y"][ego], nan=0.0))
         collision = bool(obs["collisions"][ego])
-        theta = float(obs["poses_theta"][ego])
+        theta = float(np.nan_to_num(obs["poses_theta"][ego], nan=0.0))
 
         if terminated:
             self.idx = 0
@@ -88,8 +90,8 @@ class F1TenthPPOReward:
 
         if self.idx < len(self.waypoints):
             wx, wy = self.waypoints[self.idx, :2]
-            px = float(obs["poses_x"][ego])
-            py = float(obs["poses_y"][ego])
+            px = float(np.nan_to_num(obs["poses_x"][ego], nan=0.0))
+            py = float(np.nan_to_num(obs["poses_y"][ego], nan=0.0))
             dist = np.sqrt((px - wx) ** 2 + (py - wy) ** 2)
             if dist < self.waypoint_proximity:
                 self.idx += 1

@@ -232,7 +232,8 @@ def ppo_loss(
         - ``approx_kl``       ``mean(log_p_cur − log_p_new)`` (detached)
         - ``clip_fraction``   fraction of samples where ``|rho − 1| > ε``
     """
-    rho = torch.exp(log_p_new - log_p_cur)
+    log_ratio = torch.clamp(log_p_new - log_p_cur, -20.0, 20.0)
+    rho = torch.exp(log_ratio)
 
     unclipped = rho * A_hat
     clipped = torch.clamp(rho, 1.0 - epsilon, 1.0 + epsilon) * A_hat
@@ -245,7 +246,7 @@ def ppo_loss(
     loss = -L_PPO
 
     with torch.no_grad():
-        approx_kl = (log_p_cur - log_p_new).mean()
+        approx_kl = (-log_ratio).mean()
         clip_fraction = ((rho - 1.0).abs() > epsilon).float().mean()
 
     return {
