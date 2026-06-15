@@ -17,6 +17,34 @@ def nearest_waypoint_index(
     return _nearest_waypoint_index(waypoints, position, start_idx, search_window)
 
 
+def resample_path(waypoints_xy: np.ndarray, spacing: float = 0.5) -> np.ndarray:
+    """Resample a 2-D path at fixed arc-length spacing.
+
+    The input path is interpolated linearly along cumulative arc length so
+    that consecutive output points are separated by *spacing* metres.  The
+    total number of points is ``ceil(total_length / spacing)``.
+
+    Args:
+        waypoints_xy:  ``(N, 2)`` array of path points.
+        spacing:       Desired arc length between consecutive points.
+
+    Returns:
+        ``(M, 2)`` array of uniformly spaced points.
+    """
+    diffs = np.diff(waypoints_xy, axis=0)
+    seg_lengths = np.sqrt((diffs**2).sum(axis=1))
+    cum_lengths = np.concatenate([[0.0], np.cumsum(seg_lengths)])
+    total_length = float(cum_lengths[-1])
+    if total_length == 0.0:
+        return waypoints_xy.astype(np.float64, copy=True)
+    new_cum_lengths = np.arange(0.0, total_length, spacing)
+    new_cum_lengths = np.append(new_cum_lengths, total_length)
+    result = np.empty((len(new_cum_lengths), 2), dtype=np.float64)
+    for j in range(2):
+        result[:, j] = np.interp(new_cum_lengths, cum_lengths, waypoints_xy[:, j])
+    return result
+
+
 @njit(cache=True)
 def _nearest_waypoint_index(
     waypoints: np.ndarray,

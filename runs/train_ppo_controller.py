@@ -34,9 +34,11 @@ from utils.f110_env import (
     F1TenthObservationConfig,
     RolloutDataModule,
     RolloutDataset,
+    add_control_state,
     observation_dim,
     obs_tensor,
     scale_action,
+    with_resampled_waypoints,
 )
 from utils.waypoint_view import initial_pose_from_waypoints
 
@@ -136,12 +138,14 @@ class DeployableCheckpoint(Callback):
         policy_config: PolicyConfig,
         obs_dim: int,
         action_dim: int,
+        observation_config: F1TenthObservationConfig | None = None,
     ) -> None:
         self.dirpath = Path(dirpath)
         self.every_n_epochs = every_n_epochs
         self.policy_config = policy_config
         self.obs_dim = obs_dim
         self.action_dim = action_dim
+        self.observation_config = observation_config
 
     def on_train_epoch_end(
         self, trainer: pl.Trainer, pl_module: pl.LightningModule
@@ -155,6 +159,7 @@ class DeployableCheckpoint(Callback):
                 policy_config=self.policy_config,
                 obs_dim=self.obs_dim,
                 action_dim=self.action_dim,
+                observation_config=self.observation_config,
                 filename=f"policy-epoch-{epoch:04d}.pt",
             )
 
@@ -181,6 +186,10 @@ class ValidationCallback(Callback):
 
         waypoints = np.loadtxt(centerline_csv, delimiter=",", skiprows=1)
         self.val_pose = initial_pose_from_waypoints(waypoints[:, :2])
+        if self.observation_config.include_waypoints:
+            self.observation_config = with_resampled_waypoints(
+                self.observation_config, waypoints[:, :2]
+            )
 
     def on_train_epoch_end(
         self, trainer: pl.Trainer, pl_module: pl.LightningModule
@@ -198,6 +207,7 @@ class ValidationCallback(Callback):
 
         for _ in range(self.val_episodes):
             obs, _ = env.reset(options={"poses": self.val_pose.copy()})
+            obs = add_control_state(obs, env)
             ep_steps = 0
 
             for _ in range(self.max_episode_steps):
@@ -210,6 +220,7 @@ class ValidationCallback(Callback):
                     self.action_config,
                 )
                 obs, _, terminated, truncated, _ = env.step(env_action)
+                obs = add_control_state(obs, env)
                 ep_steps += 1
                 if terminated or truncated:
                     break
@@ -233,23 +244,27 @@ def save_policy(
     policy_config: PolicyConfig,
     obs_dim: int,
     action_dim: int,
+    observation_config: F1TenthObservationConfig | None = None,
     filename: str = "final_model.pt",
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {
-            "hyper_parameters": {
-                "obs_dim": obs_dim,
-                "action_dim": action_dim,
-                "policy": asdict(policy_config),
-            },
+    payload: dict[str, Any] = {
+        "hyper_parameters": {
             "obs_dim": obs_dim,
             "action_dim": action_dim,
             "policy": asdict(policy_config),
-            "policy_state_dict": policy.state_dict(),
         },
-        output_dir / filename,
-    )
+        "obs_dim": obs_dim,
+        "action_dim": action_dim,
+        "policy": asdict(policy_config),
+        "policy_state_dict": policy.state_dict(),
+    }
+    if observation_config is not None:
+        obs_cfg_dict = {
+            k: v for k, v in asdict(observation_config).items() if not k.startswith("_")
+        }
+        payload["observation_config"] = obs_cfg_dict
+    torch.save(payload, output_dir / filename)
 
 
 def append_jsonl(path: Path, record: dict[str, Any]) -> None:
@@ -270,6 +285,7 @@ def main() -> None:
 
     env_config = dict(config.env)
     centerline_csv = env_config.pop("centerline_csv", None)
+    centerline_data: np.ndarray | None = None
     if centerline_csv:
         centerline_data = np.loadtxt(centerline_csv, delimiter=",", skiprows=1)
         reset_pose = initial_pose_from_waypoints(centerline_data[:, :2])
@@ -277,6 +293,12 @@ def main() -> None:
         reset_pose = np.asarray(env_config.pop("initial_pose"), dtype=np.float64)
     output_dir = Path(config.output["dir"])
     observation_config = F1TenthObservationConfig(**config.observation)
+
+    if observation_config.include_waypoints and centerline_data is not None:
+        observation_config = with_resampled_waypoints(
+            observation_config, centerline_data[:, :2]
+        )
+
     action_config = F1TenthActionConfig(**config.action)
     obs_dim = observation_dim(observation_config)
     action_dim = 2
@@ -313,6 +335,7 @@ def main() -> None:
         policy_config=config.policy,
         obs_dim=obs_dim,
         action_dim=action_dim,
+        observation_config=observation_config,
     )
     callbacks: list[Callback] = [checkpoint_callback]
 
@@ -349,6 +372,7 @@ def main() -> None:
         policy_config=config.policy,
         obs_dim=obs_dim,
         action_dim=action_dim,
+        observation_config=observation_config,
     )
     dataset.sve.close()
 

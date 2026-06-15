@@ -4,6 +4,12 @@ import numpy as np
 from typing import cast
 
 from f110_gym.envs.f110_env import F110Env
+from utils.f110_env import (
+    F1TenthObservationConfig,
+    add_control_state,
+    build_observation,
+    observation_dim,
+)
 
 
 def _center_poses(env):
@@ -36,12 +42,21 @@ def test_gymnasium_registration_reset_and_step():
         _check_obs_against_space(f110_env, obs)
         assert obs["scans"].shape == (f110_env.num_agents, 1080)
         assert obs["poses_x"].shape == (f110_env.num_agents,)
+        assert "steer_angle" not in obs
+
+        observation_config = F1TenthObservationConfig(scan_size=4)
+        ppo_obs = build_observation(
+            add_control_state(obs, f110_env), observation_config
+        )
+        assert ppo_obs.shape == (observation_dim(observation_config),)
+        assert np.isclose(ppo_obs[7], 0.0)  # steer_angle is 0 at reset
 
         action = np.zeros((f110_env.num_agents, 2), dtype=np.float64)
         obs, reward, terminated, truncated, step_info = f110_env.step(action)
 
         _check_obs_against_space(f110_env, obs)
         assert obs["scans"].shape == (f110_env.num_agents, 1080)
+        assert "steer_angle" not in obs
         assert reward == f110_env.timestep
         assert isinstance(terminated, (bool, np.bool_))
         assert truncated is False

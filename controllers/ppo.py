@@ -25,6 +25,7 @@ from utils.f110_env import (
     F1TenthObservationConfig,
     build_observation,
     DEFAULT_DEVICE,
+    with_resampled_waypoints,
 )
 
 # ── Default action bounds ─────────────────────────────────────────────────────
@@ -86,6 +87,7 @@ class PPOController(Controller):
         action_config: F1TenthActionConfig | None = None,
         steering_min: float = STEERING_MIN,
         steering_max: float = STEERING_MAX,
+        waypoint_path: str | Path | None = None,
         device: torch.device = DEFAULT_DEVICE,
     ) -> PPOController:
         """Construct from a ``final_model.pt`` checkpoint saved by
@@ -105,7 +107,20 @@ class PPOController(Controller):
         policy.load_state_dict(checkpoint["policy_state_dict"])
 
         if observation_config is None:
-            observation_config = F1TenthObservationConfig()
+            if "observation_config" in checkpoint:
+                observation_config = F1TenthObservationConfig(
+                    **checkpoint["observation_config"]
+                )
+            else:
+                observation_config = F1TenthObservationConfig()
+
+        if observation_config.include_waypoints and waypoint_path is not None:
+            waypoints_xy = np.loadtxt(str(waypoint_path), delimiter=",", skiprows=1)[
+                :, :2
+            ]
+            observation_config = with_resampled_waypoints(
+                observation_config, waypoints_xy
+            )
 
         velocity_min = VELOCITY_MIN
         velocity_max = VELOCITY_MAX
@@ -135,12 +150,10 @@ class PPOController(Controller):
     ) -> None:
         """Receive the latest vehicle state and an optional raw gym observation.
 
-        The raw ``obs`` dict (from ``env.step()`` or ``env.reset()``) is
-        required for :meth:`control` to produce a meaningful action.  It
-        should contain the keys ``"scans"``, ``"ego_idx"``, and (when
-        ``include_ego_state`` is active) ``"linear_vels_x"``,
-        ``"linear_vels_y"``, ``"ang_vels_z"``, ``"poses_theta"``, and
-        ``"collisions"``.
+        The PPO-augmented ``obs`` dict is required for :meth:`control` to
+        produce a meaningful action.  It should contain the raw environment
+        keys plus ``"steer_angle"`` from ``utils.f110_env.add_control_state``
+        when ``include_ego_state`` is active.
         """
         self.vehicle_state = vehicle_state
         if obs is not None:

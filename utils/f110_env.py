@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 import math
 import multiprocessing as mp
 from multiprocessing.connection import Connection
@@ -16,6 +16,7 @@ from torch.utils.data import DataLoader, IterableDataset
 
 from models.policies import Policy
 from models.ppo import compute_gae
+from utils.waypoint_utils import nearest_waypoint_index, resample_path
 
 
 DEFAULT_MAP = "Spielberg"
@@ -33,6 +34,24 @@ def initial_pose() -> np.ndarray:
     return DEFAULT_POSE.copy()
 
 
+def add_control_state(obs: dict[str, Any], env: Any) -> dict[str, Any]:
+    augmented = dict(obs)
+    f110_env = env.unwrapped
+    augmented["steer_angle"] = np.asarray(
+        [agent.state[2] for agent in f110_env.sim.agents], dtype=np.float64
+    )
+    return augmented
+
+
+def with_resampled_waypoints(
+    config: F1TenthObservationConfig, waypoints_xy: np.ndarray
+) -> F1TenthObservationConfig:
+    return replace(
+        config,
+        _waypoints=resample_path(waypoints_xy, config.waypoint_resample_spacing),
+    )
+
+
 # ── Config dataclasses ────────────────────────────────────────────────────────
 
 
@@ -43,6 +62,29 @@ class F1TenthObservationConfig:
     include_ego_state: bool = True
     speed_scale: float = 8.0
     yaw_rate_scale: float = 10.0
+    steer_scale: float = 1.066
+
+    # ── waypoint features ──────────────────────────────────────────────────
+    include_waypoints: bool = False
+    lookahead_distances: tuple[float, ...] = (
+        0.5,
+        1.0,
+        2.0,
+        3.5,
+        5.5,
+        8.0,
+        11.0,
+        14.5,
+        18.5,
+        23.0,
+        28.0,
+        33.0,
+    )
+    waypoint_scale: float = 30.0
+    waypoint_resample_spacing: float = 0.5
+
+    # Internal — set at runtime after loading the map's centerline.
+    _waypoints: np.ndarray | None = field(default=None, repr=False, compare=False)
 
     # TODO(Fix 6): Add temporal context support for PPO convergence.
     #   A future `frame_stack: int = 1` field should make observation_dim()
@@ -62,8 +104,11 @@ class F1TenthActionConfig:
 
 
 def observation_dim(config: F1TenthObservationConfig) -> int:
-    ego_state_dim = 6 if config.include_ego_state else 0
-    return config.scan_size + ego_state_dim
+    ego_state_dim = 7 if config.include_ego_state else 0
+    waypoint_dim = (
+        len(config.lookahead_distances) * 2 if config.include_waypoints else 0
+    )
+    return config.scan_size + ego_state_dim + waypoint_dim
 
 
 def build_observation(
@@ -88,6 +133,7 @@ def build_observation(
         linear_vels_x = np.asarray(obs["linear_vels_x"], dtype=np.float64)[ego]
         linear_vels_y = np.asarray(obs["linear_vels_y"], dtype=np.float64)[ego]
         ang_vels_z = np.asarray(obs["ang_vels_z"], dtype=np.float64)[ego]
+        steer_angle = np.asarray(obs["steer_angle"], dtype=np.float64)[ego]
         theta = np.asarray(obs["poses_theta"], dtype=np.float64)[ego]
         collision = np.asarray(obs["collisions"], dtype=np.float64)[ego]
         features.append(
@@ -96,6 +142,7 @@ def build_observation(
                     np.clip(linear_vels_x / config.speed_scale, -1.0, 1.0),
                     np.clip(linear_vels_y / config.speed_scale, -1.0, 1.0),
                     np.clip(ang_vels_z / config.yaw_rate_scale, -1.0, 1.0),
+                    np.clip(steer_angle / config.steer_scale, -1.0, 1.0),
                     np.sin(theta),
                     np.cos(theta),
                     np.clip(collision, 0.0, 1.0),
@@ -103,6 +150,38 @@ def build_observation(
                 dtype=np.float64,
             )
         )
+
+    if config.include_waypoints and len(config.lookahead_distances) > 0:
+        if config._waypoints is None:
+            features.append(
+                np.zeros(len(config.lookahead_distances) * 2, dtype=np.float64)
+            )
+        else:
+            px = float(np.nan_to_num(obs["poses_x"][ego], nan=0.0))
+            py = float(np.nan_to_num(obs["poses_y"][ego], nan=0.0))
+            theta = float(np.nan_to_num(obs["poses_theta"][ego], nan=0.0))
+            position = np.array([px, py], dtype=np.float64)
+            wp = config._waypoints
+            nearest_idx = nearest_waypoint_index(wp, position)
+            n_wp = wp.shape[0]
+            cos_t = np.cos(theta)
+            sin_t = np.sin(theta)
+            waypoint_vals: list[float] = []
+            spacing = config.waypoint_resample_spacing
+            for d in config.lookahead_distances:
+                offset = max(1, int(round(d / spacing)))
+                idx = (nearest_idx + offset) % n_wp
+                dx = wp[idx, 0] - px
+                dy = wp[idx, 1] - py
+                x_rel = cos_t * dx + sin_t * dy
+                y_rel = -sin_t * dx + cos_t * dy
+                waypoint_vals.append(
+                    float(np.clip(x_rel / config.waypoint_scale, -1.0, 1.0))
+                )
+                waypoint_vals.append(
+                    float(np.clip(y_rel / config.waypoint_scale, -1.0, 1.0))
+                )
+            features.append(np.array(waypoint_vals, dtype=np.float64))
 
     return np.nan_to_num(
         np.concatenate(features).astype(np.float32),
@@ -175,6 +254,7 @@ def _env_worker(
             obs_dict, info = (
                 env.reset(options=data) if data is not None else env.reset()
             )
+            obs_dict = add_control_state(obs_dict, env)
             pipe.send(obs_dict)
         elif cmd == "step":
             norm = np.asarray(data, dtype=np.float64).reshape(2)
@@ -196,12 +276,14 @@ def _env_worker(
                 dtype=np.float64,
             )
             obs_dict, _, terminated, truncated, info = env.step(env_action)
+            obs_dict = add_control_state(obs_dict, env)
             episode_steps += 1
             if episode_steps >= max_episode_steps:
                 truncated = True
             if terminated or truncated:
                 episode_steps = 0
                 reset_obs, _ = env.reset(options=current_reset_options)
+                reset_obs = add_control_state(reset_obs, env)
                 pipe.send((obs_dict, terminated, truncated, reset_obs))
             else:
                 pipe.send((obs_dict, terminated, truncated, None))

@@ -17,6 +17,7 @@ import f110_gym  # noqa: F401 - registers f110-v0
 from controllers import PPOController
 from controllers.controller_base import VehicleState
 from f110_gym.viewer import F110Viewer
+from utils.f110_env import add_control_state
 from utils.waypoint_view import initial_pose_from_waypoints
 
 # ── Configuration ──────────────────────────────────────────────────────────────
@@ -46,7 +47,10 @@ def obs_to_vehicle_state(obs: dict[str, Any]) -> VehicleState:
 
 def main() -> None:
     env = gym.make("f110-v0", map=MAP, num_agents=1)
-    controller = PPOController.from_checkpoint(CHECKPOINT)
+    map_path = Path(MAP)
+    track_name = map_path.stem.removesuffix("_map")
+    centerline_csv = map_path.parent / f"{track_name}_centerline.csv"
+    controller = PPOController.from_checkpoint(CHECKPOINT, waypoint_path=centerline_csv)
 
     viewer = F110Viewer.from_env(
         env.unwrapped,
@@ -57,13 +61,11 @@ def main() -> None:
     )
 
     # Derive initial pose from the track centerline (mirrors waypoint_drive.py)
-    map_path = Path(MAP)
-    track_name = map_path.stem.removesuffix("_map")
-    centerline_csv = map_path.parent / f"{track_name}_centerline.csv"
     waypoints = np.loadtxt(centerline_csv, delimiter=",", skiprows=1)
     initial_pose = initial_pose_from_waypoints(waypoints[:, :2])
 
     obs, _info = env.reset(options={"poses": initial_pose})
+    obs = add_control_state(obs, env)
 
     viewer.update(obs)
     viewer.render()
@@ -75,6 +77,7 @@ def main() -> None:
         action = np.array([[cmd.steering, cmd.velocity]], dtype=np.float64)
 
         obs, _reward, terminated, truncated, _info = env.step(action)
+        obs = add_control_state(obs, env)
         viewer.update(obs)
         viewer.render()
 

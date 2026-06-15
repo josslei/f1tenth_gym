@@ -13,6 +13,11 @@ observation:
   include_ego_state: true
   speed_scale: 8.0
   yaw_rate_scale: 10.0
+  steer_scale: 1.066
+  include_waypoints: false
+  lookahead_distances: [0.5, 1.0, 2.0, 3.5, 5.5, 8.0, 11.0, 14.5, 18.5, 23.0, 28.0, 33.0]
+  waypoint_scale: 30.0
+  waypoint_resample_spacing: 0.5
 
 action:
   velocity_min: 1.0
