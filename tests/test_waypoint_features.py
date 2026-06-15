@@ -46,7 +46,7 @@ class TestObservationDimWithWaypoints:
             include_ego_state=True,
             include_waypoints=False,
         )
-        assert observation_dim(config) == 4 + 7  # 7 ego-state features
+        assert observation_dim(config) == 4 + 7 + 2  # 7 ego-state + 2 prev_action
 
     def test_with_waypoints_adds_2_per_lookahead(self):
         config = F1TenthObservationConfig(
@@ -54,13 +54,13 @@ class TestObservationDimWithWaypoints:
             include_waypoints=True,
             lookahead_distances=(0.5, 1.0, 2.0),
         )
-        # 4 scan + 7 ego + 3*2 waypoints = 17
-        assert observation_dim(config) == 4 + 7 + 6
+        # 4 scan + 7 ego + 3*2 waypoints + 2 prev_action = 19
+        assert observation_dim(config) == 4 + 7 + 6 + 2
 
     def test_backward_compat(self):
         default = F1TenthObservationConfig()
         assert default.include_waypoints is False
-        assert observation_dim(default) == 108 + 7  # no extra waypoint dim
+        assert observation_dim(default) == 108 + 7 + 2  # no extra waypoint dim
 
 
 # ── build_observation with waypoints ──────────────────────────────────────────
@@ -90,7 +90,7 @@ class TestBuildObservationWithWaypoints:
         )
         obs = _make_reset_obs()
         result = build_observation(obs, config)
-        assert result.shape == (4 + 7,)
+        assert result.shape == (4 + 7 + 2,)
 
     def test_with_waypoints_appended(self):
         wp = np.array(
@@ -113,13 +113,15 @@ class TestBuildObservationWithWaypoints:
         )
         obs = _make_reset_obs()
         result = build_observation(obs, config)
-        # 4 scan + 7 ego + 2*2 waypoint = 15
-        assert result.shape == (4 + 7 + 4,)
-        # Car at (0,0,0), nearest point is (0,0), offset 1 → (0.5,0), offset 2 → (1.0,0)
-        # x_rel / 30.0 = 0.5/30.0 ≈ 0.0167, y_rel = 0.0
-        assert np.isclose(result[-4], 0.5 / 30.0)
+        # 4 scan + 7 ego + 2*2 waypoints + 2 prev_action = 17
+        assert result.shape == (4 + 7 + 4 + 2,)
+        # Car at (0,0,0), nearest is (0,0), offset 1 → (0.5,0), offset 2 → (1.0,0)
+        # x_rel/30.0: 0.5/30 ≈ 0.0167, then 1.0/30 ≈ 0.0333.  Prev_action zeros at end.
+        assert np.isclose(result[-6], 0.5 / 30.0)
+        assert np.isclose(result[-5], 0.0)
+        assert np.isclose(result[-4], 1.0 / 30.0)
         assert np.isclose(result[-3], 0.0)
-        assert np.isclose(result[-2], 1.0 / 30.0)
+        assert np.isclose(result[-2], 0.0)
         assert np.isclose(result[-1], 0.0)
 
     def test_without_waypoints_when_internal_none(self):
@@ -132,5 +134,5 @@ class TestBuildObservationWithWaypoints:
         )
         obs = _make_reset_obs()
         result = build_observation(obs, config)
-        assert result.shape == (4 + 7 + 2,)
+        assert result.shape == (4 + 7 + 2 + 2,)
         assert np.allclose(result[-2:], [0.0, 0.0])

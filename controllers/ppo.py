@@ -78,6 +78,7 @@ class PPOController(Controller):
 
         self.vehicle_state = VehicleState(0, 0, 0, 0)
         self._obs: dict[str, Any] | None = None
+        self._last_normalized_action: np.ndarray = np.zeros(2, dtype=np.float64)
 
     @classmethod
     def from_checkpoint(
@@ -167,6 +168,7 @@ class PPOController(Controller):
         if self._obs is None:
             return ControlCommand(steering=0.0, velocity=0.0)
 
+        self._obs["prev_action"] = self._last_normalized_action
         obs_np = build_observation(self._obs, self.observation_config)
         obs_tensor = torch.as_tensor(
             obs_np, dtype=torch.float32, device=self.device
@@ -176,6 +178,7 @@ class PPOController(Controller):
             action, _log_prob, _value = self.policy.act(obs_tensor, deterministic=True)
 
         action_np = action.squeeze(0).cpu().numpy()
+        self._last_normalized_action = action_np.copy()
         steering = float(
             np.interp(action_np[0], [-1.0, 1.0], [self.steering_min, self.steering_max])
         )

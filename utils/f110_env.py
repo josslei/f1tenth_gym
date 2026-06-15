@@ -108,7 +108,7 @@ def observation_dim(config: F1TenthObservationConfig) -> int:
     waypoint_dim = (
         len(config.lookahead_distances) * 2 if config.include_waypoints else 0
     )
-    return config.scan_size + ego_state_dim + waypoint_dim
+    return config.scan_size + ego_state_dim + waypoint_dim + 2
 
 
 def build_observation(
@@ -182,6 +182,14 @@ def build_observation(
                     float(np.clip(y_rel / config.waypoint_scale, -1.0, 1.0))
                 )
             features.append(np.array(waypoint_vals, dtype=np.float64))
+
+    if "prev_action" in obs:
+        prev_action = np.clip(
+            np.asarray(obs["prev_action"], dtype=np.float64), -1.0, 1.0
+        )
+        features.append(prev_action)
+    else:
+        features.append(np.zeros(2, dtype=np.float64))
 
     return np.nan_to_num(
         np.concatenate(features).astype(np.float32),
@@ -437,10 +445,15 @@ class RolloutDataset(
         if len(self.ep_return) != n:
             self.ep_return = [0.0] * n
 
+        # Previous action buffer (for prev_action observation feature).
+        prev_action_batch = np.zeros((n, 2), dtype=np.float64)
+
         for _step in range(self.rollout_steps):
             obs_list: list[dict[str, Any]] = cast(
                 list[dict[str, Any]], self.current_obs
             )
+            for i in range(n):
+                obs_list[i]["prev_action"] = prev_action_batch[i]
             obs_tensors = [self.obs_fn(d) for d in obs_list]
             obs_batch = torch.cat(obs_tensors).to(self.device)  # (n, obs_dim)
 
@@ -450,6 +463,7 @@ class RolloutDataset(
 
             # Step all envs in parallel (child processes, separate GILs).
             actions_np = action_batch.cpu().numpy()
+            prev_action_batch = actions_np
             (
                 next_obs_list,
                 terminated_list,
@@ -479,6 +493,8 @@ class RolloutDataset(
         final_obs_list: list[dict[str, Any]] = cast(
             list[dict[str, Any]], self.current_obs
         )
+        for i in range(n):
+            final_obs_list[i]["prev_action"] = prev_action_batch[i]
         final_obs_batch = torch.cat([self.obs_fn(d) for d in final_obs_list]).to(
             self.device
         )

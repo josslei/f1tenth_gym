@@ -58,31 +58,46 @@ def parse_args() -> argparse.Namespace:
 
 
 class F1TenthPPOReward:
+    """Reward based on forward progress along the centerline.
+
+    Computes per-step arc-length progress along the resampled waypoint
+    path, plus speed bonus and steering smoothness penalty.  Replaces
+    the older waypoint-hit-bonus design with a continuous progress
+    signal that generalises across tracks.
+    """
+
     def __init__(
         self,
         *,
         waypoints_path: str | Path,
-        waypoint_proximity: float = 2.0,
         speed_reward_weight: float = 0.1,
-        dense_progress_weight: float = 0.5,
-        waypoint_bonus_weight: float = 0.5,
+        progress_weight: float = 1.0,
+        steer_smoothness_weight: float = 0.5,
         collision_penalty: float = 1.0,
         collision_growth: float = 0.0,
         spin_threshold: float = 100.0,
         delimiter: str = ";",
         usecols: tuple[int, int] = (1, 2),
     ) -> None:
-        self.waypoint_proximity = waypoint_proximity
         self.speed_reward_weight = speed_reward_weight
-        self.dense_progress_weight = dense_progress_weight
-        self.waypoint_bonus_weight = waypoint_bonus_weight
+        self.progress_weight = progress_weight
+        self.steer_smoothness_weight = steer_smoothness_weight
         self.collision_penalty = collision_penalty
         self.collision_growth = collision_growth
         self.spin_threshold = spin_threshold
+
         self.waypoints = np.genfromtxt(
             str(waypoints_path), delimiter=delimiter, comments="#", usecols=usecols
         ).reshape(-1, 2)
-        self.idx = 0
+
+        # Precompute cumulative arc length along the path.
+        diffs = np.diff(self.waypoints, axis=0)
+        seg_lengths = np.sqrt((diffs**2).sum(axis=1))
+        self.cum_arc_lengths = np.concatenate([[0.0], np.cumsum(seg_lengths)])
+        self.total_length = float(self.cum_arc_lengths[-1])
+
+        self.prev_arc_length: float = 0.0
+        self.prev_steer: float = 0.0
 
     def __call__(self, obs: dict[str, Any], terminated: bool) -> float:
         ego = int(obs["ego_idx"])
@@ -90,33 +105,51 @@ class F1TenthPPOReward:
         vy = float(np.nan_to_num(obs["linear_vels_y"][ego], nan=0.0))
         collision = bool(obs["collisions"][ego])
         theta = float(np.nan_to_num(obs["poses_theta"][ego], nan=0.0))
+        px = float(np.nan_to_num(obs["poses_x"][ego], nan=0.0))
+        py = float(np.nan_to_num(obs["poses_y"][ego], nan=0.0))
+
+        # Steering from augment (added by add_control_state).
+        steer = float(np.nan_to_num(obs.get("steer_angle", [0.0])[ego], nan=0.0))
 
         if collision or abs(theta) > self.spin_threshold:
-            penalty = self.collision_penalty + self.idx * self.collision_growth
+            progress_frac = (
+                self.prev_arc_length / self.total_length
+                if self.total_length > 0
+                else 0.0
+            )
+            penalty = self.collision_penalty * (
+                1.0 + progress_frac * self.collision_growth
+            )
             if terminated:
-                self.idx = 0
+                self.prev_arc_length = 0.0
+                self.prev_steer = 0.0
             return -float(penalty)
 
         if terminated:
-            self.idx = 0
+            self.prev_arc_length = 0.0
+            self.prev_steer = 0.0
 
+        # ── speed reward ────────────────────────────────────────────────────
         vel_magnitude = np.sqrt(vx * vx + vy * vy)
         reward = self.speed_reward_weight * float(vel_magnitude)
 
-        n_wp = len(self.waypoints)
-        wx, wy = self.waypoints[self.idx % n_wp]
-        px = float(np.nan_to_num(obs["poses_x"][ego], nan=0.0))
-        py = float(np.nan_to_num(obs["poses_y"][ego], nan=0.0))
-        dist = np.sqrt((px - wx) ** 2 + (py - wy) ** 2)
+        # ── forward progress along centreline ───────────────────────────────
+        wx, wy = self.waypoints[:, 0], self.waypoints[:, 1]
+        dist_sq = (wx - px) ** 2 + (wy - py) ** 2
+        nearest_idx = int(np.argmin(dist_sq))
+        current_arc = float(self.cum_arc_lengths[nearest_idx])
 
-        # dense progress signal every step — reward approaching next waypoint
-        closeness = max(0.0, 1.0 - dist / self.waypoint_proximity)
-        reward += closeness * self.dense_progress_weight
+        progress = current_arc - self.prev_arc_length
+        if progress < 0.0:
+            # Wrapped to a new lap.
+            progress = (self.total_length - self.prev_arc_length) + current_arc
+        reward += self.progress_weight * progress
+        self.prev_arc_length = current_arc
 
-        if dist < self.waypoint_proximity:
-            self.idx += 1
-            # flat checkpoint-acquired bonus (not back-loaded)
-            reward += self.waypoint_bonus_weight
+        # ── steering smoothness penalty ─────────────────────────────────────
+        steer_delta = abs(steer - self.prev_steer)
+        reward -= self.steer_smoothness_weight * steer_delta
+        self.prev_steer = steer
 
         return float(np.clip(reward, -5.0, 8.0))
 
@@ -208,6 +241,8 @@ class ValidationCallback(Callback):
         for _ in range(self.val_episodes):
             obs, _ = env.reset(options={"poses": self.val_pose.copy()})
             obs = add_control_state(obs, env)
+            prev_action = np.zeros(2, dtype=np.float64)
+            obs["prev_action"] = prev_action
             ep_steps = 0
 
             for _ in range(self.max_episode_steps):
@@ -219,8 +254,10 @@ class ValidationCallback(Callback):
                     env,
                     self.action_config,
                 )
+                prev_action = action.squeeze(0).cpu().numpy()
                 obs, _, terminated, truncated, _ = env.step(env_action)
                 obs = add_control_state(obs, env)
+                obs["prev_action"] = prev_action
                 ep_steps += 1
                 if terminated or truncated:
                     break

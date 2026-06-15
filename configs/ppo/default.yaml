@@ -14,7 +14,7 @@ observation:
   speed_scale: 8.0
   yaw_rate_scale: 10.0
   steer_scale: 1.066
-  include_waypoints: false
+  include_waypoints: true
   lookahead_distances: [0.5, 1.0, 2.0, 3.5, 5.5, 8.0, 11.0, 14.5, 18.5, 23.0, 28.0, 33.0]
   waypoint_scale: 30.0
   waypoint_resample_spacing: 0.5
@@ -27,10 +27,9 @@ reward:
   waypoints_path: maps/custom/f110_gym_10/f110_gym_centerline.csv
   delimiter: ","
   usecols: [0, 1]
-  waypoint_proximity: 2.0
   speed_reward_weight: 0.1
-  dense_progress_weight: 0.5
-  waypoint_bonus_weight: 1.0
+  progress_weight: 2.0
+  steer_smoothness_weight: 0.5
   collision_penalty: 2.0
   collision_growth: 0.005
   spin_threshold: 100.0
