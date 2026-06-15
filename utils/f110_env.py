@@ -359,8 +359,8 @@ class RolloutDataset(
             obs_list: list[dict[str, Any]] = cast(
                 list[dict[str, Any]], self.current_obs
             )
-            obs_tensors = [self.obs_fn(d).to(self.device) for d in obs_list]
-            obs_batch = torch.cat(obs_tensors)  # (n, obs_dim)
+            obs_tensors = [self.obs_fn(d) for d in obs_list]
+            obs_batch = torch.cat(obs_tensors).to(self.device)  # (n, obs_dim)
 
             # Batched policy inference (single no_grad context).
             with torch.no_grad():
@@ -397,8 +397,8 @@ class RolloutDataset(
         final_obs_list: list[dict[str, Any]] = cast(
             list[dict[str, Any]], self.current_obs
         )
-        final_obs_batch = torch.cat(
-            [self.obs_fn(d).to(self.device) for d in final_obs_list]
+        final_obs_batch = torch.cat([self.obs_fn(d) for d in final_obs_list]).to(
+            self.device
         )
         with torch.no_grad():
             _, _, final_values = self.policy.act(final_obs_batch, deterministic=True)
