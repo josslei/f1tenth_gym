@@ -343,6 +343,29 @@ def append_jsonl(path: Path, record: dict[str, Any]) -> None:
         file.write(json.dumps(record) + "\n")
 
 
+def log_map_split(
+    output_dir: Path,
+    train_maps: list[MapConfig],
+    val_maps: list[MapConfig],
+) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "train": [asdict(m) for m in train_maps],
+        "validation": [asdict(m) for m in val_maps],
+    }
+    (output_dir / "map_split.json").write_text(
+        json.dumps(payload, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    print(f"Training maps ({len(train_maps)}):")
+    for m in train_maps:
+        print(f"  - {m.name}")
+    print(f"Validation maps ({len(val_maps)}):")
+    for m in val_maps:
+        print(f"  - {m.name}")
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 
@@ -378,6 +401,7 @@ def main() -> None:
             validation_ratio=config.maps.validation_ratio,
             exclude=config.maps.exclude,
         )
+        log_map_split(output_dir, train_maps, val_maps)
         epoch_schedule = build_epoch_map_schedule(
             train_maps,
             seed=config.runtime.seed,
