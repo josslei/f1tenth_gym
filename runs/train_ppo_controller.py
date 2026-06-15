@@ -28,7 +28,14 @@ from lightning.pytorch.callbacks import Callback
 
 import f110_gym  # noqa: F401 - registers f110-v0
 from models.policies import Policy, make_policy
-from models.ppo import LightningPPO, PolicyConfig, load_ppo_config
+from models.ppo import (
+    LightningPPO,
+    MapConfig,
+    PolicyConfig,
+    build_epoch_map_schedule,
+    load_ppo_config,
+    split_maps,
+)
 from utils.f110_env import (
     F1TenthActionConfig,
     F1TenthObservationConfig,
@@ -69,7 +76,7 @@ class F1TenthPPOReward:
     def __init__(
         self,
         *,
-        waypoints_path: str | Path,
+        waypoints_path: str | Path | None = None,
         speed_reward_weight: float = 0.1,
         progress_weight: float = 1.0,
         steer_smoothness_weight: float = 0.5,
@@ -86,18 +93,38 @@ class F1TenthPPOReward:
         self.collision_growth = collision_growth
         self.spin_threshold = spin_threshold
 
-        self.waypoints = np.genfromtxt(
-            str(waypoints_path), delimiter=delimiter, comments="#", usecols=usecols
-        ).reshape(-1, 2)
+        if waypoints_path is not None:
+            self.waypoints = np.genfromtxt(
+                str(waypoints_path),
+                delimiter=delimiter,
+                comments="#",
+                usecols=usecols,
+            ).reshape(-1, 2)
+            self._build_arc()
+        else:
+            self.waypoints = np.empty((0, 2), dtype=np.float64)
+            self.cum_arc_lengths = np.array([0.0])
+            self.total_length = 0.0
 
-        # Precompute cumulative arc length along the path.
+        self.prev_arc_length: float = 0.0
+        self.prev_steer: float = 0.0
+
+    def _build_arc(self) -> None:
         diffs = np.diff(self.waypoints, axis=0)
         seg_lengths = np.sqrt((diffs**2).sum(axis=1))
         self.cum_arc_lengths = np.concatenate([[0.0], np.cumsum(seg_lengths)])
         self.total_length = float(self.cum_arc_lengths[-1])
 
-        self.prev_arc_length: float = 0.0
-        self.prev_steer: float = 0.0
+    def set_waypoints(self, waypoints_xy: np.ndarray) -> None:
+        """Hot-swap the path used for forward-progress computation.
+
+        Resets internal progress state and arc-length lookup so the
+        next call starts fresh from the new path.
+        """
+        self.waypoints = np.asarray(waypoints_xy, dtype=np.float64).reshape(-1, 2)
+        self._build_arc()
+        self.prev_arc_length = 0.0
+        self.prev_steer = 0.0
 
     def __call__(self, obs: dict[str, Any], terminated: bool) -> float:
         ego = int(obs["ego_idx"])
@@ -200,29 +227,23 @@ class DeployableCheckpoint(Callback):
 class ValidationCallback(Callback):
     def __init__(
         self,
-        val_map: str,
-        val_map_ext: str,
+        val_maps: list[MapConfig],
         val_episodes: int,
-        centerline_csv: str,
         observation_config: F1TenthObservationConfig,
         action_config: F1TenthActionConfig,
         max_episode_steps: int,
         device: torch.device,
+        map_waypoints: dict[str, np.ndarray],
+        map_poses: dict[str, np.ndarray],
     ) -> None:
-        self.val_map = val_map
-        self.val_map_ext = val_map_ext
+        self.val_maps = val_maps
         self.val_episodes = val_episodes
-        self.observation_config = observation_config
+        self.base_observation_config = observation_config
         self.action_config = action_config
         self.max_episode_steps = max_episode_steps
         self.device = device
-
-        waypoints = np.loadtxt(centerline_csv, delimiter=",", skiprows=1)
-        self.val_pose = initial_pose_from_waypoints(waypoints[:, :2])
-        if self.observation_config.include_waypoints:
-            self.observation_config = with_resampled_waypoints(
-                self.observation_config, waypoints[:, :2]
-            )
+        self.map_waypoints = map_waypoints
+        self.map_poses = map_poses
 
     def on_train_epoch_end(
         self, trainer: pl.Trainer, pl_module: pl.LightningModule
@@ -230,49 +251,61 @@ class ValidationCallback(Callback):
         policy: Policy = cast(Policy, pl_module.policy)
         policy.eval()
 
-        env = gym.make(
-            "f110-v0",
-            map=self.val_map,
-            map_ext=self.val_map_ext,
-            num_agents=1,
-        )
-        val_returns: list[float] = []
-
-        for _ in range(self.val_episodes):
-            obs, _ = env.reset(options={"poses": self.val_pose.copy()})
-            obs = add_control_state(obs, env)
-            prev_action = np.zeros(2, dtype=np.float64)
-            obs["prev_action"] = prev_action
-            ep_steps = 0
-
-            for _ in range(self.max_episode_steps):
-                obs_t = obs_tensor(obs, self.observation_config).to(self.device)
-                with torch.no_grad():
-                    action, _, _ = policy.act(obs_t, deterministic=True)
-                env_action = scale_action(
-                    action.squeeze(0).cpu().numpy(),
-                    env,
-                    self.action_config,
-                )
-                prev_action = action.squeeze(0).cpu().numpy()
-                obs, _, terminated, truncated, _ = env.step(env_action)
-                obs = add_control_state(obs, env)
-                obs["prev_action"] = prev_action
-                ep_steps += 1
-                if terminated or truncated:
-                    break
-
-            val_returns.append(float(ep_steps))
-
-        env.close()
-        policy.train()
-
-        mean_return = float(np.mean(val_returns))
-        if trainer.logger is not None:
-            trainer.logger.log_metrics(
-                {"val/episode_return": mean_return},
-                step=trainer.current_epoch,
+        for val_map in self.val_maps:
+            env = gym.make(
+                "f110-v0",
+                map=val_map.map,
+                map_ext=val_map.map_ext,
+                num_agents=1,
             )
+
+            obs_config = self.base_observation_config
+            pose = self.map_poses.get(val_map.name)
+            wp_xy = self.map_waypoints.get(val_map.name)
+            if obs_config.include_waypoints and wp_xy is not None:
+                obs_config = with_resampled_waypoints(obs_config, wp_xy)
+            if pose is None:
+                pose = np.array([[0.0, 0.0, 0.0]], dtype=np.float64)
+
+            val_returns: list[float] = []
+            for _ in range(self.val_episodes):
+                obs, _ = env.reset(options={"poses": pose.copy()})
+                obs = add_control_state(obs, env)
+                prev_action = np.zeros(2, dtype=np.float64)
+                obs["prev_action"] = prev_action
+                ep_steps = 0
+
+                for _ in range(self.max_episode_steps):
+                    obs_t = obs_tensor(obs, obs_config).to(self.device)
+                    with torch.no_grad():
+                        action, _, _ = policy.act(obs_t, deterministic=True)
+                    env_action = scale_action(
+                        action.squeeze(0).cpu().numpy(),
+                        env,
+                        self.action_config,
+                    )
+                    prev_action = action.squeeze(0).cpu().numpy()
+                    obs, _, terminated, truncated, _ = env.step(env_action)
+                    obs = add_control_state(obs, env)
+                    obs["prev_action"] = prev_action
+                    ep_steps += 1
+                    if terminated or truncated:
+                        break
+
+                val_returns.append(float(ep_steps))
+
+            env.close()
+
+            mean_return = float(np.mean(val_returns)) if val_returns else 0.0
+            if trainer.logger is not None:
+                trainer.logger.log_metrics(
+                    {
+                        f"val/{val_map.name}/episode_return": mean_return,
+                    },
+                    step=trainer.current_epoch,
+                )
+
+        policy.train()
 
 
 def save_policy(
@@ -320,41 +353,85 @@ def main() -> None:
     torch.manual_seed(config.runtime.seed)
     np.random.seed(config.runtime.seed)
 
-    env_config = dict(config.env)
-    centerline_csv = env_config.pop("centerline_csv", None)
-    centerline_data: np.ndarray | None = None
-    if centerline_csv:
-        centerline_data = np.loadtxt(centerline_csv, delimiter=",", skiprows=1)
-        reset_pose = initial_pose_from_waypoints(centerline_data[:, :2])
-    else:
-        reset_pose = np.asarray(env_config.pop("initial_pose"), dtype=np.float64)
     output_dir = Path(config.output["dir"])
     observation_config = F1TenthObservationConfig(**config.observation)
-
-    if observation_config.include_waypoints and centerline_data is not None:
-        observation_config = with_resampled_waypoints(
-            observation_config, centerline_data[:, :2]
-        )
-
     action_config = F1TenthActionConfig(**config.action)
     obs_dim = observation_dim(observation_config)
     action_dim = 2
     policy = make_policy(config.policy, obs_dim=obs_dim, action_dim=action_dim)
     module = LightningPPO(policy=policy, config=config)
+
     ppo_iterations = config.runtime.ppo_iterations
     rollout_steps = config.runtime.rollout_steps
     num_envs = config.runtime.num_envs
+
+    # ── Multi-map setup ────────────────────────────────────────────────
+    has_maps = config.maps is not None and len(config.maps.candidates) > 0
+    val_maps: list[MapConfig] = []
+
+    if has_maps:
+        assert config.maps is not None  # narrow for pyright
+        split_seed = config.maps.split_seed or config.runtime.seed
+        train_maps, val_maps = split_maps(
+            config.maps.candidates,
+            seed=split_seed,
+            validation_ratio=config.maps.validation_ratio,
+            exclude=config.maps.exclude,
+        )
+        epoch_schedule = build_epoch_map_schedule(
+            train_maps,
+            seed=config.runtime.seed,
+            epochs=ppo_iterations,
+        )
+        map_waypoints: dict[str, np.ndarray] = {}
+        map_poses: dict[str, np.ndarray] = {}
+        for m in [*train_maps, *val_maps]:
+            cl = np.loadtxt(m.centerline_csv, delimiter=",", skiprows=1)[:, :2]
+            map_waypoints[m.name] = cl
+            map_poses[m.name] = initial_pose_from_waypoints(cl)
+        first_map = epoch_schedule[0]
+        first_wp = map_waypoints[first_map.name]
+        reset_pose = map_poses[first_map.name]
+    else:
+        # Fallback for single-map configs (no maps section).
+        env_config = dict(config.env)
+        centerline_csv = env_config.pop("centerline_csv", None)
+        centerline_data: np.ndarray | None = None
+        if centerline_csv:
+            centerline_data = np.loadtxt(centerline_csv, delimiter=",", skiprows=1)
+            reset_pose = initial_pose_from_waypoints(centerline_data[:, :2])
+        else:
+            reset_pose = np.asarray(env_config.pop("initial_pose"), dtype=np.float64)
+        epoch_schedule = []
+        map_waypoints = {}
+        map_poses = {}
+        first_wp = centerline_data[:, :2] if centerline_data is not None else None
+
+    # Wire first map's waypoints into the observation config.
+    if observation_config.include_waypoints and first_wp is not None:
+        observation_config = with_resampled_waypoints(observation_config, first_wp)
+
+    # Build env factories (no map baked in — map is switched dynamically
+    # by RolloutDataset when map_schedule is provided).
+    env_config = dict(config.env)
     env_fn = partial(gym.make, "f110-v0", **env_config)
     env_fns = [env_fn] * num_envs
 
+    # Reward setup.
     reward_params = dict(config.reward)
+    reward_params.pop("waypoints_path", None)
+    reward_fns = [F1TenthPPOReward(**reward_params) for _ in range(num_envs)]
+    if has_maps and first_wp is not None:
+        for rf in reward_fns:
+            rf.set_waypoints(first_wp)
+
     episode_returns: list[float] = []
     dataset = RolloutDataset(
         env_fns=env_fns,
         policy=policy,
         rollout_steps=rollout_steps,
-        reward_fns=[F1TenthPPOReward(**reward_params) for _ in range(num_envs)],
-        obs_fn=lambda obs: obs_tensor(obs, observation_config),
+        reward_fns=reward_fns,
+        observation_config=observation_config,
         reset_fn=lambda: {"poses": reset_pose.copy()},
         episode_returns=episode_returns,
         k_epochs=config.training.k_epochs,
@@ -363,6 +440,9 @@ def main() -> None:
         action_config=action_config,
         max_episode_steps=rollout_steps,
         device=DEFAULT_DEVICE,
+        map_schedule=epoch_schedule if has_maps else None,
+        map_waypoints=map_waypoints if has_maps else None,
+        map_poses=map_poses if has_maps else None,
     )
     datamodule = RolloutDataModule(dataset)
     logger = TensorBoardLogger(save_dir=output_dir, name="tensorboard")
@@ -376,16 +456,43 @@ def main() -> None:
     )
     callbacks: list[Callback] = [checkpoint_callback]
 
-    if config.validation is not None:
+    if has_maps and val_maps:
         val_cb = ValidationCallback(
-            val_map=config.validation.map,
-            val_map_ext=config.validation.map_ext,
-            val_episodes=config.validation.episodes,
-            centerline_csv=config.validation.centerline_csv,
+            val_maps=val_maps,
+            val_episodes=2,
             observation_config=observation_config,
             action_config=action_config,
             max_episode_steps=rollout_steps,
             device=DEFAULT_DEVICE,
+            map_waypoints=map_waypoints,
+            map_poses=map_poses,
+        )
+        callbacks.append(val_cb)
+    elif config.validation is not None:
+        val_cb = ValidationCallback(
+            val_maps=[
+                MapConfig(
+                    name=Path(config.validation.map).stem,
+                    map=config.validation.map,
+                    map_ext=config.validation.map_ext,
+                    centerline_csv=config.validation.centerline_csv,
+                )
+            ],
+            val_episodes=config.validation.episodes,
+            observation_config=observation_config,
+            action_config=action_config,
+            max_episode_steps=rollout_steps,
+            device=DEFAULT_DEVICE,
+            map_waypoints=(
+                {
+                    Path(config.validation.map).stem: np.loadtxt(
+                        config.validation.centerline_csv, delimiter=",", skiprows=1
+                    )[:, :2]
+                }
+                if config.validation.centerline_csv
+                else {}
+            ),
+            map_poses={},
         )
         callbacks.append(val_cb)
 

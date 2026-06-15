@@ -16,6 +16,7 @@ from torch.utils.data import DataLoader, IterableDataset
 
 from models.policies import Policy
 from models.ppo import compute_gae
+from models.ppo.config import MapConfig
 from utils.waypoint_utils import nearest_waypoint_index, resample_path
 
 
@@ -295,6 +296,10 @@ def _env_worker(
                 pipe.send((obs_dict, terminated, truncated, reset_obs))
             else:
                 pipe.send((obs_dict, terminated, truncated, None))
+        elif cmd == "update_map":
+            map_path, map_ext = data
+            env.unwrapped.update_map(map_path, map_ext)  # type: ignore[union-attr]
+            pipe.send(True)
         elif cmd == "close":
             break
 
@@ -353,6 +358,13 @@ class SubprocVecEnv:
             reset_obs_list.append(result[3])
         return obs_list, terminated_list, truncated_list, reset_obs_list
 
+    def set_map_all(self, map_path: str, map_ext: str) -> None:
+        """Update the simulator map in every worker process."""
+        for pipe in self.pipes:
+            pipe.send(("update_map", (map_path, map_ext)))
+        for pipe in self.pipes:
+            pipe.recv()  # wait for all acknowledgements
+
     def close(self) -> None:
         for p in self.pipes:
             try:
@@ -381,8 +393,11 @@ class RolloutDataset(
         Number of steps collected from each environment per iteration.
     reward_fns:
         One reward functor per environment (each maintains its own state).
-    obs_fn:
-        Converts a raw gym observation dict into a ``(1, obs_dim)`` tensor.
+    observation_config:
+        Observation configuration — used to build observation tensors
+        directly (replaces the older ``obs_fn`` callable).
+    reset_fn:
+        Callable returning a ``{"poses": ...}`` dict for environment reset.
     episode_returns:
         External list to which completed episode returns are appended.
     k_epochs:
@@ -393,6 +408,14 @@ class RolloutDataset(
         Whether to normalise advantage estimates across the batch.
     device:
         Torch device for policy inference and tensor storage.
+    map_schedule:
+        Per-epoch map schedule for multi-map training.  When set, each
+        call to ``__iter__`` (one PPO iteration) switches the simulator
+        map, waypoints, reset pose, and reward functions accordingly.
+    map_waypoints:
+        Pre-loaded waypoints keyed by map name.
+    map_poses:
+        Pre-loaded reset poses keyed by map name.
     """
 
     def __init__(
@@ -401,7 +424,7 @@ class RolloutDataset(
         policy: Policy,
         rollout_steps: int,
         reward_fns: list[Callable[[dict[str, Any], bool], float]],
-        obs_fn: Callable[[dict[str, Any]], Tensor],
+        observation_config: F1TenthObservationConfig,
         reset_fn: Callable[[], dict[str, Any]],
         episode_returns: list[float],
         k_epochs: int,
@@ -410,12 +433,15 @@ class RolloutDataset(
         action_config: F1TenthActionConfig,
         max_episode_steps: int,
         device: torch.device = DEFAULT_DEVICE,
+        map_schedule: list[MapConfig] | None = None,
+        map_waypoints: dict[str, np.ndarray] | None = None,
+        map_poses: dict[str, np.ndarray] | None = None,
     ) -> None:
         self.sve = SubprocVecEnv(env_fns, action_config, max_episode_steps)
         self.policy = policy
         self.rollout_steps = rollout_steps
         self.reward_fns = reward_fns
-        self.obs_fn = obs_fn
+        self.observation_config = observation_config
         self.reset_fn = reset_fn
         self.episode_returns = episode_returns
         self.k_epochs = k_epochs
@@ -424,15 +450,47 @@ class RolloutDataset(
         self.device = device
         self.current_obs: list[dict[str, Any] | None] = [None] * self.sve.n_envs
         self.ep_return: list[float] = []
+        self.map_schedule = map_schedule or []
+        self.map_waypoints = map_waypoints or {}
+        self.map_poses = map_poses or {}
+        self._iteration_count = 0
+        self._force_reset = True
 
     def __iter__(
         self,
     ) -> Iterator[tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]]:
         n = self.sve.n_envs
 
-        if self.current_obs[0] is None:
-            obs_dicts = self.sve.reset_all([self.reset_fn] * self.sve.n_envs)
+        # ── Per-epoch map switching ──────────────────────────────────────
+        if self.map_schedule:
+            current_map = self.map_schedule[
+                self._iteration_count % len(self.map_schedule)
+            ]
+            self._iteration_count += 1
+
+            self.sve.set_map_all(current_map.map, current_map.map_ext)
+
+            wp_xy = self.map_waypoints.get(current_map.name)
+            if wp_xy is not None:
+                self.observation_config = with_resampled_waypoints(
+                    self.observation_config, wp_xy
+                )
+
+            pose = self.map_poses.get(current_map.name)
+            if pose is not None:
+                self._current_reset_pose = pose.copy()
+                self.reset_fn = lambda: {"poses": self._current_reset_pose.copy()}
+
+            if wp_xy is not None:
+                for rf in self.reward_fns:
+                    rf.set_waypoints(wp_xy)  # type: ignore[union-attr]
+
+            self._force_reset = True
+
+        if self.current_obs[0] is None or self._force_reset:
+            obs_dicts = self.sve.reset_all([self.reset_fn] * n)
             self.current_obs = list(obs_dicts)
+            self._force_reset = False
 
         # Per-env transition buffers.
         s_buf: list[list[Tensor]] = [[] for _ in range(n)]
@@ -454,7 +512,7 @@ class RolloutDataset(
             )
             for i in range(n):
                 obs_list[i]["prev_action"] = prev_action_batch[i]
-            obs_tensors = [self.obs_fn(d) for d in obs_list]
+            obs_tensors = [obs_tensor(d, self.observation_config) for d in obs_list]
             obs_batch = torch.cat(obs_tensors).to(self.device)  # (n, obs_dim)
 
             # Batched policy inference (single no_grad context).
@@ -495,9 +553,9 @@ class RolloutDataset(
         )
         for i in range(n):
             final_obs_list[i]["prev_action"] = prev_action_batch[i]
-        final_obs_batch = torch.cat([self.obs_fn(d) for d in final_obs_list]).to(
-            self.device
-        )
+        final_obs_batch = torch.cat(
+            [obs_tensor(d, self.observation_config) for d in final_obs_list]
+        ).to(self.device)
         with torch.no_grad():
             _, _, final_values = self.policy.act(final_obs_batch, deterministic=True)
 
