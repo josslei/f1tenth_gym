@@ -435,7 +435,7 @@ def main() -> None:
     reward_params = dict(config.reward)
     reward_params.pop("waypoints_path", None)
     reward_fns = [F1TenthPPOReward(**reward_params) for _ in range(num_envs)]
-    if has_maps and first_wp is not None:
+    if first_wp is not None:
         for rf in reward_fns:
             rf.set_waypoints(first_wp)
 

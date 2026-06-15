@@ -1,6 +1,11 @@
 env:
+  map: maps/custom/f110_gym_10/f110_gym_map.yaml
+  map_ext: .png
   num_agents: 1
   render_mode:
+  initial_pose:
+    - [1.0748956, -0.1528569, 0.0349893]
+  centerline_csv: maps/custom/f110_gym_10/f110_gym_centerline.csv
 
 observation:
   scan_size: 108
@@ -50,145 +55,8 @@ runtime:
 output:
   dir: outputs/rl/ppo_f110_gym_10
 
-maps:
-  exclude:
-    - Spielberg
-  validation_ratio: 0.1
-
-  candidates:
-    # ── Custom maps (hand-labeled / generated) ─────────────────────────
-    - name: f110_gym_10
-      map: maps/custom/f110_gym_10/f110_gym_map.yaml
-      map_ext: .png
-      centerline_csv: maps/custom/f110_gym_10/f110_gym_centerline.csv
-
-    - name: Operngasse_10
-      map: maps/custom/Operngasse_10/Operngasse_map.yaml
-      map_ext: .png
-      centerline_csv: maps/custom/Operngasse_10/Operngasse_centerline.csv
-
-    - name: Sepang_10489
-      map: maps/custom/Sepang_10489/Sepang_map.yaml
-      map_ext: .png
-      centerline_csv: maps/custom/Sepang_10489/Sepang_centerline.csv
-
-    - name: blackbox2021_1_10
-      map: maps/custom/blackbox2021_1_10/blackbox2021_1_map.yaml
-      map_ext: .png
-      centerline_csv: maps/custom/blackbox2021_1_10/blackbox2021_1_centerline.csv
-
-    - name: blackbox2022_1_10
-      map: maps/custom/blackbox2022_1_10/blackbox2022_1_map.yaml
-      map_ext: .png
-      centerline_csv: maps/custom/blackbox2022_1_10/blackbox2022_1_centerline.csv
-
-    # ── f1tenth_racetracks submodule (1:10, 0.05 m/px) ────────────────
-    - name: Austin
-      map: maps/f1tenth_racetracks/Austin/Austin_map.yaml
-      map_ext: .png
-      centerline_csv: maps/f1tenth_racetracks/Austin/Austin_centerline.csv
-
-    - name: BrandsHatch
-      map: maps/f1tenth_racetracks/BrandsHatch/BrandsHatch_map.yaml
-      map_ext: .png
-      centerline_csv: maps/f1tenth_racetracks/BrandsHatch/BrandsHatch_centerline.csv
-
-    - name: Budapest
-      map: maps/f1tenth_racetracks/Budapest/Budapest_map.yaml
-      map_ext: .png
-      centerline_csv: maps/f1tenth_racetracks/Budapest/Budapest_centerline.csv
-
-    - name: Catalunya
-      map: maps/f1tenth_racetracks/Catalunya/Catalunya_map.yaml
-      map_ext: .png
-      centerline_csv: maps/f1tenth_racetracks/Catalunya/Catalunya_centerline.csv
-
-    - name: Hockenheim
-      map: maps/f1tenth_racetracks/Hockenheim/Hockenheim_map.yaml
-      map_ext: .png
-      centerline_csv: maps/f1tenth_racetracks/Hockenheim/Hockenheim_centerline.csv
-
-    - name: IMS
-      map: maps/f1tenth_racetracks/IMS/IMS_map.yaml
-      map_ext: .png
-      centerline_csv: maps/f1tenth_racetracks/IMS/IMS_centerline.csv
-
-    - name: Melbourne
-      map: maps/f1tenth_racetracks/Melbourne/Melbourne_map.yaml
-      map_ext: .png
-      centerline_csv: maps/f1tenth_racetracks/Melbourne/Melbourne_centerline.csv
-
-    - name: MexicoCity
-      map: "maps/f1tenth_racetracks/Mexico City/MexicoCity_map.yaml"
-      map_ext: .png
-      centerline_csv: "maps/f1tenth_racetracks/Mexico City/MexicoCity_centerline.csv"
-
-    - name: Montreal
-      map: maps/f1tenth_racetracks/Montreal/Montreal_map.yaml
-      map_ext: .png
-      centerline_csv: maps/f1tenth_racetracks/Montreal/Montreal_centerline.csv
-
-    - name: Monza
-      map: maps/f1tenth_racetracks/Monza/Monza_map.yaml
-      map_ext: .png
-      centerline_csv: maps/f1tenth_racetracks/Monza/Monza_centerline.csv
-
-    - name: MoscowRaceway
-      map: maps/f1tenth_racetracks/MoscowRaceway/MoscowRaceway_map.yaml
-      map_ext: .png
-      centerline_csv: maps/f1tenth_racetracks/MoscowRaceway/MoscowRaceway_centerline.csv
-
-    - name: Nuerburgring
-      map: maps/f1tenth_racetracks/Nuerburgring/Nuerburgring_map.yaml
-      map_ext: .png
-      centerline_csv: maps/f1tenth_racetracks/Nuerburgring/Nuerburgring_centerline.csv
-
-    - name: Oschersleben
-      map: maps/f1tenth_racetracks/Oschersleben/Oschersleben_map.yaml
-      map_ext: .png
-      centerline_csv: maps/f1tenth_racetracks/Oschersleben/Oschersleben_centerline.csv
-
-    - name: Sakhir
-      map: maps/f1tenth_racetracks/Sakhir/Sakhir_map.yaml
-      map_ext: .png
-      centerline_csv: maps/f1tenth_racetracks/Sakhir/Sakhir_centerline.csv
-
-    - name: SaoPaulo
-      map: maps/f1tenth_racetracks/SaoPaulo/SaoPaulo_map.yaml
-      map_ext: .png
-      centerline_csv: maps/f1tenth_racetracks/SaoPaulo/SaoPaulo_centerline.csv
-
-    - name: Sepang
-      map: maps/f1tenth_racetracks/Sepang/Sepang_map.yaml
-      map_ext: .png
-      centerline_csv: maps/f1tenth_racetracks/Sepang/Sepang_centerline.csv
-
-    - name: Shanghai
-      map: maps/f1tenth_racetracks/Shanghai/Shanghai_map.yaml
-      map_ext: .png
-      centerline_csv: maps/f1tenth_racetracks/Shanghai/Shanghai_centerline.csv
-
-    - name: Silverstone
-      map: maps/f1tenth_racetracks/Silverstone/Silverstone_map.yaml
-      map_ext: .png
-      centerline_csv: maps/f1tenth_racetracks/Silverstone/Silverstone_centerline.csv
-
-    - name: Sochi
-      map: maps/f1tenth_racetracks/Sochi/Sochi_map.yaml
-      map_ext: .png
-      centerline_csv: maps/f1tenth_racetracks/Sochi/Sochi_centerline.csv
-
-    - name: Spa
-      map: maps/f1tenth_racetracks/Spa/Spa_map.yaml
-      map_ext: .png
-      centerline_csv: maps/f1tenth_racetracks/Spa/Spa_centerline.csv
-
-    - name: YasMarina
-      map: maps/f1tenth_racetracks/YasMarina/YasMarina_map.yaml
-      map_ext: .png
-      centerline_csv: maps/f1tenth_racetracks/YasMarina/YasMarina_centerline.csv
-
-    - name: Zandvoort
-      map: maps/f1tenth_racetracks/Zandvoort/Zandvoort_map.yaml
-      map_ext: .png
-      centerline_csv: maps/f1tenth_racetracks/Zandvoort/Zandvoort_centerline.csv
+validation:
+  map: maps/f1tenth_maps/maps/circle.yaml
+  map_ext: .png
+  episodes: 2
+  centerline_csv: outputs/centerlines/f1tenth_maps/circle_centerline.csv

@@ -158,6 +158,31 @@ python scripts/generate_map.py \
 Pass the resulting YAML path (or the track's own map YAML) to the waypoint
 drive script, e.g. ``MAP = "maps/custom/f110_gym_10/f110_gym_map"``.
 
+### Generating a Centerline From an Existing Map
+
+If you already have an occupancy-grid map and want to derive a standard
+centerline CSV from it, use:
+
+```bash
+python scripts/generate_centerline.py \
+  --map maps/f1tenth_maps/maps/f1_aut.yaml \
+  --output outputs/centerlines/f1tenth_maps/f1_aut_centerline.csv \
+  --save_plot
+```
+
+This script estimates the loop center and track width from the white track
+pixels in the map image, then writes a 4-column CSV in the format used by the
+reward and waypoint loaders:
+
+```text
+# x_m, y_m, w_tr_right_m, w_tr_left_m
+```
+
+Use `--num-points` to control the density of the generated loop and
+`--white-threshold` if your map image needs a different intensity cutoff.
+With `--save_plot`, the script also writes a PNG visualization next to the
+CSV output.
+
 ## Notes
 
 - The environment now targets Gymnasium's reset/step API.
