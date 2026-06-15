@@ -30,7 +30,7 @@ reward:
 policy:
   name: GaussianMLPPolicy
   kwargs:
-    hidden_size: 64
+    hidden_size: 256
 
 training:
   k_epochs: 10
