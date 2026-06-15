@@ -229,7 +229,7 @@ def ppo_loss(
         - ``L_V``             value MSE objective
         - ``L_H``             mean entropy objective
         - ``rho``             mean policy ratio diagnostic
-        - ``approx_kl``       ``mean(log_p_cur − log_p_new)`` (detached)
+        - ``approx_kl``       clamped ``mean(log_p_cur − log_p_new)`` (detached)
         - ``clip_fraction``   fraction of samples where ``|rho − 1| > ε``
     """
     log_ratio = torch.clamp(log_p_new - log_p_cur, -20.0, 20.0)

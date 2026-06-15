@@ -9,6 +9,8 @@ PACKAGE_ROOT = ROOT / "gym"
 
 if str(PACKAGE_ROOT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_ROOT))
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 sys.modules.pop("f110_gym", None)
 sys.modules.pop("f110_gym.envs", None)

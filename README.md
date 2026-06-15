@@ -77,6 +77,26 @@ TensorBoard event files are written under
 Generated PPO outputs live under ignored `outputs/rl/` paths and should not be
 committed.
 
+### Temporal Context / Memory — TODO
+
+The current PPO policy observes only one simulator frame at a time: a
+downsampled LiDAR scan plus optional ego-state features. There is no temporal
+context, so the policy cannot directly infer momentum, whether it is stuck, or
+how the scene is changing while entering and exiting corners.
+
+Future PPO convergence work should add one of these memory mechanisms:
+
+1. **Frame stacking** — concatenate the last `N` observations along the feature
+   axis, add an `observation.frame_stack` config field, and update
+   `observation_dim()` plus the rollout observation path to maintain per-env
+   history buffers across resets.
+2. **Recurrent policy** — add an LSTM/GRU policy variant, extend the `Policy`
+   interface to accept and return hidden state, and teach `RolloutDataset` to
+   carry/reset hidden states on episode boundaries.
+
+Do not treat model-size increases as a substitute for this; a larger feedforward
+MLP still receives only a single-frame observation.
+
 ## Race Line Optimization
 
 Generate a minimum-time optimized raceline from a track CSV with centerline

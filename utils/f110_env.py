@@ -44,6 +44,13 @@ class F1TenthObservationConfig:
     speed_scale: float = 8.0
     yaw_rate_scale: float = 10.0
 
+    # TODO(Fix 6): Add temporal context support for PPO convergence.
+    #   A future `frame_stack: int = 1` field should make observation_dim()
+    #   multiply the single-frame dimension and make the rollout path maintain
+    #   a per-environment ring buffer of the last N observations. Recurrent
+    #   policies would instead need hidden-state plumbing through Policy.act(),
+    #   Policy.evaluate_actions(), and RolloutDataset reset boundaries.
+
 
 @dataclass(frozen=True)
 class F1TenthActionConfig:

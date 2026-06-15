@@ -4,6 +4,10 @@ This script orchestrates the PPO training loop for an F1TENTH controller:
 environment setup, rollout collection, PPO updates, and checkpointing.
 Task-specific code (reward function) lives here; reusable environment
 helpers live in ``utils/f110_env.py``.
+
+TODO(Fix 6): Add temporal context for PPO convergence. Frame stacking would
+require per-environment observation history in ``RolloutDataset``; recurrent
+policies would additionally require hidden-state storage and reset handling.
 """
 
 from __future__ import annotations
@@ -57,6 +61,7 @@ class F1TenthPPOReward:
         *,
         waypoints_path: str | Path,
         waypoint_proximity: float = 2.0,
+        speed_reward_weight: float = 0.1,
         waypoint_bonus_weight: float = 0.5,
         collision_penalty: float = 1.0,
         spin_threshold: float = 100.0,
@@ -64,6 +69,7 @@ class F1TenthPPOReward:
         usecols: tuple[int, int] = (1, 2),
     ) -> None:
         self.waypoint_proximity = waypoint_proximity
+        self.speed_reward_weight = speed_reward_weight
         self.waypoint_bonus_weight = waypoint_bonus_weight
         self.collision_penalty = collision_penalty
         self.spin_threshold = spin_threshold
@@ -86,7 +92,7 @@ class F1TenthPPOReward:
             return -self.collision_penalty
 
         vel_magnitude = np.sqrt(vx * vx + vy * vy)
-        reward = float(vel_magnitude)
+        reward = self.speed_reward_weight * float(vel_magnitude)
 
         if self.idx < len(self.waypoints):
             wx, wy = self.waypoints[self.idx, :2]

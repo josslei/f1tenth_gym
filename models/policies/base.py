@@ -14,6 +14,11 @@ class Policy(nn.Module, ABC):
 
     Subclasses must provide ``act()`` for rollout sampling and
     ``evaluate_actions()`` for the PPO update.
+
+    TODO(Fix 6): This interface currently assumes single-step observations with
+    shape ``(batch, obs_dim)``. Recurrent policies will need ``act()`` and
+    ``evaluate_actions()`` to accept and return hidden state so PPO can learn
+    temporal driving behaviors instead of relying on one LiDAR frame.
     """
 
     @abstractmethod
