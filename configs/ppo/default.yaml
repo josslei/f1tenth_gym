@@ -22,8 +22,7 @@ reward:
   speed_reward_weight: 0.1
   progress_weight: 2.0
   steer_smoothness_weight: 0.5
-  collision_penalty: 2.0
-  collision_growth: 0.005
+  collision_penalty: 50
   spin_threshold: 100.0
 
 policy:

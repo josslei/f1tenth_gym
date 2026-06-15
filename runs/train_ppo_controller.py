@@ -80,8 +80,7 @@ class F1TenthPPOReward:
         speed_reward_weight: float = 0.1,
         progress_weight: float = 1.0,
         steer_smoothness_weight: float = 0.5,
-        collision_penalty: float = 1.0,
-        collision_growth: float = 0.0,
+        collision_penalty: float = 50.0,
         spin_threshold: float = 100.0,
         delimiter: str = ";",
         usecols: tuple[int, int] = (1, 2),
@@ -90,7 +89,6 @@ class F1TenthPPOReward:
         self.progress_weight = progress_weight
         self.steer_smoothness_weight = steer_smoothness_weight
         self.collision_penalty = collision_penalty
-        self.collision_growth = collision_growth
         self.spin_threshold = spin_threshold
 
         if waypoints_path is not None:
@@ -139,18 +137,10 @@ class F1TenthPPOReward:
         steer = float(np.nan_to_num(obs.get("steer_angle", [0.0])[ego], nan=0.0))
 
         if collision or abs(theta) > self.spin_threshold:
-            progress_frac = (
-                self.prev_arc_length / self.total_length
-                if self.total_length > 0
-                else 0.0
-            )
-            penalty = self.collision_penalty * (
-                1.0 + progress_frac * self.collision_growth
-            )
             if terminated:
                 self.prev_arc_length = 0.0
                 self.prev_steer = 0.0
-            return -float(penalty)
+            return -float(self.collision_penalty)
 
         if terminated:
             self.prev_arc_length = 0.0

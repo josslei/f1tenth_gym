@@ -69,14 +69,13 @@ def test_forward_progress_rewarded(tmp_path: Path):
     assert np.isclose(r, 2.0, atol=0.1)
 
 
-def test_collision_returns_penalty_scaled_by_progress(tmp_path: Path):
+def test_collision_returns_fixed_penalty(tmp_path: Path):
     reward = _reward(
         tmp_path,
         speed_reward_weight=0.0,
         progress_weight=0.0,
         steer_smoothness_weight=0.0,
         collision_penalty=2.0,
-        collision_growth=0.0,
     )
 
     assert reward(_obs(vx=8.0, collision=True), terminated=True) == -2.0
@@ -102,6 +101,5 @@ def test_default_ppo_config_uses_progress_reward(tmp_path: Path):
     assert config.reward["speed_reward_weight"] == 0.1
     assert config.reward["progress_weight"] == 2.0
     assert config.reward["steer_smoothness_weight"] == 0.5
-    assert config.reward["collision_penalty"] == 2.0
-    assert config.reward["collision_growth"] == 0.005
+    assert config.reward["collision_penalty"] == 50
     assert config.training.c2 == 0.01
