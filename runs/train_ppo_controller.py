@@ -62,16 +62,20 @@ class F1TenthPPOReward:
         waypoints_path: str | Path,
         waypoint_proximity: float = 2.0,
         speed_reward_weight: float = 0.1,
+        dense_progress_weight: float = 0.5,
         waypoint_bonus_weight: float = 0.5,
         collision_penalty: float = 1.0,
+        collision_growth: float = 0.0,
         spin_threshold: float = 100.0,
         delimiter: str = ";",
         usecols: tuple[int, int] = (1, 2),
     ) -> None:
         self.waypoint_proximity = waypoint_proximity
         self.speed_reward_weight = speed_reward_weight
+        self.dense_progress_weight = dense_progress_weight
         self.waypoint_bonus_weight = waypoint_bonus_weight
         self.collision_penalty = collision_penalty
+        self.collision_growth = collision_growth
         self.spin_threshold = spin_threshold
         self.waypoints = np.genfromtxt(
             str(waypoints_path), delimiter=delimiter, comments="#", usecols=usecols
@@ -85,27 +89,34 @@ class F1TenthPPOReward:
         collision = bool(obs["collisions"][ego])
         theta = float(np.nan_to_num(obs["poses_theta"][ego], nan=0.0))
 
+        if collision or abs(theta) > self.spin_threshold:
+            penalty = self.collision_penalty + self.idx * self.collision_growth
+            if terminated:
+                self.idx = 0
+            return -float(penalty)
+
         if terminated:
             self.idx = 0
-
-        if collision or abs(theta) > self.spin_threshold:
-            return -self.collision_penalty
 
         vel_magnitude = np.sqrt(vx * vx + vy * vy)
         reward = self.speed_reward_weight * float(vel_magnitude)
 
-        if self.idx < len(self.waypoints):
-            wx, wy = self.waypoints[self.idx, :2]
-            px = float(np.nan_to_num(obs["poses_x"][ego], nan=0.0))
-            py = float(np.nan_to_num(obs["poses_y"][ego], nan=0.0))
-            dist = np.sqrt((px - wx) ** 2 + (py - wy) ** 2)
-            if dist < self.waypoint_proximity:
-                self.idx += 1
-                if self.idx <= len(self.waypoints):
-                    lap_frac = self.idx / len(self.waypoints)
-                    reward += float(lap_frac * self.waypoint_bonus_weight)
+        n_wp = len(self.waypoints)
+        wx, wy = self.waypoints[self.idx % n_wp]
+        px = float(np.nan_to_num(obs["poses_x"][ego], nan=0.0))
+        py = float(np.nan_to_num(obs["poses_y"][ego], nan=0.0))
+        dist = np.sqrt((px - wx) ** 2 + (py - wy) ** 2)
 
-        return reward
+        # dense progress signal every step — reward approaching next waypoint
+        closeness = max(0.0, 1.0 - dist / self.waypoint_proximity)
+        reward += closeness * self.dense_progress_weight
+
+        if dist < self.waypoint_proximity:
+            self.idx += 1
+            # flat checkpoint-acquired bonus (not back-loaded)
+            reward += self.waypoint_bonus_weight
+
+        return float(np.clip(reward, -5.0, 8.0))
 
 
 # ── Checkpointing ─────────────────────────────────────────────────────────────

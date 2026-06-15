@@ -24,8 +24,10 @@ reward:
   usecols: [0, 1]
   waypoint_proximity: 2.0
   speed_reward_weight: 0.1
-  waypoint_bonus_weight: 0.5
-  collision_penalty: 50.0
+  dense_progress_weight: 0.5
+  waypoint_bonus_weight: 1.0
+  collision_penalty: 2.0
+  collision_growth: 0.005
   spin_threshold: 100.0
 
 policy:
