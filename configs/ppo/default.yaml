@@ -2,6 +2,7 @@ env:
   map: maps/custom/f110_gym_10/f110_gym_map.yaml
   map_ext: .png
   num_agents: 1
+  laps_to_complete: 1
   render_mode:
   initial_pose:
     - [1.0748956, -0.1528569, 0.0349893]

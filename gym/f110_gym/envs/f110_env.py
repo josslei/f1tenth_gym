@@ -125,6 +125,7 @@ class F110Env(gym.Env):
         lidar_dist: vertical distance between LiDAR and backshaft
         seed: RNG seed used for scan noise
         render_mode: optional Gymnasium render mode
+        laps_to_complete: number of laps required before terminating an episode
     """
 
     metadata = {"render_modes": ["human", "human_fast"], "render_fps": 200}
@@ -146,6 +147,7 @@ class F110Env(gym.Env):
         integrator=Integrator.RK4,
         seed=12345,
         render_mode=None,
+        laps_to_complete=2,
         **kwargs,
     ):
         super().__init__()
@@ -166,6 +168,7 @@ class F110Env(gym.Env):
         self.ego_idx = ego_idx
         self.integrator = integrator
         self.lidar_dist = lidar_dist
+        self.laps_to_complete = laps_to_complete
 
         # radius to consider done
         self.start_thresh = 0.5  # 10cm
@@ -311,12 +314,15 @@ class F110Env(gym.Env):
                 self.near_starts[i] = False
                 self.toggle_list[i] += 1
             self.lap_counts[i] = self.toggle_list[i] // 2
-            if self.toggle_list[i] < 4:
+            if self.toggle_list[i] < 2 * self.laps_to_complete:
                 self.lap_times[i] = self.current_time
 
-        done = (self.collisions[self.ego_idx]) or np.all(self.toggle_list >= 4)
+        required_toggles = 2 * self.laps_to_complete
+        done = (self.collisions[self.ego_idx]) or np.all(
+            self.toggle_list >= required_toggles
+        )
 
-        return bool(done), self.toggle_list >= 4
+        return bool(done), self.toggle_list >= required_toggles
 
     def _update_state(self, obs_dict):
         """
@@ -459,7 +465,7 @@ class F110Env(gym.Env):
 
         self._update_state(obs)
         F110Env.current_obs = obs
-        info = {"checkpoint_done": obs["lap_counts"] >= 4}
+        info = {"checkpoint_done": obs["lap_counts"] >= self.laps_to_complete}
 
         return obs, info
 

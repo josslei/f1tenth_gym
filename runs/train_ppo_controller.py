@@ -228,6 +228,7 @@ class ValidationCallback(Callback):
         device: torch.device,
         map_waypoints: dict[str, np.ndarray],
         map_poses: dict[str, np.ndarray],
+        laps_to_complete: int,
     ) -> None:
         self.val_maps = val_maps
         self.val_episodes = val_episodes
@@ -237,6 +238,7 @@ class ValidationCallback(Callback):
         self.device = device
         self.map_waypoints = map_waypoints
         self.map_poses = map_poses
+        self.laps_to_complete = laps_to_complete
 
     def on_train_epoch_end(
         self, trainer: pl.Trainer, pl_module: pl.LightningModule
@@ -250,6 +252,7 @@ class ValidationCallback(Callback):
                 map=val_map.map,
                 map_ext=val_map.map_ext,
                 num_agents=1,
+                laps_to_complete=self.laps_to_complete,
             )
 
             obs_config = self.base_observation_config
@@ -481,6 +484,7 @@ def main() -> None:
             device=DEFAULT_DEVICE,
             map_waypoints=map_waypoints,
             map_poses=map_poses,
+            laps_to_complete=int(config.env.get("laps_to_complete", 2)),
         )
         callbacks.append(val_cb)
     elif config.validation is not None:
@@ -508,6 +512,7 @@ def main() -> None:
                 else {}
             ),
             map_poses={},
+            laps_to_complete=int(config.env.get("laps_to_complete", 2)),
         )
         callbacks.append(val_cb)
 
