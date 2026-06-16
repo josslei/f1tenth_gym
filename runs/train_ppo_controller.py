@@ -189,6 +189,7 @@ class DeployableCheckpoint(Callback):
         obs_dim: int,
         action_dim: int,
         observation_config: F1TenthObservationConfig | None = None,
+        action_config: F1TenthActionConfig | None = None,
     ) -> None:
         self.dirpath = Path(dirpath)
         self.every_n_epochs = every_n_epochs
@@ -196,6 +197,7 @@ class DeployableCheckpoint(Callback):
         self.obs_dim = obs_dim
         self.action_dim = action_dim
         self.observation_config = observation_config
+        self.action_config = action_config
 
     def on_train_epoch_end(
         self, trainer: pl.Trainer, pl_module: pl.LightningModule
@@ -210,6 +212,7 @@ class DeployableCheckpoint(Callback):
                 obs_dim=self.obs_dim,
                 action_dim=self.action_dim,
                 observation_config=self.observation_config,
+                action_config=self.action_config,
                 filename=f"policy-epoch-{epoch:04d}.pt",
             )
 
@@ -305,6 +308,7 @@ def save_policy(
     obs_dim: int,
     action_dim: int,
     observation_config: F1TenthObservationConfig | None = None,
+    action_config: F1TenthActionConfig | None = None,
     filename: str = "final_model.pt",
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -324,6 +328,8 @@ def save_policy(
             k: v for k, v in asdict(observation_config).items() if not k.startswith("_")
         }
         payload["observation_config"] = obs_cfg_dict
+    if action_config is not None:
+        payload["action_config"] = asdict(action_config)
     torch.save(payload, output_dir / filename)
 
 
@@ -461,6 +467,7 @@ def main() -> None:
         obs_dim=obs_dim,
         action_dim=action_dim,
         observation_config=observation_config,
+        action_config=action_config,
     )
     callbacks: list[Callback] = [checkpoint_callback]
 
@@ -519,6 +526,7 @@ def main() -> None:
         obs_dim=obs_dim,
         action_dim=action_dim,
         observation_config=observation_config,
+        action_config=action_config,
     )
     dataset.sve.close()
 

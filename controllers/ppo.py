@@ -123,6 +123,8 @@ class PPOController(Controller):
                 observation_config, waypoints_xy
             )
 
+        if action_config is None and "action_config" in checkpoint:
+            action_config = F1TenthActionConfig(**checkpoint["action_config"])
         velocity_min = VELOCITY_MIN
         velocity_max = VELOCITY_MAX
         if action_config is not None:
