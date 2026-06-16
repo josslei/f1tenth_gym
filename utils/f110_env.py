@@ -379,7 +379,9 @@ class SubprocVecEnv:
 
 
 class RolloutDataset(
-    IterableDataset[tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]]
+    IterableDataset[
+        tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]
+    ]
 ):
     """Collects ``rollout_steps`` from N parallel envs in lockstep.
 
@@ -458,7 +460,9 @@ class RolloutDataset(
 
     def __iter__(
         self,
-    ) -> Iterator[tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]]:
+    ) -> Iterator[
+        tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]
+    ]:
         n = self.sve.n_envs
 
         # ── Per-epoch map switching ──────────────────────────────────────
@@ -500,6 +504,8 @@ class RolloutDataset(
         r_buf: list[list[float]] = [[] for _ in range(n)]
         terminal_buf: list[list[float]] = [[] for _ in range(n)]
         completed_episode_returns: list[float] = []
+        completed_episode_lap_numbers: list[int] = []
+        completed_episode_lap_times: list[float] = []
         if len(self.ep_return) != n:
             self.ep_return = [0.0] * n
 
@@ -542,6 +548,13 @@ class RolloutDataset(
                 terminal_buf[i].append(float(terminated_list[i]))
 
                 if any_terminal:
+                    ego = int(next_obs_list[i]["ego_idx"])
+                    completed_episode_lap_numbers.append(
+                        int(next_obs_list[i]["lap_counts"][ego])
+                    )
+                    completed_episode_lap_times.append(
+                        float(next_obs_list[i]["lap_times"][ego])
+                    )
                     completed_episode_returns.append(self.ep_return[i])
                     self.ep_return[i] = 0.0
                     self.current_obs[i] = reset_obs_list[i]
@@ -593,6 +606,17 @@ class RolloutDataset(
             if completed_episode_returns
             else 0.0
         )
+        mean_lap_number = (
+            float(np.mean(completed_episode_lap_numbers))
+            if completed_episode_lap_numbers
+            else 0.0
+        )
+        mean_lap_time = (
+            float(np.mean(completed_episode_lap_times))
+            if completed_episode_lap_times
+            else 0.0
+        )
+        completed_episode_count = float(len(completed_episode_returns))
 
         n_total = s.shape[0]
         for _ in range(self.k_epochs):
@@ -606,6 +630,9 @@ class RolloutDataset(
                     A_hat[B],
                     R_hat[B],
                     torch.as_tensor(mean_ep_return, device=s.device),
+                    torch.as_tensor(mean_lap_number, device=s.device),
+                    torch.as_tensor(mean_lap_time, device=s.device),
+                    torch.as_tensor(completed_episode_count, device=s.device),
                 )
 
     def __len__(self) -> int:

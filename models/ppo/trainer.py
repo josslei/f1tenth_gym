@@ -36,12 +36,12 @@ class LightningPPO(pl.LightningModule):
 
     Fixed ``training_step`` batch format:
 
-    ``(s, a, log_p_cur, A_hat, R_hat)``
+    ``(s, a, log_p_cur, A_hat, R_hat, episode_return, lap_number, lap_time, completed_episodes)``
 
     Common names: ``s`` = observations/states, ``a`` = actions,
     ``log_p_cur`` = old log probabilities, ``A_hat`` = advantages,
-    ``R_hat`` = returns. Shapes are ``s: (N, state_dim)``,
-    ``a: (N, action_dim)``, and ``log_p_cur/A_hat/R_hat: (N,)``.
+    ``R_hat`` = returns. The final four scalars are rollout-level
+    training metrics logged through Lightning.
 
     Parameters
     ----------
@@ -69,10 +69,30 @@ class LightningPPO(pl.LightningModule):
 
     def training_step(  # noqa: D102
         self,
-        batch: Tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor],
+        batch: Tuple[
+            Tensor,
+            Tensor,
+            Tensor,
+            Tensor,
+            Tensor,
+            Tensor,
+            Tensor,
+            Tensor,
+            Tensor,
+        ],
         batch_idx: int,
     ) -> Tensor:
-        s, a, log_p_cur, A_hat, R_hat, episode_return = batch
+        (
+            s,
+            a,
+            log_p_cur,
+            A_hat,
+            R_hat,
+            episode_return,
+            lap_number,
+            lap_time,
+            completed_episodes,
+        ) = batch
 
         training_config = self.config.training
         optimizer = cast(torch.optim.Optimizer, self.optimizers())
@@ -112,6 +132,14 @@ class LightningPPO(pl.LightningModule):
             on_epoch=True,
         )
         self.log("train/episode_return", episode_return, on_step=False, on_epoch=True)
+        self.log("train/lap_number", lap_number, on_step=False, on_epoch=True)
+        self.log("train/lap_time", lap_time, on_step=False, on_epoch=True)
+        self.log(
+            "train/completed_episodes",
+            completed_episodes,
+            on_step=False,
+            on_epoch=True,
+        )
 
         return loss
 

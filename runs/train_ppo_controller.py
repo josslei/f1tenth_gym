@@ -327,12 +327,6 @@ def save_policy(
     torch.save(payload, output_dir / filename)
 
 
-def append_jsonl(path: Path, record: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as file:
-        file.write(json.dumps(record) + "\n")
-
-
 def log_map_split(
     output_dir: Path,
     train_maps: list[MapConfig],
@@ -517,12 +511,6 @@ def main() -> None:
         callbacks=callbacks,
     )
     trainer.fit(module, datamodule=datamodule)
-
-    for episode_idx, episode_return in enumerate(episode_returns):
-        append_jsonl(
-            output_dir / "metrics.jsonl",
-            {"episode": episode_idx, "episode_return": episode_return},
-        )
 
     save_policy(
         output_dir,
