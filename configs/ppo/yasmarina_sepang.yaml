@@ -1,0 +1,60 @@
+env:
+  map: maps/f1tenth_racetracks/YasMarina/YasMarina_map.yaml
+  map_ext: .png
+  num_agents: 1
+  render_mode:
+  centerline_csv: maps/f1tenth_racetracks/YasMarina/YasMarina_centerline.csv
+
+observation:
+  scan_size: 108
+  scan_max_m: 30.0
+  include_ego_state: true
+  speed_scale: 8.0
+  yaw_rate_scale: 10.0
+  steer_scale: 1.066
+  include_waypoints: true
+  lookahead_distances: [0.5, 1.0, 2.0, 3.5, 5.5, 8.0, 11.0, 14.5, 18.5, 23.0, 28.0, 33.0]
+  waypoint_scale: 30.0
+  waypoint_resample_spacing: 0.5
+
+action:
+  velocity_min: 1.0
+  velocity_max: 8.0
+
+reward:
+  speed_reward_weight: 0.1
+  progress_weight: 2.0
+  steer_smoothness_weight: 0.5
+  collision_penalty: 50
+  spin_threshold: 100.0
+
+policy:
+  name: GaussianMLPPolicy
+  kwargs:
+    hidden_size: 256
+
+training:
+  k_epochs: 10
+  mini_batch_size: 256
+  learning_rate: 0.0003
+  epsilon: 0.2
+  c1: 0.5
+  c2: 0.01
+  normalize_advantages: true
+  max_grad_norm: 0.5
+
+runtime:
+  seed: 42
+  ppo_iterations: 2500
+  rollout_steps: 2048
+  progress_bar: true
+  num_envs: 4
+
+output:
+  dir: outputs/rl/ppo_yasmarina_sepang
+
+validation:
+  map: maps/f1tenth_racetracks/Sepang/Sepang_map.yaml
+  map_ext: .png
+  episodes: 2
+  centerline_csv: maps/f1tenth_racetracks/Sepang/Sepang_centerline.csv
