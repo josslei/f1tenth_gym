@@ -4,3 +4,6 @@
 [submodule "maps/f1tenth_maps"]
 	path = maps/f1tenth_maps
 	url = git@github.com:CPS-TUWien/f1tenth_maps
+[submodule "thirdparty/f1tenth_gym_ros"]
+	path = thirdparty/f1tenth_gym_ros
+	url = git@github.com:josslei/f1tenth_gym_ros
