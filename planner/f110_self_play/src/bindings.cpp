@@ -1,9 +1,11 @@
-#include <torch/extension.h>
+#include <torch/script.h>
 
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include <cstring>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -13,8 +15,38 @@
 #include "types.hpp"
 
 namespace py = pybind11;
+using namespace pybind11::literals;
 namespace sp = planner::f110_self_play;
 namespace rk = f110_rollout_kernel;
+
+namespace {
+
+py::array_t<float> tensor_row_to_array(const torch::Tensor &tensor) {
+  auto cpu = tensor.detach().to(torch::kCPU).contiguous();
+  py::array_t<float> out(static_cast<py::ssize_t>(cpu.numel()));
+  std::memcpy(out.mutable_data(), cpu.data_ptr<float>(),
+              static_cast<std::size_t>(cpu.numel()) * sizeof(float));
+  return out;
+}
+
+py::object self_play_result_to_python(const sp::SelfPlayResult &result) {
+  py::module_ types = py::module_::import("types");
+  py::object ns = types.attr("SimpleNamespace");
+  py::list trajectories;
+  for (const auto &trajectory : result.trajectories) {
+    py::list transitions;
+    for (const auto &step : trajectory.steps) {
+      transitions.append(
+          ns("obs"_a = tensor_row_to_array(step.obs), "action"_a = step.action,
+             "reward"_a = step.reward, "done"_a = step.done,
+             "root_policy"_a = tensor_row_to_array(step.root_policy)));
+    }
+    trajectories.append(ns("transitions"_a = transitions));
+  }
+  return ns("trajectories"_a = trajectories, "metrics"_a = result.metrics);
+}
+
+} // namespace
 
 PYBIND11_MODULE(f110_self_play_native, m) {
   m.doc() = "Native F110 self-play bindings";
@@ -72,17 +104,33 @@ PYBIND11_MODULE(f110_self_play_native, m) {
            py::arg("velocity_bins"), py::arg("velocity_min") = 1.0f,
            py::arg("velocity_max") = 8.0f)
       .def_property_readonly("action_count", &sp::ActionLattice::action_count)
-      .def("normalized_action", &sp::ActionLattice::normalized_action,
-           py::arg("action_index"))
-      .def("normalized_batch", &sp::ActionLattice::normalized_batch,
-           py::arg("action_indices"));
+      .def(
+          "normalized_action",
+          [](const sp::ActionLattice &self, int32_t action_index) {
+            return tensor_row_to_array(self.normalized_action(action_index));
+          },
+          py::arg("action_index"))
+      .def(
+          "normalized_batch",
+          [](const sp::ActionLattice &self,
+             py::array_t<int64_t> action_indices) {
+            auto arr = action_indices.unchecked<1>();
+            auto indices = torch::empty({arr.shape(0)}, torch::kInt64);
+            auto *ptr = indices.data_ptr<int64_t>();
+            for (py::ssize_t i = 0; i < arr.shape(0); ++i) {
+              ptr[i] = arr(i);
+            }
+            auto normalized = self.normalized_batch(indices).contiguous();
+            py::array_t<float> out({arr.shape(0), py::ssize_t(2)});
+            std::memcpy(out.mutable_data(), normalized.data_ptr<float>(),
+                        static_cast<std::size_t>(normalized.numel()) *
+                            sizeof(float));
+            return out;
+          },
+          py::arg("action_indices"));
 
-  py::class_<sp::SearchBatchResult>(m, "SearchBatchResult")
-      .def(py::init<>())
-      .def_readwrite("action_probs", &sp::SearchBatchResult::action_probs)
-      .def_readwrite("metrics", &sp::SearchBatchResult::metrics);
-
-  py::class_<sp::MuZeroSearchAdapter>(m, "MuZeroSearchAdapter")
+  py::class_<sp::MuZeroSearchAdapter, std::shared_ptr<sp::MuZeroSearchAdapter>>(
+      m, "MuZeroSearchAdapter")
       .def(py::init([](const std::string &model_path, int32_t num_iters,
                        float temperature, float c_puct, int32_t batch_size,
                        int32_t action_count, int32_t hidden_size,
@@ -112,9 +160,7 @@ PYBIND11_MODULE(f110_self_play_native, m) {
            py::arg("model_path"), py::arg("num_iters"), py::arg("temperature"),
            py::arg("c_puct"), py::arg("batch_size"), py::arg("action_count"),
            py::arg("hidden_size"), py::arg("max_nodes") = 0,
-           py::arg("device") = "", py::arg("print_metrics") = false)
-      .def("search_batch", &sp::MuZeroSearchAdapter::search_batch,
-           py::arg("obs_batch"));
+           py::arg("device") = "", py::arg("print_metrics") = false);
 
   py::class_<sp::SelfPlayEngine>(m, "SelfPlayEngine")
       .def(py::init(
@@ -130,7 +176,9 @@ PYBIND11_MODULE(f110_self_play_native, m) {
                   py::array_t<double, py::array::c_style | py::array::forcecast>
                       cum_arc_lengths,
                   const rk::F110Params &dynamics_params, double car_length,
-                  double car_width) {
+                  double car_width, double speed_reward_weight,
+                  double progress_weight, double steer_smoothness_weight,
+                  double collision_penalty, double spin_threshold) {
                  auto wx = waypoints_x.unchecked<1>();
                  auto wy = waypoints_y.unchecked<1>();
                  auto ca = cum_arc_lengths.unchecked<1>();
@@ -150,14 +198,20 @@ PYBIND11_MODULE(f110_self_play_native, m) {
                      std::move(search), track_map, obs_config,
                      std::move(action_lattice), discount, sample_actions,
                      print_metrics, std::move(wxv), std::move(wyv),
-                     std::move(cav), dynamics_params, car_length, car_width);
+                     std::move(cav), dynamics_params, car_length, car_width,
+                     speed_reward_weight, progress_weight,
+                     steer_smoothness_weight, collision_penalty,
+                     spin_threshold);
                }),
            py::arg("search"), py::arg("track_map"), py::arg("obs_config"),
-           py::arg("action_lattice"), py::arg("discount") = 0.997f,
-           py::arg("sample_actions") = true, py::arg("print_metrics") = false,
+           py::arg("action_lattice"), py::arg("discount"),
+           py::arg("sample_actions"), py::arg("print_metrics"),
            py::arg("waypoints_x"), py::arg("waypoints_y"),
            py::arg("cum_arc_lengths"), py::arg("dynamics_params"),
-           py::arg("car_length") = 0.58, py::arg("car_width") = 0.31)
+           py::arg("car_length"), py::arg("car_width"),
+           py::arg("speed_reward_weight"), py::arg("progress_weight"),
+           py::arg("steer_smoothness_weight"), py::arg("collision_penalty"),
+           py::arg("spin_threshold"))
       .def(
           "generate",
           [](sp::SelfPlayEngine &self, int32_t rollout_steps,
@@ -171,7 +225,8 @@ PYBIND11_MODULE(f110_self_play_native, m) {
                   arr(i, 4), arr(i, 5), arr(i, 6), 0,
                   0,         0,         false};
             }
-            return self.generate(rollout_steps, batch_size, states);
+            return self_play_result_to_python(
+                self.generate(rollout_steps, batch_size, states));
           },
           py::arg("rollout_steps"), py::arg("batch_size"),
           py::arg("initial_states"));

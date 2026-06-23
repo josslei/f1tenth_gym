@@ -4,7 +4,6 @@ from .backend import (
     F110State,
     MuZeroSearchAdapter,
     ObservationConfig,
-    SearchBatchResult,
     SelfPlayEngine,
     TrackMap,
 )
@@ -15,7 +14,6 @@ __all__ = [
     "F110State",
     "MuZeroSearchAdapter",
     "ObservationConfig",
-    "SearchBatchResult",
     "SelfPlayEngine",
     "TrackMap",
 ]

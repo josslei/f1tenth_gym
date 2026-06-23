@@ -11,9 +11,11 @@ import torch.nn.functional as F
 from torch import Tensor
 from torch.utils.data import DataLoader
 
-from planner.f110_self_play.backend import ActionLattice, MuZeroSearchAdapter
-from planner.f110_self_play.gym_backend import GymF110Backend
-from planner.f110_self_play.self_play import SelfPlayEngine
+from planner.f110_self_play.backend import (
+    ActionLattice,
+    MuZeroSearchAdapter,
+    SelfPlayEngine,
+)
 from .network import F110MuZeroNet
 from .replay_buffer import MuZeroReplayBuffer
 
@@ -142,8 +144,16 @@ class TorchScriptExportCallback(pl.Callback):
 class SelfPlayCallback(pl.Callback):
     def __init__(
         self,
-        backend: GymF110Backend,
+        track_map: Any,
+        observation_config: Any,
         action_lattice: ActionLattice,
+        waypoints: Any,
+        cum_arc_lengths: Any,
+        dynamics_params: Any,
+        initial_states: Any,
+        car_length: float,
+        car_width: float,
+        reward_config: dict[str, Any],
         rollout_steps: int,
         num_iters: int,
         c_puct: float,
@@ -154,8 +164,16 @@ class SelfPlayCallback(pl.Callback):
         device: Any,
         model_path: str,
     ) -> None:
-        self.backend = backend
+        self.track_map = track_map
+        self.observation_config = observation_config
         self.action_lattice = action_lattice
+        self.waypoints = waypoints
+        self.cum_arc_lengths = cum_arc_lengths
+        self.dynamics_params = dynamics_params
+        self.initial_states = initial_states
+        self.car_length = car_length
+        self.car_width = car_width
+        self.reward_config = reward_config
         self.rollout_steps = rollout_steps
         self.num_iters = num_iters
         self.c_puct = c_puct
@@ -180,7 +198,7 @@ class SelfPlayCallback(pl.Callback):
             self.num_iters,
             self.temperature,
             self.c_puct,
-            self.backend.sve.n_envs,
+            int(self.initial_states.shape[0]),
             self.action_lattice.action_count,
             module.model.hidden_size,
             0,
@@ -189,20 +207,33 @@ class SelfPlayCallback(pl.Callback):
         )
         result = SelfPlayEngine(
             search,
-            self.backend,
+            self.track_map,
+            self.observation_config,
             self.action_lattice,
             self.discount,
             True,
             self.self_play_print_metrics,
-        ).generate(self.rollout_steps)
+            self.waypoints[:, 0],
+            self.waypoints[:, 1],
+            self.cum_arc_lengths,
+            self.dynamics_params,
+            self.car_length,
+            self.car_width,
+            self.reward_config["speed_reward_weight"],
+            self.reward_config["progress_weight"],
+            self.reward_config["steer_smoothness_weight"],
+            self.reward_config["collision_penalty"],
+            self.reward_config["spin_threshold"],
+        ).generate(
+            self.rollout_steps,
+            int(self.initial_states.shape[0]),
+            self.initial_states,
+        )
         module.model.train()
         for trajectory in result.trajectories:
             module.replay_buffer.push(trajectory)
         for key, value in result.metrics.items():
             module.log(key, value, on_step=False, on_epoch=True)
-
-    def on_fit_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
-        self.backend.close()
 
 
 __all__ = ["LightningMuZero", "SelfPlayCallback", "TorchScriptExportCallback"]

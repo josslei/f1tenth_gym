@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import numpy as np
-import torch
+from types import SimpleNamespace
+
+from numpy.typing import NDArray
 
 class F110Params:
     mu: float
@@ -61,6 +63,7 @@ class ObservationConfig:
     include_waypoints: bool
     lookahead_distances: list[float]
     waypoint_scale: float
+    waypoint_resample_spacing: float
 
 class ActionLattice:
     def __init__(
@@ -72,12 +75,10 @@ class ActionLattice:
     ) -> None: ...
     @property
     def action_count(self) -> int: ...
-    def normalized_action(self, action_index: int) -> torch.Tensor: ...
-    def normalized_batch(self, action_indices: torch.Tensor) -> torch.Tensor: ...
-
-class SearchBatchResult:
-    action_probs: torch.Tensor
-    metrics: dict[str, float]
+    def normalized_action(self, action_index: int) -> NDArray[np.float32]: ...
+    def normalized_batch(
+        self, action_indices: NDArray[np.int64]
+    ) -> NDArray[np.float32]: ...
 
 class MuZeroSearchAdapter:
     def __init__(
@@ -93,7 +94,6 @@ class MuZeroSearchAdapter:
         device: str = "",
         print_metrics: bool = False,
     ) -> None: ...
-    def search_batch(self, obs_batch: torch.Tensor) -> SearchBatchResult: ...
 
 class SelfPlayEngine:
     def __init__(
@@ -102,23 +102,28 @@ class SelfPlayEngine:
         track_map: TrackMap,
         obs_config: ObservationConfig,
         action_lattice: ActionLattice,
-        discount: float = 0.997,
-        sample_actions: bool = True,
-        print_metrics: bool = False,
-        waypoints_x: np.ndarray | list[float] = ...,
-        waypoints_y: np.ndarray | list[float] = ...,
-        cum_arc_lengths: np.ndarray | list[float] = ...,
-        dynamics_params: F110Params = ...,
-        car_length: float = 0.58,
-        car_width: float = 0.31,
+        discount: float,
+        sample_actions: bool,
+        print_metrics: bool,
+        waypoints_x: np.ndarray | list[float],
+        waypoints_y: np.ndarray | list[float],
+        cum_arc_lengths: np.ndarray | list[float],
+        dynamics_params: F110Params,
+        car_length: float,
+        car_width: float,
+        speed_reward_weight: float,
+        progress_weight: float,
+        steer_smoothness_weight: float,
+        collision_penalty: float,
+        spin_threshold: float,
     ) -> None: ...
     def generate(
         self,
         rollout_steps: int,
         batch_size: int,
         initial_states: np.ndarray,
-    ) -> SelfPlayResult: ...
+    ) -> SimpleNamespace: ...
 
 class SelfPlayResult:
-    trajectories: list[list[tuple[torch.Tensor, int, float, bool, torch.Tensor]]]
+    trajectories: list[SimpleNamespace]
     metrics: dict[str, float]
