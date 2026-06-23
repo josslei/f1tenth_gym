@@ -1,0 +1,6 @@
+#ifndef PLANNER_TREE_SEARCH_COMMON_HPP_
+#define PLANNER_TREE_SEARCH_COMMON_HPP_
+
+#include "common/simd.hpp"
+
+#endif // PLANNER_TREE_SEARCH_COMMON_HPP_

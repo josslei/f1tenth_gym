@@ -10,6 +10,9 @@ __pycache__/
 # C extensions
 *.so
 
+# CMake build directories
+build-debug/
+
 # Distribution / packaging
 .Python
 build/
@@ -28,6 +31,7 @@ share/python-wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+*.zip
 MANIFEST
 
 # PyInstaller
@@ -87,6 +91,12 @@ venv.bak/
 
 # Generated outputs
 outputs/
+natives/*
+!natives/.gitkeep
+!natives/__init__.py
+
+# Local third-party binary payloads
+thirdparty/libtorch/
 
 # Dev / backup files
 *_backup.py

@@ -46,6 +46,10 @@ pytest -q
 The pytest suite exercises `F110Env` directly and ignores the old helper
 tests under `tests/`.
 
+## Documentation
+
+See [docs/index.md](docs/index.md) for the documentation map and entry points.
+
 ## PPO Controller Experiment
 
 Install the optional RL and dev dependencies with:

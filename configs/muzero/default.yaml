@@ -1,0 +1,75 @@
+env:
+  map: maps/custom/f110_gym_10/f110_gym_map.yaml
+  map_ext: .png
+  num_agents: 1
+  laps_to_complete: 1
+  render_mode:
+  initial_pose:
+    - [1.0748956, -0.1528569, 0.0349893]
+  centerline_csv: maps/custom/f110_gym_10/f110_gym_centerline.csv
+
+observation:
+  scan_size: 108
+  scan_max_m: 30.0
+  include_ego_state: true
+  speed_scale: 8.0
+  yaw_rate_scale: 10.0
+  steer_scale: 1.066
+  include_waypoints: true
+  lookahead_distances: [0.5, 1.0, 2.0, 3.5, 5.5, 8.0, 11.0, 14.5, 18.5, 23.0, 28.0, 33.0]
+  waypoint_scale: 30.0
+  waypoint_resample_spacing: 0.5
+
+action:
+  steering_bins: 9
+  velocity_bins: 5
+  velocity_min: 1.0
+  velocity_max: 8.0
+
+reward:
+  speed_reward_weight: 0.1
+  progress_weight: 2.0
+  steer_smoothness_weight: 0.5
+  collision_penalty: 50.0
+  spin_threshold: 100.0
+
+model:
+  hidden_size: 128
+  trunk_size: 256
+
+search:
+  num_iters: 2000
+  c_puct: 1.5
+  temperature: 1.0
+  batch_size: 32
+  print_metrics: false
+
+self_play:
+  rollout_steps: 2048
+  discount: 0.997
+  print_metrics: true
+
+replay:
+  capacity: 1000
+  unroll_steps: 5
+  td_steps: 10
+  num_workers: 0
+
+training:
+  batch_size: 128
+  epochs: 100
+  learning_rate: 0.0003
+  weight_decay: 0.0001
+  max_grad_norm: 5.0
+  policy_loss_weight: 1.0
+  value_loss_weight: 1.0
+  reward_loss_weight: 1.0
+  discount_loss_weight: 0.25
+
+runtime:
+  seed: 42
+  progress_bar: true
+  checkpoint_every_n_epochs: 10
+
+output:
+  dir: outputs/rl/muzero_f110_gym_10

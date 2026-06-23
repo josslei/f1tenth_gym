@@ -1,0 +1,6 @@
+#ifndef PLANNER_TREE_SEARCH_TREE_POLICIES_HPP_
+#define PLANNER_TREE_SEARCH_TREE_POLICIES_HPP_
+
+#include "tree_policies/puct_policy.hpp"
+
+#endif // PLANNER_TREE_SEARCH_TREE_POLICIES_HPP_

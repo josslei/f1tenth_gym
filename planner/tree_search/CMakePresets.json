@@ -1,0 +1,36 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "default",
+      "displayName": "Tree Search Default",
+      "binaryDir": "build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": true,
+        "CMAKE_COLOR_DIAGNOSTICS": true
+      }
+    },
+    {
+      "name": "debug",
+      "displayName": "Tree Search Debug",
+      "inherits": "default",
+      "binaryDir": "build-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "default",
+      "displayName": "Tree Search Build",
+      "configurePreset": "default"
+    },
+    {
+      "name": "debug",
+      "displayName": "Tree Search Debug Build",
+      "configurePreset": "debug"
+    }
+  ]
+}

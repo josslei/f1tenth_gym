@@ -33,11 +33,19 @@ include-package-data = true
 
 [tool.setuptools.packages.find]
 where = ["gym", "."]
-include = ["f110_gym*", "controllers*", "models*", "utils*"]
+include = ["f110_gym*", "controllers*", "models*", "utils*", "planner*"]
 
 [tool.setuptools.package-data]
 f110_gym = [
   "envs/maps/*.yaml",
   "envs/maps/*.png",
   "envs/maps/*.pgm",
+]
+
+[tool.pytest.ini_options]
+norecursedirs = [
+  "ref",
+  "thirdparty",
+  ".git",
+  "*.egg-info",
 ]

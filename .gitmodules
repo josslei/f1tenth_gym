@@ -7,3 +7,9 @@
 [submodule "thirdparty/f1tenth_gym_ros"]
 	path = thirdparty/f1tenth_gym_ros
 	url = git@github.com:josslei/f1tenth_gym_ros
+[submodule "thirdparty/highway"]
+	path = thirdparty/highway
+	url = git@github.com:google/highway
+[submodule "thirdparty/pybind11"]
+	path = thirdparty/pybind11
+	url = git@github.com:pybind/pybind11
