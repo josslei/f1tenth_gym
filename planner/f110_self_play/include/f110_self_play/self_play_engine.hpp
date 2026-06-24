@@ -122,7 +122,12 @@ public:
           dynamics_params, f110_rollout_kernel::Integrator::RK4,
           reward_fns.data(), obs_config, waypoints_x.data(), waypoints_y.data(),
           static_cast<int>(waypoints_x.size()), cum_arc_lengths.data(),
-          batch_size, car_length, car_width, step_result);
+          batch_size, car_length, car_width, step_result, false);
+
+      metrics["self_play/terminal_collisions"] +=
+          static_cast<double>(step_result.collision_terminations);
+      metrics["self_play/terminal_backwards"] +=
+          static_cast<double>(step_result.backward_terminations);
 
       obs_tensor = torch::from_blob(
                        step_result.observations.data(), {batch_size, obs_dim},
@@ -169,6 +174,10 @@ public:
     result.metrics = std::move(metrics);
     result.metrics["self_play/trajectories"] =
         static_cast<double>(result.trajectories.size());
+    result.metrics["self_play/episode_return"] =
+        mean_trajectory_return(result.trajectories);
+    result.metrics["self_play/discounted_episode_return"] =
+        mean_discounted_trajectory_return(result.trajectories, discount);
     result.metrics["self_play/search_steps"] =
         result.metrics.count("self_play/search_steps")
             ? result.metrics.at("self_play/search_steps")
@@ -220,6 +229,50 @@ private:
     return steps;
   }
 
+  static inline double trajectory_return(const Trajectory &trajectory) {
+    double total = 0.0;
+    for (const auto &step : trajectory.steps) {
+      total += static_cast<double>(step.reward);
+    }
+    return total;
+  }
+
+  static inline double
+  discounted_trajectory_return(const Trajectory &trajectory, double discount) {
+    double total = 0.0;
+    double gamma = 1.0;
+    for (const auto &step : trajectory.steps) {
+      total += gamma * static_cast<double>(step.reward);
+      gamma *= discount;
+    }
+    return total;
+  }
+
+  static inline double
+  mean_trajectory_return(const std::vector<Trajectory> &trajectories) {
+    if (trajectories.empty()) {
+      return 0.0;
+    }
+    double total = 0.0;
+    for (const auto &trajectory : trajectories) {
+      total += trajectory_return(trajectory);
+    }
+    return total / static_cast<double>(trajectories.size());
+  }
+
+  static inline double
+  mean_discounted_trajectory_return(const std::vector<Trajectory> &trajectories,
+                                    double discount) {
+    if (trajectories.empty()) {
+      return 0.0;
+    }
+    double total = 0.0;
+    for (const auto &trajectory : trajectories) {
+      total += discounted_trajectory_return(trajectory, discount);
+    }
+    return total / static_cast<double>(trajectories.size());
+  }
+
   inline torch::Tensor compute_initial_observations(
       const std::vector<f110_rollout_kernel::F110State> &states, int batch_size,
       int obs_dim) {
@@ -232,6 +285,7 @@ private:
     std::vector<double> vx(static_cast<std::size_t>(batch_size));
     std::vector<double> sa(static_cast<std::size_t>(batch_size));
     std::vector<double> yr(static_cast<std::size_t>(batch_size));
+    std::vector<double> poses(static_cast<std::size_t>(batch_size) * 3);
 
     for (int b = 0; b < batch_size; ++b) {
       poses_x[static_cast<std::size_t>(b)] =
@@ -247,9 +301,15 @@ private:
       vx[static_cast<std::size_t>(b)] =
           states[static_cast<std::size_t>(b)].velocity *
           std::cos(states[static_cast<std::size_t>(b)].slip_angle);
+      poses[static_cast<std::size_t>(b) * 3] =
+          poses_x[static_cast<std::size_t>(b)];
+      poses[static_cast<std::size_t>(b) * 3 + 1] =
+          poses_y[static_cast<std::size_t>(b)];
+      poses[static_cast<std::size_t>(b) * 3 + 2] =
+          poses_t[static_cast<std::size_t>(b)];
     }
 
-    f110_rollout_kernel::get_scan_batch(poses_x.data(), batch_size, track_map,
+    f110_rollout_kernel::get_scan_batch(poses.data(), batch_size, track_map,
                                         scans.data());
 
     std::vector<uint8_t> col(static_cast<std::size_t>(batch_size), 0);
@@ -366,7 +426,17 @@ private:
               << " | transitions: " << v("self_play/transitions")
               << " | samples: " << v("self_play/samples") << std::endl;
     std::cout << "  trajectories: " << v("self_play/trajectories")
+              << " | avg len: "
+              << (v("self_play/trajectories") > 0.0
+                      ? v("self_play/samples") / v("self_play/trajectories")
+                      : 0.0)
+              << " | episode return: " << v("self_play/episode_return")
+              << " | discounted return: "
+              << v("self_play/discounted_episode_return")
               << " | total: " << v("self_play/total_time_us") / 1000.0 << " ms"
+              << std::endl;
+    std::cout << "  terminal collisions: " << v("self_play/terminal_collisions")
+              << " | terminal backwards: " << v("self_play/terminal_backwards")
               << std::endl;
     std::cout << "[Throughput]" << std::endl;
     std::cout << "  transitions/sec: " << v("self_play/transitions_per_second")

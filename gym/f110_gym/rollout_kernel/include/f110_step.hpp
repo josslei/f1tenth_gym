@@ -28,6 +28,8 @@ struct CompleteStepBatchResult {
   std::vector<uint8_t> collisions;
   std::vector<int> lap_counts;
   std::vector<double> lap_times;
+  std::size_t collision_terminations = 0;
+  std::size_t backward_terminations = 0;
   int obs_dim = 0;
 };
 
@@ -37,7 +39,7 @@ inline void complete_step_batch(
     F110ProgressReward *reward_fns, const ObservationConfig &obs_config,
     const double *waypoints_x, const double *waypoints_y, int num_waypoints,
     const double *cum_arc_lengths, int B, double car_length, double car_width,
-    CompleteStepBatchResult &result) {
+    CompleteStepBatchResult &result, bool check_pairwise_collisions = false) {
   result.states.resize(static_cast<std::size_t>(B));
   result.scans.assign(static_cast<std::size_t>(B) * 1080, 0.0f);
   int obs_dim = observation_dim(obs_config);
@@ -58,6 +60,7 @@ inline void complete_step_batch(
   std::vector<double> yr(static_cast<std::size_t>(B));
   std::vector<double> vx(static_cast<std::size_t>(B));
   std::vector<double> vy(static_cast<std::size_t>(B));
+  std::vector<double> poses(static_cast<std::size_t>(B) * 3);
 
   for (int b = 0; b < B; ++b) {
     F110StepResult sr = step(states[b], actions[b], params, integrator);
@@ -72,16 +75,21 @@ inline void complete_step_batch(
         sr.state.velocity * std::cos(sr.state.slip_angle);
     vy[static_cast<std::size_t>(b)] =
         sr.state.velocity * std::sin(sr.state.slip_angle);
+    poses[static_cast<std::size_t>(b) * 3] = px[static_cast<std::size_t>(b)];
+    poses[static_cast<std::size_t>(b) * 3 + 1] =
+        py[static_cast<std::size_t>(b)];
+    poses[static_cast<std::size_t>(b) * 3 + 2] =
+        pt[static_cast<std::size_t>(b)];
   }
 
-  get_scan_batch(px.data(), B, track_map, result.scans.data());
+  get_scan_batch(poses.data(), B, track_map, result.scans.data());
 
   for (int b = 0; b < B; ++b) {
     result.collisions[static_cast<std::size_t>(b)] =
         check_ttc_one(result.scans.data() + b * 1080, vl[b], track_map) ? 1 : 0;
   }
 
-  if (B >= 2) {
+  if (check_pairwise_collisions && B >= 2) {
     for (int b = 0; b < B; ++b) {
       if (result.collisions[static_cast<std::size_t>(b)])
         continue;
@@ -127,6 +135,13 @@ inline void complete_step_batch(
         coll, terminated);
     result.rewards[static_cast<std::size_t>(b)] = r;
     result.terminals[static_cast<std::size_t>(b)] = terminated ? 1 : 0;
+    if (terminated) {
+      if (coll) {
+        ++result.collision_terminations;
+      } else {
+        ++result.backward_terminations;
+      }
+    }
     if (terminated) {
       reward_fns[b].reset();
     }

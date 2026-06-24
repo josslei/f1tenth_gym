@@ -172,13 +172,9 @@ def main() -> None:
 
     env_config = dict(env_section)
     centerline_csv = env_config.pop("centerline_csv")
-    initial_pose = env_config.pop("initial_pose", None)
+    env_config.pop("initial_pose", None)
     centerline = np.loadtxt(centerline_csv, delimiter=",", skiprows=1)[:, :2]
-    reset_pose = (
-        np.asarray(initial_pose, dtype=np.float64)
-        if initial_pose is not None
-        else initial_pose_from_waypoints(centerline)
-    )
+    reset_pose = initial_pose_from_waypoints(centerline)
 
     observation_config = F1TenthObservationConfig(**observation_section)
     if observation_config.include_waypoints:
