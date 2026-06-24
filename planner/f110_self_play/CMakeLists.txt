@@ -39,6 +39,15 @@ add_subdirectory(
 find_package(Torch REQUIRED CONFIG PATHS "${F110_SELF_PLAY_THIRDPARTY_DIR}/libtorch" NO_DEFAULT_PATH)
 separate_arguments(TORCH_CXX_FLAGS_LIST NATIVE_COMMAND "${TORCH_CXX_FLAGS}")
 
+if(UNIX AND NOT APPLE)
+  find_library(
+    TORCH_PYTHON_LIBRARY
+    torch_python
+    PATHS "${F110_SELF_PLAY_THIRDPARTY_DIR}/libtorch/lib"
+    NO_DEFAULT_PATH
+  )
+endif()
+
 pybind11_add_module(
   f110_self_play_native
   MODULE
@@ -52,6 +61,9 @@ target_link_libraries(
     f110_self_play_headers
     ${TORCH_LIBRARIES}
 )
+if(TORCH_PYTHON_LIBRARY)
+  target_link_libraries(f110_self_play_native PRIVATE ${TORCH_PYTHON_LIBRARY})
+endif()
 target_include_directories(
   f110_self_play_native
   PRIVATE
