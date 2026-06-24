@@ -266,11 +266,13 @@ def main() -> None:
         dynamics_params,
         car_length,
         car_width,
-        reward_section["speed_reward_weight"],
-        reward_section["progress_weight"],
-        reward_section["steer_smoothness_weight"],
-        reward_section["collision_penalty"],
-        reward_section["spin_threshold"],
+        reward_section["q_progress"],
+        reward_section["q_alpha"],
+        reward_section["q_smooth"],
+        reward_section["terminal_penalty"],
+        reward_section["alpha_th"],
+        reward_section["slip_terminal_penalty"],
+        reward_section["q_offtrack_grad"],
     )
 
     # Seed replay before Lightning asks the module for a dataloader.

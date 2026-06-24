@@ -56,20 +56,19 @@ public:
       const std::vector<double> &waypoints_y,
       const std::vector<double> &cum_arc_lengths,
       const f110_rollout_kernel::F110Params &dynamics_params, double car_length,
-      double car_width, double speed_reward_weight, double progress_weight,
-      double steer_smoothness_weight, double collision_penalty,
-      double spin_threshold)
+      double car_width, double q_progress, double q_alpha, double q_smooth,
+      double terminal_penalty, double alpha_th, double slip_terminal_penalty,
+      double q_offtrack_grad)
       : search(std::move(search)), track_map(track_map), obs_config(obs_config),
         action_lattice(std::move(action_lattice)), discount(discount),
         sample_actions(sample_actions), print_metrics(print_metrics),
         waypoints_x(waypoints_x), waypoints_y(waypoints_y),
         cum_arc_lengths(cum_arc_lengths), dynamics_params(dynamics_params),
-        car_length(car_length), car_width(car_width),
-        speed_reward_weight(speed_reward_weight),
-        progress_weight(progress_weight),
-        steer_smoothness_weight(steer_smoothness_weight),
-        collision_penalty(collision_penalty), spin_threshold(spin_threshold),
-        rng(std::random_device{}()) {}
+        car_length(car_length), car_width(car_width), q_progress(q_progress),
+        q_alpha(q_alpha), q_smooth(q_smooth),
+        terminal_penalty(terminal_penalty), alpha_th(alpha_th),
+        slip_terminal_penalty(slip_terminal_penalty),
+        q_offtrack_grad(q_offtrack_grad), rng(std::random_device{}()) {}
 
   inline SelfPlayResult
   generate(int32_t rollout_steps, int32_t batch_size,
@@ -84,9 +83,9 @@ public:
     std::vector<f110_gym::F110ProgressReward> reward_fns;
     reward_fns.reserve(static_cast<std::size_t>(batch_size));
     for (int b = 0; b < batch_size; ++b) {
-      reward_fns.emplace_back(waypoints_x, waypoints_y, speed_reward_weight,
-                              progress_weight, steer_smoothness_weight,
-                              collision_penalty, spin_threshold);
+      reward_fns.emplace_back(track_map, waypoints_x, waypoints_y, q_progress,
+                              q_alpha, q_smooth, terminal_penalty, alpha_th,
+                              slip_terminal_penalty, q_offtrack_grad);
     }
 
     std::vector<float> prev_actions(static_cast<std::size_t>(batch_size) * 2,
@@ -198,8 +197,8 @@ private:
   std::vector<double> waypoints_x, waypoints_y, cum_arc_lengths;
   f110_rollout_kernel::F110Params dynamics_params;
   double car_length, car_width;
-  double speed_reward_weight, progress_weight, steer_smoothness_weight;
-  double collision_penalty, spin_threshold;
+  double q_progress, q_alpha, q_smooth;
+  double terminal_penalty, alpha_th, slip_terminal_penalty, q_offtrack_grad;
   std::mt19937 rng;
 
   static inline long long elapsed_us(const Clock::time_point &start,

@@ -57,6 +57,7 @@ inline void complete_step_batch(
   std::vector<double> sa(static_cast<std::size_t>(B));
   std::vector<double> yr(static_cast<std::size_t>(B));
   std::vector<double> vx(static_cast<std::size_t>(B));
+  std::vector<double> vy(static_cast<std::size_t>(B));
 
   for (int b = 0; b < B; ++b) {
     F110StepResult sr = step(states[b], actions[b], params, integrator);
@@ -69,6 +70,8 @@ inline void complete_step_batch(
     yr[static_cast<std::size_t>(b)] = sr.state.yaw_rate;
     vx[static_cast<std::size_t>(b)] =
         sr.state.velocity * std::cos(sr.state.slip_angle);
+    vy[static_cast<std::size_t>(b)] =
+        sr.state.velocity * std::sin(sr.state.slip_angle);
   }
 
   get_scan_batch(px.data(), B, track_map, result.scans.data());
@@ -108,19 +111,25 @@ inline void complete_step_batch(
 
   build_observation_batch(
       result.scans.data(), px.data(), py.data(), pt.data(), vx.data(),
-      std::vector<double>(static_cast<std::size_t>(B), 0.0).data(), yr.data(),
-      sa.data(), result.collisions.data(), prev_actions_ptr, waypoints_x,
-      waypoints_y, num_waypoints, cum_arc_lengths, B, obs_config,
-      result.observations.data());
+      vy.data(), yr.data(), sa.data(), result.collisions.data(),
+      prev_actions_ptr, waypoints_x, waypoints_y, num_waypoints,
+      cum_arc_lengths, B, obs_config, result.observations.data());
 
   for (int b = 0; b < B; ++b) {
     bool coll = result.collisions[static_cast<std::size_t>(b)] != 0;
+    bool terminated = reward_fns[b].is_terminal(
+        px[static_cast<std::size_t>(b)], py[static_cast<std::size_t>(b)],
+        pt[static_cast<std::size_t>(b)], coll);
     double r = reward_fns[b](
         px[static_cast<std::size_t>(b)], py[static_cast<std::size_t>(b)],
-        pt[static_cast<std::size_t>(b)], vl[static_cast<std::size_t>(b)], 0.0,
-        sa[static_cast<std::size_t>(b)], coll, false);
+        pt[static_cast<std::size_t>(b)], vx[static_cast<std::size_t>(b)],
+        vy[static_cast<std::size_t>(b)], actions[b].steer, actions[b].velocity,
+        coll, terminated);
     result.rewards[static_cast<std::size_t>(b)] = r;
-    result.terminals[static_cast<std::size_t>(b)] = coll ? 1 : 0;
+    result.terminals[static_cast<std::size_t>(b)] = terminated ? 1 : 0;
+    if (terminated) {
+      reward_fns[b].reset();
+    }
   }
 }
 

@@ -56,16 +56,41 @@ class F110StepResult:
     discount: float
     terminal: bool
 
+class TrackMap:
+    height: int
+    width: int
+    resolution: float
+    orig_x: float
+    orig_y: float
+    orig_c: float
+    orig_s: float
+    dt: list[float]
+    theta_dis: int
+    num_beams: int
+    fov: float
+    max_range: float
+    eps: float
+    ttc_thresh: float
+    sines: list[float]
+    cosines: list[float]
+    side_distances: list[float]
+    def __init__(self) -> None: ...
+    def compute_scan_tables(self) -> None: ...
+    def distance_at(self, x: float, y: float) -> float: ...
+
 class F110ProgressReward:
     def __init__(
         self,
+        track_map: TrackMap = ...,
         waypoints_x: list[float] | NDArray[np.float64] = ...,
         waypoints_y: list[float] | NDArray[np.float64] = ...,
-        speed_reward_weight: float = 0.1,
-        progress_weight: float = 2.0,
-        steer_smoothness_weight: float = 0.5,
-        collision_penalty: float = 50.0,
-        spin_threshold: float = 100.0,
+        q_progress: float = 1.0,
+        q_alpha: float = 1.0,
+        q_smooth: float = 0.0,
+        terminal_penalty: float = 1000.0,
+        alpha_th: float = 0.0,
+        slip_terminal_penalty: float = 0.0,
+        q_offtrack_grad: float = 0.0,
     ) -> None: ...
     def set_waypoints(
         self,
@@ -80,7 +105,8 @@ class F110ProgressReward:
         theta: float,
         vx: float,
         vy: float,
-        steer: float,
+        action_0: float,
+        action_1: float,
         collision: bool,
         terminated: bool,
     ) -> float: ...

@@ -119,11 +119,13 @@ class SelfPlayEngine:
         dynamics_params: F110Params,
         car_length: float,
         car_width: float,
-        speed_reward_weight: float,
-        progress_weight: float,
-        steer_smoothness_weight: float,
-        collision_penalty: float,
-        spin_threshold: float,
+        q_progress: float,
+        q_alpha: float,
+        q_smooth: float,
+        terminal_penalty: float,
+        alpha_th: float,
+        slip_terminal_penalty: float,
+        q_offtrack_grad: float,
     ) -> None: ...
     def generate(
         self,

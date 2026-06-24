@@ -80,17 +80,33 @@ PYBIND11_MODULE(_f110_rollout_kernel, m) {
 
   py::class_<rk::F110ProgressReward>(m, "F110ProgressReward")
       .def(py::init<>())
-      .def(py::init<const std::vector<double> &, const std::vector<double> &,
-                    double, double, double, double, double>(),
-           py::arg("waypoints_x"), py::arg("waypoints_y"),
-           py::arg("speed_reward_weight") = 0.1,
-           py::arg("progress_weight") = 2.0,
-           py::arg("steer_smoothness_weight") = 0.5,
-           py::arg("collision_penalty") = 50.0,
-           py::arg("spin_threshold") = 100.0)
-      .def("__call__", &rk::F110ProgressReward::operator(), py::arg("px"),
-           py::arg("py"), py::arg("theta"), py::arg("vx"), py::arg("vy"),
-           py::arg("steer"), py::arg("collision"), py::arg("terminated"))
+      .def(py::init([](const rk::TrackMap &track_map,
+                       const std::vector<double> &waypoints_x,
+                       const std::vector<double> &waypoints_y,
+                       double q_progress, double q_alpha, double q_smooth,
+                       double terminal_penalty, double alpha_th,
+                       double slip_terminal_penalty, double q_offtrack_grad) {
+             return f110_gym::F110ProgressReward(
+                 track_map, waypoints_x, waypoints_y, q_progress, q_alpha,
+                 q_smooth, terminal_penalty, alpha_th, slip_terminal_penalty,
+                 q_offtrack_grad);
+           }),
+           py::arg("track_map"), py::arg("waypoints_x"), py::arg("waypoints_y"),
+           py::arg("q_progress") = 1.0, py::arg("q_alpha") = 1.0,
+           py::arg("q_smooth") = 0.0, py::arg("terminal_penalty") = 1000.0,
+           py::arg("alpha_th") = 0.0, py::arg("slip_terminal_penalty") = 0.0,
+           py::arg("q_offtrack_grad") = 0.0)
+      .def(
+          "__call__",
+          [](f110_gym::F110ProgressReward &self, double px, double py,
+             double theta, double vx, double vy, double action_0,
+             double action_1, bool collision, bool terminated) {
+            return self(px, py, theta, vx, vy, action_0, action_1, collision,
+                        terminated);
+          },
+          py::arg("px"), py::arg("py"), py::arg("theta"), py::arg("vx"),
+          py::arg("vy"), py::arg("action_0"), py::arg("action_1"),
+          py::arg("collision"), py::arg("terminated"))
       .def("set_waypoints", &rk::F110ProgressReward::set_waypoints,
            py::arg("waypoints_x"), py::arg("waypoints_y"))
       .def("reset", &rk::F110ProgressReward::reset);
@@ -114,7 +130,9 @@ PYBIND11_MODULE(_f110_rollout_kernel, m) {
       .def_readwrite("sines", &rk::TrackMap::sines)
       .def_readwrite("cosines", &rk::TrackMap::cosines)
       .def_readwrite("side_distances", &rk::TrackMap::side_distances)
-      .def("compute_scan_tables", &rk::TrackMap::compute_scan_tables);
+      .def("compute_scan_tables", &rk::TrackMap::compute_scan_tables)
+      .def("distance_at", &rk::TrackMap::distance_at, py::arg("x"),
+           py::arg("y"));
 
   py::class_<rk::ObservationConfig>(m, "ObservationConfig")
       .def(py::init<>())

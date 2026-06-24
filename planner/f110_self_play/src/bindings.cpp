@@ -195,9 +195,9 @@ PYBIND11_MODULE(f110_self_play_native, m) {
                   py::array_t<double, py::array::c_style | py::array::forcecast>
                       cum_arc_lengths,
                   const rk::F110Params &dynamics_params, double car_length,
-                  double car_width, double speed_reward_weight,
-                  double progress_weight, double steer_smoothness_weight,
-                  double collision_penalty, double spin_threshold) {
+                  double car_width, double q_progress, double q_alpha,
+                  double q_smooth, double terminal_penalty, double alpha_th,
+                  double slip_terminal_penalty, double q_offtrack_grad) {
                  auto wx = waypoints_x.unchecked<1>();
                  auto wy = waypoints_y.unchecked<1>();
                  auto ca = cum_arc_lengths.unchecked<1>();
@@ -218,19 +218,18 @@ PYBIND11_MODULE(f110_self_play_native, m) {
                      std::move(action_lattice), discount, sample_actions,
                      print_metrics, std::move(wxv), std::move(wyv),
                      std::move(cav), dynamics_params, car_length, car_width,
-                     speed_reward_weight, progress_weight,
-                     steer_smoothness_weight, collision_penalty,
-                     spin_threshold);
+                     q_progress, q_alpha, q_smooth, terminal_penalty, alpha_th,
+                     slip_terminal_penalty, q_offtrack_grad);
                }),
            py::arg("search"), py::arg("track_map"), py::arg("obs_config"),
            py::arg("action_lattice"), py::arg("discount"),
            py::arg("sample_actions"), py::arg("print_metrics"),
            py::arg("waypoints_x"), py::arg("waypoints_y"),
            py::arg("cum_arc_lengths"), py::arg("dynamics_params"),
-           py::arg("car_length"), py::arg("car_width"),
-           py::arg("speed_reward_weight"), py::arg("progress_weight"),
-           py::arg("steer_smoothness_weight"), py::arg("collision_penalty"),
-           py::arg("spin_threshold"))
+           py::arg("car_length"), py::arg("car_width"), py::arg("q_progress"),
+           py::arg("q_alpha"), py::arg("q_smooth"), py::arg("terminal_penalty"),
+           py::arg("alpha_th"), py::arg("slip_terminal_penalty"),
+           py::arg("q_offtrack_grad"))
       .def(
           "generate",
           [](sp::SelfPlayEngine &self, int32_t rollout_steps,
