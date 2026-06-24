@@ -105,6 +105,7 @@ class MuZeroSearchAdapter:
         dirichlet_alpha: float = 0.3,
         dirichlet_epsilon: float = 0.25,
     ) -> None: ...
+    def search_batch(self, obs_batch: np.ndarray) -> SimpleNamespace: ...
 
 class SelfPlayEngine:
     def __init__(

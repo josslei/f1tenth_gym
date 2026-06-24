@@ -1,4 +1,4 @@
-#include <torch/script.h>
+#include <torch/extension.h>
 
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
@@ -148,8 +148,11 @@ PYBIND11_MODULE(f110_self_play_native, m) {
           },
           py::arg("action_indices"));
 
-  py::class_<sp::MuZeroSearchAdapter, std::shared_ptr<sp::MuZeroSearchAdapter>>(
-      m, "MuZeroSearchAdapter")
+  py::object simple_namespace =
+      py::module_::import("types").attr("SimpleNamespace");
+  py::class_<sp::MuZeroSearchAdapter, std::shared_ptr<sp::MuZeroSearchAdapter>>
+      search_adapter(m, "MuZeroSearchAdapter");
+  search_adapter
       .def(py::init([](const std::string &model_path, int32_t num_iters,
                        float temperature, float c_puct, float dirichlet_alpha,
                        float dirichlet_epsilon, int32_t batch_size,
@@ -183,7 +186,16 @@ PYBIND11_MODULE(f110_self_play_native, m) {
            py::arg("dirichlet_epsilon") = 0.25f, py::arg("batch_size"),
            py::arg("action_count"), py::arg("hidden_size"),
            py::arg("max_nodes") = 0, py::arg("device") = "",
-           py::arg("print_metrics") = false);
+           py::arg("print_metrics") = false)
+      .def(
+          "search_batch",
+          [simple_namespace](sp::MuZeroSearchAdapter &self,
+                             const torch::Tensor &obs_batch) {
+            auto result = self.search_batch(obs_batch);
+            return simple_namespace("action_probs"_a = result.action_probs,
+                                    "metrics"_a = result.metrics);
+          },
+          py::arg("obs_batch"));
 
   py::class_<sp::SelfPlayEngine>(m, "SelfPlayEngine")
       .def(py::init(

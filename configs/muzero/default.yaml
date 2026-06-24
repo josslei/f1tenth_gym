@@ -47,6 +47,7 @@ search:
 self_play:
   rollout_steps: 2048
   discount: 0.997
+  initial_velocity: 8.0
   print_metrics: true
 
 replay:

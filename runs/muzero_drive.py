@@ -144,9 +144,7 @@ def main() -> None:
         callbacks=callbacks,
     )
 
-    initial_pose = env_section.get("initial_pose") or initial_pose_from_waypoints(
-        centerline
-    )
+    initial_pose = initial_pose_from_waypoints(centerline)
     obs, _info = env.reset(options={"poses": initial_pose})
     obs = add_control_state(obs, env)
     prev_action = np.zeros(2, dtype=np.float64)
