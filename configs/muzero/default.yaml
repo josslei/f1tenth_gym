@@ -22,7 +22,7 @@ observation:
 
 action:
   steering_bins: [-0.4189, 0.0, 0.4189]
-  velocity_bins: [0.0, 2.0, 4.0, 6.0, 8.0]
+  velocity_bins: [1.0, 2.0, 4.0, 6.0, 8.0]
 
 reward:
   q_s_progress: 1.0
@@ -34,18 +34,18 @@ reward:
   q_offtrack_grad: 1000000.0
 
 model:
-  hidden_size: 256
+  hidden_size: 128
   trunk_size: 256
 
 search:
-  num_iters: 2000
+  num_iters: 1000
   c_puct: 1.5
   temperature: 1.0
-  batch_size: 32
+  batch_size: 4
   print_metrics: false
 
 self_play:
-  rollout_steps: 2048
+  rollout_steps: 1024
   discount: 0.997
   initial_velocity: 8.0
   print_metrics: true
