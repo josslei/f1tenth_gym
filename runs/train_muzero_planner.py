@@ -118,6 +118,33 @@ def initial_states_from_pose(reset_pose: np.ndarray, batch_size: int) -> np.ndar
     return states
 
 
+def action_bins_from_config(
+    action_section: dict, env_config: dict
+) -> tuple[np.ndarray, np.ndarray]:
+    params = dict(DEFAULT_PARAMS)
+    params.update(env_config.get("params", {}))
+    steering_config = action_section["steering_bins"]
+    velocity_config = action_section["velocity_bins"]
+    steering_bins = (
+        np.linspace(
+            params["s_min"], params["s_max"], int(steering_config), dtype=np.float32
+        )
+        if np.isscalar(steering_config)
+        else np.asarray(steering_config, dtype=np.float32)
+    )
+    velocity_bins = (
+        np.linspace(
+            float(action_section["velocity_min"]),
+            float(action_section["velocity_max"]),
+            int(velocity_config),
+            dtype=np.float32,
+        )
+        if np.isscalar(velocity_config)
+        else np.asarray(velocity_config, dtype=np.float32)
+    )
+    return steering_bins, velocity_bins
+
+
 def main() -> None:
     faulthandler.enable(all_threads=True)
 
@@ -158,18 +185,15 @@ def main() -> None:
         observation_config = with_resampled_waypoints(observation_config, centerline)
     obs_dim = observation_dim(observation_config)
 
+    steering_bins, velocity_bins = action_bins_from_config(action_section, env_config)
     discrete_action_config = DiscreteActionConfig(
-        steering_bins=action_section["steering_bins"],
-        velocity_bins=action_section["velocity_bins"],
-        velocity_min=action_section["velocity_min"],
-        velocity_max=action_section["velocity_max"],
+        steering_bins=steering_bins,
+        velocity_bins=velocity_bins,
     )
     action_space = DiscreteActionSpace(discrete_action_config)
     action_lattice = ActionLattice(
         discrete_action_config.steering_bins,
         discrete_action_config.velocity_bins,
-        discrete_action_config.velocity_min,
-        discrete_action_config.velocity_max,
     )
 
     model = F110MuZeroNet(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 from types import SimpleNamespace
+from typing import overload
 
 from numpy.typing import NDArray
 
@@ -66,12 +67,19 @@ class ObservationConfig:
     waypoint_resample_spacing: float
 
 class ActionLattice:
+    @overload
     def __init__(
         self,
         steering_bins: int,
         velocity_bins: int,
         velocity_min: float = 1.0,
         velocity_max: float = 8.0,
+    ) -> None: ...
+    @overload
+    def __init__(
+        self,
+        steering_bins: np.ndarray | list[float],
+        velocity_bins: np.ndarray | list[float],
     ) -> None: ...
     @property
     def action_count(self) -> int: ...

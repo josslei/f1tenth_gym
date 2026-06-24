@@ -21,6 +21,16 @@ namespace rk = f110_rollout_kernel;
 
 namespace {
 
+std::vector<float> array_to_vector(
+    py::array_t<float, py::array::c_style | py::array::forcecast> array) {
+  auto arr = array.unchecked<1>();
+  std::vector<float> out(static_cast<std::size_t>(arr.shape(0)));
+  for (py::ssize_t i = 0; i < arr.shape(0); ++i) {
+    out[static_cast<std::size_t>(i)] = arr(i);
+  }
+  return out;
+}
+
 py::array_t<float> tensor_row_to_array(const torch::Tensor &tensor) {
   auto cpu = tensor.detach().to(torch::kCPU).contiguous();
   py::array_t<float> out(static_cast<py::ssize_t>(cpu.numel()));
@@ -103,6 +113,15 @@ PYBIND11_MODULE(f110_self_play_native, m) {
       .def(py::init<int32_t, int32_t, float, float>(), py::arg("steering_bins"),
            py::arg("velocity_bins"), py::arg("velocity_min") = 1.0f,
            py::arg("velocity_max") = 8.0f)
+      .def(py::init(
+               [](py::array_t<float, py::array::c_style | py::array::forcecast>
+                      steering_bins,
+                  py::array_t<float, py::array::c_style | py::array::forcecast>
+                      velocity_bins) {
+                 return sp::ActionLattice(array_to_vector(steering_bins),
+                                          array_to_vector(velocity_bins));
+               }),
+           py::arg("steering_bins"), py::arg("velocity_bins"))
       .def_property_readonly("action_count", &sp::ActionLattice::action_count)
       .def(
           "normalized_action",

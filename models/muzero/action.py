@@ -3,23 +3,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+from numpy.typing import NDArray
 
 
 @dataclass(frozen=True)
 class DiscreteActionConfig:
-    steering_bins: int
-    velocity_bins: int
-    velocity_min: float = 1.0
-    velocity_max: float = 8.0
+    steering_bins: NDArray[np.float32]
+    velocity_bins: NDArray[np.float32]
 
 
 class DiscreteActionSpace:
     def __init__(self, config: DiscreteActionConfig) -> None:
         self.config = config
-        steering = np.linspace(-1.0, 1.0, config.steering_bins, dtype=np.float32)
-        velocity = np.linspace(-1.0, 1.0, config.velocity_bins, dtype=np.float32)
         self.normalized_actions = np.array(
-            [[s, v] for s in steering for v in velocity], dtype=np.float32
+            [[s, v] for s in config.steering_bins for v in config.velocity_bins],
+            dtype=np.float32,
         )
 
     @property
