@@ -247,8 +247,12 @@ def native_obs_dict(
         "poses_x": np.array([state.x], dtype=np.float64),
         "poses_y": np.array([state.y], dtype=np.float64),
         "poses_theta": np.array([state.yaw_angle], dtype=np.float64),
-        "linear_vels_x": np.array([state.velocity], dtype=np.float64),
-        "linear_vels_y": np.array([0.0], dtype=np.float64),
+        "linear_vels_x": np.array(
+            [state.velocity * math.cos(state.slip_angle)], dtype=np.float64
+        ),
+        "linear_vels_y": np.array(
+            [state.velocity * math.sin(state.slip_angle)], dtype=np.float64
+        ),
         "ang_vels_z": np.array([state.yaw_rate], dtype=np.float64),
         "collisions": np.array([float(collision)], dtype=np.float64),
         "lap_times": np.array([lap_time], dtype=np.float64),
@@ -397,7 +401,10 @@ def main() -> None:
     while True:
         scan = rk.get_scan(state.x, state.y, state.yaw_angle, track_map)
         collision = (
-            bool(rk.check_ttc(scan, state.velocity, track_map)) or state.in_collision
+            bool(rk.check_ttc(scan, state.velocity, track_map))
+            or track_map.distance_at(state.x, state.y)
+            <= 0.5 * math.hypot(car_length, car_width)
+            or state.in_collision
         )
         obs_dict = native_obs_dict(
             state, prev_action, collision, step_idx, dynamics_params.timestep
@@ -425,7 +432,10 @@ def main() -> None:
         state = step_result.state
 
         scan = rk.get_scan(state.x, state.y, state.yaw_angle, track_map)
-        collision = bool(rk.check_ttc(scan, state.velocity, track_map))
+        collision = bool(rk.check_ttc(scan, state.velocity, track_map)) or (
+            track_map.distance_at(state.x, state.y)
+            <= 0.5 * math.hypot(car_length, car_width)
+        )
         state.in_collision = collision
         if collision:
             state.velocity = 0.0

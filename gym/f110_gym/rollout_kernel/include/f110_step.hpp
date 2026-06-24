@@ -85,8 +85,14 @@ inline void complete_step_batch(
   get_scan_batch(poses.data(), B, track_map, result.scans.data());
 
   for (int b = 0; b < B; ++b) {
+    const bool ttc_collision =
+        check_ttc_one(result.scans.data() + b * 1080, vl[b], track_map);
+    const double footprint_radius = 0.5 * std::hypot(car_length, car_width);
+    const bool footprint_collision =
+        track_map.distance_at(static_cast<float>(px[b]),
+                              static_cast<float>(py[b])) <= footprint_radius;
     result.collisions[static_cast<std::size_t>(b)] =
-        check_ttc_one(result.scans.data() + b * 1080, vl[b], track_map) ? 1 : 0;
+        (ttc_collision || footprint_collision) ? 1 : 0;
   }
 
   if (check_pairwise_collisions && B >= 2) {

@@ -75,6 +75,7 @@ public:
            const std::vector<f110_rollout_kernel::F110State> &initial_states) {
     const auto generate_start = Clock::now();
     std::map<std::string, double> metrics;
+    metrics["self_play/batch_size"] = static_cast<double>(batch_size);
     std::vector<f110_rollout_kernel::F110State> states = initial_states;
     int obs_dim = f110_rollout_kernel::observation_dim(obs_config);
     std::cout << "Self-play engine started: batch_size=" << batch_size
@@ -135,6 +136,8 @@ public:
                        .clone();
 
       for (int b = 0; b < batch_size; ++b) {
+        states[static_cast<std::size_t>(b)] =
+            step_result.states[static_cast<std::size_t>(b)];
         auto obs_row = prev_obs.select(0, b).clone();
         auto policy_row = action_probs.select(0, b).clone();
         int32_t action =
@@ -154,6 +157,12 @@ public:
           reward_fns[static_cast<std::size_t>(b)].reset();
           prev_actions[static_cast<std::size_t>(b) * 2] = 0.0f;
           prev_actions[static_cast<std::size_t>(b) * 2 + 1] = 0.0f;
+
+          std::vector<f110_rollout_kernel::F110State> reset_state{
+              states[static_cast<std::size_t>(b)]};
+          auto reset_obs =
+              compute_initial_observations(reset_state, 1, obs_dim);
+          obs_tensor.select(0, b).copy_(reset_obs.select(0, 0));
         } else {
           prev_actions[static_cast<std::size_t>(b) * 2] =
               static_cast<float>(norm_np[b][0].item<float>());
@@ -186,6 +195,20 @@ public:
         static_cast<double>(trajectory_step_count(result.trajectories));
     result.metrics["self_play/total_time_us"] =
         static_cast<double>(elapsed_us(generate_start, Clock::now()));
+    const double search_steps = result.metrics["self_play/search_steps"];
+    if (search_steps > 0.0) {
+      result.metrics["search/iterations"] /= search_steps;
+      result.metrics["search/simulations_per_lane"] /= search_steps;
+      result.metrics["tree/nodes_allocated_avg"] /= search_steps;
+      result.metrics["tree/search_depth_avg"] /= search_steps;
+      result.metrics["tree/root_visit_count_avg"] /= search_steps;
+    }
+    result.metrics["search/iterations_per_search_call"] =
+        result.metrics["search/iterations"];
+    result.metrics["search/simulations_per_search_call"] =
+        search_steps > 0.0
+            ? result.metrics["search/simulations_total"] / search_steps
+            : 0.0;
     finalize_throughput_metrics(result.metrics);
 
     if (print_metrics) {
@@ -335,6 +358,24 @@ private:
       if (kv.first == "throughput/simulations_per_second") {
         continue;
       }
+      if (kv.first == "tree/nodes_allocated_min" ||
+          kv.first == "tree/search_depth_min" ||
+          kv.first == "tree/root_visit_count_min") {
+        auto it = acc.find(kv.first);
+        if (it == acc.end() || kv.second < it->second) {
+          acc[kv.first] = kv.second;
+        }
+        continue;
+      }
+      if (kv.first == "tree/nodes_allocated_max" ||
+          kv.first == "tree/search_depth_max" ||
+          kv.first == "tree/root_visit_count_max") {
+        auto it = acc.find(kv.first);
+        if (it == acc.end() || kv.second > it->second) {
+          acc[kv.first] = kv.second;
+        }
+        continue;
+      }
       acc[kv.first] += kv.second;
     }
     acc["self_play/search_steps"] += 1.0;
@@ -454,11 +495,12 @@ private:
               << v("search/avg_recurrent_time_us") / 1000.0 << " ms"
               << std::endl;
     std::cout << "  copy: " << v("search/avg_payload_copy_time_us") / 1000.0
-              << " ms | simulations/search: "
-              << (v("self_play/search_steps") > 0.0
-                      ? v("search/simulations") / v("self_play/search_steps")
-                      : 0.0)
-              << std::endl;
+              << " ms | iterations/search: "
+              << v("search/iterations_per_search_call")
+              << " | simulations/lane/search: "
+              << v("search/simulations_per_lane")
+              << " | simulations/search_call: "
+              << v("search/simulations_per_search_call") << std::endl;
   }
 };
 

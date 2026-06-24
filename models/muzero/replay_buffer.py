@@ -76,15 +76,26 @@ class MuZeroReplayBuffer(
         target_policies: list[np.ndarray] = []
 
         for offset in range(self.unroll_steps + 1):
-            idx = min(start + offset, len(trajectory) - 1)
-            transition = trajectory[idx]
-            target_policies.append(transition.root_policy.astype(np.float32))
-            target_values.append(self._n_step_return(trajectory, idx))
-            target_discounts.append(0.0 if transition.done else self.discount)
+            idx = start + offset
+            if idx < len(trajectory):
+                transition = trajectory[idx]
+                target_policies.append(transition.root_policy.astype(np.float32))
+                target_values.append(self._n_step_return(trajectory, idx))
+                target_discounts.append(0.0 if transition.done else self.discount)
 
-            if offset < self.unroll_steps:
-                actions.append(transition.action)
-                target_rewards.append(transition.reward)
+                if offset < self.unroll_steps:
+                    actions.append(transition.action)
+                    target_rewards.append(transition.reward)
+            else:
+                target_policies.append(
+                    np.zeros_like(trajectory[0].root_policy, dtype=np.float32)
+                )
+                target_values.append(0.0)
+                target_discounts.append(0.0)
+
+                if offset < self.unroll_steps:
+                    actions.append(0)
+                    target_rewards.append(0.0)
 
         return (
             obs,

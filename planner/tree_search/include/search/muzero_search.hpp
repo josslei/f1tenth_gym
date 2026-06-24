@@ -148,6 +148,8 @@ private:
     long long backup_time_us = 0;
     long long root_policy_time_us = 0;
     long long simulations = 0;
+    long long iterations = 0;
+    double simulations_per_lane = 0.0;
 
     long long nodes_allocated_sum = 0;
     long long nodes_allocated_count = 0;
@@ -174,6 +176,8 @@ private:
       backup_time_us = 0;
       root_policy_time_us = 0;
       simulations = 0;
+      iterations = 0;
+      simulations_per_lane = 0.0;
 
       nodes_allocated_sum = 0;
       nodes_allocated_count = 0;
@@ -221,6 +225,9 @@ private:
           {"search/backup_time_us", static_cast<double>(backup_time_us)},
           {"search/root_policy_time_us",
            static_cast<double>(root_policy_time_us)},
+          {"search/iterations", static_cast<double>(iterations)},
+          {"search/simulations_total", static_cast<double>(simulations)},
+          {"search/simulations_per_lane", simulations_per_lane},
           {"inference/initial_time_us",
            static_cast<double>(initial_inference_time_us)},
           {"inference/recurrent_time_us",
@@ -448,6 +455,7 @@ private:
   inline void select_leaves() {
     // Selection is intentionally kept as a separate phase.
     // The final implementation can use Highway across batch lanes.
+    std::fill(selected_action.begin(), selected_action.end(), 0);
     for (int32_t b = 0; b < shape.B; ++b) {
       int32_t node = 0;
       int32_t depth = 0;
@@ -475,7 +483,6 @@ private:
 
       if (!found_leaf) {
         selected_parent[index.batch(b)] = node;
-        selected_action[index.batch(b)] = BatchedTreeTopology::kInvalidAction;
         path_length[index.batch(b)] = depth;
       }
     }
@@ -530,6 +537,9 @@ private:
       const int32_t child = tree.allocate_child(
           b, parent, action, /*next_player=*/0, reward, discount);
       selected_child[index.batch(b)] = child;
+      if (child != BatchedTreeTopology::kInvalidNode && discount < 0.5f) {
+        tree.topology.set_terminal(b, child, true);
+      }
     }
 
     tree.set_hidden_batch(selected_child, recurrent.hidden);
@@ -576,7 +586,12 @@ private:
   }
 
   inline void finalize_metrics() {
+    metrics.iterations = num_iters;
     metrics.simulations = static_cast<long long>(num_iters) * shape.B;
+    metrics.simulations_per_lane =
+        shape.B > 0 ? static_cast<double>(metrics.simulations) /
+                          static_cast<double>(shape.B)
+                    : 0.0;
 
     int32_t depth_min = std::numeric_limits<int32_t>::max();
     int32_t depth_max = 0;
@@ -649,6 +664,11 @@ private:
     std::cout << "  policy:  "
               << metrics_map.at("search/root_policy_time_us") / 1000.0 << " ms"
               << std::endl;
+    std::cout << "  iterations: " << metrics_map.at("search/iterations")
+              << " | simulations/lane: "
+              << metrics_map.at("search/simulations_per_lane")
+              << " | simulations/batch: "
+              << metrics_map.at("search/simulations_total") << std::endl;
 
     std::cout << "[Inference]" << std::endl;
     std::cout << "  initial:  "

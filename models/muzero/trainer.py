@@ -52,8 +52,10 @@ class LightningMuZero(pl.LightningModule):
         ) = batch
         hidden, policy_logits, value = self.model.initial_training(obs)
 
-        policy_loss = self._policy_loss(policy_logits, target_policies[:, 0])
-        value_loss = F.mse_loss(value, target_values[:, 0])
+        root_policy_loss = self._policy_loss(policy_logits, target_policies[:, 0])
+        root_value_loss = F.mse_loss(value, target_values[:, 0])
+        recurrent_policy_loss = torch.zeros((), device=obs.device)  # type: ignore[attr-defined]
+        recurrent_value_loss = torch.zeros((), device=obs.device)  # type: ignore[attr-defined]
         reward_loss = torch.zeros((), device=obs.device)  # type: ignore[attr-defined]
         discount_loss = torch.zeros((), device=obs.device)  # type: ignore[attr-defined]
 
@@ -61,20 +63,30 @@ class LightningMuZero(pl.LightningModule):
             hidden, reward, value, discount, policy_logits = (
                 self.model.recurrent_training(hidden, actions[:, step])
             )
-            policy_loss = policy_loss + self._policy_loss(
+            recurrent_policy_loss = recurrent_policy_loss + self._policy_loss(
                 policy_logits, target_policies[:, step + 1]
             )
-            value_loss = value_loss + F.mse_loss(value, target_values[:, step + 1])
+            recurrent_value_loss = recurrent_value_loss + F.mse_loss(
+                value, target_values[:, step + 1]
+            )
             reward_loss = reward_loss + F.mse_loss(reward, target_rewards[:, step])
             discount_loss = discount_loss + F.mse_loss(
                 discount, target_discounts[:, step + 1]
             )
 
         normalizer = float(self.replay_config["unroll_steps"] + 1)
-        policy_loss = policy_loss / normalizer
-        value_loss = value_loss / normalizer
+        root_policy_loss = root_policy_loss / normalizer
+        root_value_loss = root_value_loss / normalizer
+        recurrent_policy_loss = recurrent_policy_loss / normalizer
+        recurrent_value_loss = recurrent_value_loss / normalizer
         reward_loss = reward_loss / max(1.0, float(self.replay_config["unroll_steps"]))
         discount_loss = discount_loss / normalizer
+
+        policy_loss = root_policy_loss + recurrent_policy_loss
+        value_loss = root_value_loss + recurrent_value_loss
+        representation_loss = root_policy_loss + root_value_loss
+        prediction_loss = recurrent_policy_loss + recurrent_value_loss
+        dynamics_loss = reward_loss + discount_loss
 
         loss = (
             self.training_config.get("policy_loss_weight", 1.0) * policy_loss
@@ -84,6 +96,30 @@ class LightningMuZero(pl.LightningModule):
         )
 
         self.log("train/loss", loss, on_step=False, on_epoch=True, prog_bar=True)
+        self.log(
+            "train/representation_loss",
+            representation_loss,
+            on_step=False,
+            on_epoch=True,
+        )
+        self.log("train/prediction_loss", prediction_loss, on_step=False, on_epoch=True)
+        self.log("train/dynamics_loss", dynamics_loss, on_step=False, on_epoch=True)
+        self.log(
+            "train/root_policy_loss", root_policy_loss, on_step=False, on_epoch=True
+        )
+        self.log("train/root_value_loss", root_value_loss, on_step=False, on_epoch=True)
+        self.log(
+            "train/recurrent_policy_loss",
+            recurrent_policy_loss,
+            on_step=False,
+            on_epoch=True,
+        )
+        self.log(
+            "train/recurrent_value_loss",
+            recurrent_value_loss,
+            on_step=False,
+            on_epoch=True,
+        )
         self.log("train/policy_loss", policy_loss, on_step=False, on_epoch=True)
         self.log("train/value_loss", value_loss, on_step=False, on_epoch=True)
         self.log("train/reward_loss", reward_loss, on_step=False, on_epoch=True)
