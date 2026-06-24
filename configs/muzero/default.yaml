@@ -34,7 +34,7 @@ reward:
   spin_threshold: 100.0
 
 model:
-  hidden_size: 128
+  hidden_size: 256
   trunk_size: 256
 
 search:

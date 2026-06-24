@@ -44,6 +44,8 @@ struct SelfPlayResult {
 };
 
 class SelfPlayEngine {
+  using Clock = std::chrono::steady_clock;
+
 public:
   inline SelfPlayEngine(
       std::shared_ptr<MuZeroSearchAdapter> search,
@@ -72,6 +74,7 @@ public:
   inline SelfPlayResult
   generate(int32_t rollout_steps, int32_t batch_size,
            const std::vector<f110_rollout_kernel::F110State> &initial_states) {
+    const auto generate_start = Clock::now();
     std::map<std::string, double> metrics;
     std::vector<f110_rollout_kernel::F110State> states = initial_states;
     int obs_dim = f110_rollout_kernel::observation_dim(obs_config);
@@ -168,9 +171,14 @@ public:
     result.metrics["self_play/trajectories"] =
         static_cast<double>(result.trajectories.size());
     result.metrics["self_play/search_steps"] =
-        metrics.count("self_play/search_steps")
-            ? metrics.at("self_play/search_steps")
+        result.metrics.count("self_play/search_steps")
+            ? result.metrics.at("self_play/search_steps")
             : static_cast<double>(rollout_steps);
+    result.metrics["self_play/samples"] =
+        static_cast<double>(trajectory_step_count(result.trajectories));
+    result.metrics["self_play/total_time_us"] =
+        static_cast<double>(elapsed_us(generate_start, Clock::now()));
+    finalize_throughput_metrics(result.metrics);
 
     if (print_metrics) {
       print_metrics_summary(result.metrics);
@@ -193,6 +201,25 @@ private:
   double speed_reward_weight, progress_weight, steer_smoothness_weight;
   double collision_penalty, spin_threshold;
   std::mt19937 rng;
+
+  static inline long long elapsed_us(const Clock::time_point &start,
+                                     const Clock::time_point &end) {
+    return std::chrono::duration_cast<std::chrono::microseconds>(end - start)
+        .count();
+  }
+
+  static inline double per_second(double count, double time_us) {
+    return time_us > 0.0 ? count / (time_us / 1.0e6) : 0.0;
+  }
+
+  static inline std::size_t
+  trajectory_step_count(const std::vector<Trajectory> &trajectories) {
+    std::size_t steps = 0;
+    for (const auto &trajectory : trajectories) {
+      steps += trajectory.steps.size();
+    }
+    return steps;
+  }
 
   inline torch::Tensor compute_initial_observations(
       const std::vector<f110_rollout_kernel::F110State> &states, int batch_size,
@@ -246,9 +273,45 @@ private:
   inline void accumulate_metrics(std::map<std::string, double> &acc,
                                  const std::map<std::string, double> &step) {
     for (const auto &kv : step) {
+      if (kv.first == "throughput/simulations_per_second") {
+        continue;
+      }
       acc[kv.first] += kv.second;
     }
     acc["self_play/search_steps"] += 1.0;
+  }
+
+  static inline void
+  finalize_throughput_metrics(std::map<std::string, double> &metrics) {
+    const double total_time_us = metrics["self_play/total_time_us"];
+    const double search_steps = metrics["self_play/search_steps"];
+    const double search_time_us = metrics["search/total_time_us"];
+
+    metrics["self_play/transitions_per_second"] =
+        per_second(metrics["self_play/transitions"], total_time_us);
+    metrics["self_play/samples_per_second"] =
+        per_second(metrics["self_play/samples"], total_time_us);
+    metrics["self_play/searches_per_second"] =
+        per_second(search_steps, total_time_us);
+    metrics["self_play/trajectories_per_second"] =
+        per_second(metrics["self_play/trajectories"], total_time_us);
+    metrics["search/simulations_per_second"] =
+        per_second(metrics["search/simulations"], search_time_us);
+    metrics["throughput/simulations_per_second"] =
+        metrics["search/simulations_per_second"];
+    metrics["search/avg_total_time_us"] =
+        search_steps > 0.0 ? search_time_us / search_steps : 0.0;
+    metrics["search/avg_initial_time_us"] =
+        search_steps > 0.0 ? metrics["inference/initial_time_us"] / search_steps
+                           : 0.0;
+    metrics["search/avg_recurrent_time_us"] =
+        search_steps > 0.0
+            ? metrics["inference/recurrent_time_us"] / search_steps
+            : 0.0;
+    metrics["search/avg_payload_copy_time_us"] =
+        search_steps > 0.0
+            ? metrics["inference/payload_copy_time_us"] / search_steps
+            : 0.0;
   }
 
   inline torch::Tensor sample_action_batch(const torch::Tensor &action_probs) {
@@ -303,12 +366,28 @@ private:
     std::cout << "  search steps: " << v("self_play/search_steps")
               << " | transitions: " << v("self_play/transitions")
               << " | samples: " << v("self_play/samples") << std::endl;
-    std::cout << "  trajectories: " << v("self_play/trajectories") << std::endl;
+    std::cout << "  trajectories: " << v("self_play/trajectories")
+              << " | total: " << v("self_play/total_time_us") / 1000.0 << " ms"
+              << std::endl;
+    std::cout << "[Throughput]" << std::endl;
+    std::cout << "  transitions/sec: " << v("self_play/transitions_per_second")
+              << " | samples/sec: " << v("self_play/samples_per_second")
+              << std::endl;
+    std::cout << "  searches/sec: " << v("self_play/searches_per_second")
+              << " | trajectories/sec: "
+              << v("self_play/trajectories_per_second") << std::endl;
+    std::cout << "  simulations/sec: " << v("throughput/simulations_per_second")
+              << std::endl;
     std::cout << "[Search Average]" << std::endl;
-    std::cout << "  total: " << v("search/total_time_us") / 1000.0
-              << " ms | simulations/sec: "
-              << (m.find("throughput/simulations_per_second") != m.end()
-                      ? v("throughput/simulations_per_second")
+    std::cout << "  total: " << v("search/avg_total_time_us") / 1000.0
+              << " ms | initial: " << v("search/avg_initial_time_us") / 1000.0
+              << " ms | recurrent: "
+              << v("search/avg_recurrent_time_us") / 1000.0 << " ms"
+              << std::endl;
+    std::cout << "  copy: " << v("search/avg_payload_copy_time_us") / 1000.0
+              << " ms | simulations/search: "
+              << (v("self_play/search_steps") > 0.0
+                      ? v("search/simulations") / v("self_play/search_steps")
                       : 0.0)
               << std::endl;
   }

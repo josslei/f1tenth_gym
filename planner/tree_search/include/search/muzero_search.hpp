@@ -11,6 +11,7 @@
 #include <utility>
 #include <vector>
 
+#include <c10/core/InferenceMode.h>
 #include <torch/script.h>
 
 #include "tree/batched_muzero_tree.hpp"
@@ -66,6 +67,7 @@ public:
   }
 
   inline torch::Tensor search_batch(const torch::Tensor &obs_batch) {
+    c10::InferenceMode inference_guard;
     metrics.reset();
     const auto total_start = Clock::now();
 
@@ -222,6 +224,7 @@ private:
            static_cast<double>(recurrent_inference_time_us)},
           {"inference/payload_copy_time_us",
            static_cast<double>(payload_copy_time_us)},
+          {"search/simulations", static_cast<double>(simulations)},
           {"throughput/simulations_per_second", simulations_per_second()},
           {"tree/nodes_allocated_avg",
            mean(nodes_allocated_sum, nodes_allocated_count)},
