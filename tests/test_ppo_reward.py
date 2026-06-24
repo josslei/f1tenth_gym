@@ -11,7 +11,8 @@ def _obs(
     vx: float = 0.0,
     collision: bool = False,
     theta: float = 0.0,
-    steer: float = 0.0,
+    action_0: float = 0.0,
+    action_1: float = 0.0,
     px: float = 0.0,
     py: float = 0.0,
 ):
@@ -23,7 +24,7 @@ def _obs(
         "poses_theta": np.array([theta], dtype=np.float64),
         "poses_x": np.array([px], dtype=np.float64),
         "poses_y": np.array([py], dtype=np.float64),
-        "steer_angle": np.array([steer], dtype=np.float64),
+        "prev_action": np.array([action_0, action_1], dtype=np.float64),
     }
 
 
@@ -42,64 +43,67 @@ def _reward(tmp_path: Path, **kwargs) -> F1TenthPPOReward:
     )
 
 
-def test_reward_uses_scaled_speed_component(tmp_path: Path):
+def test_zero_progress_reward_is_zero(tmp_path: Path):
     reward = _reward(
         tmp_path,
-        speed_reward_weight=0.1,
-        progress_weight=0.0,
-        steer_smoothness_weight=0.0,
+        q_s_progress=0.0,
+        q_s_alpha=0.0,
+        q_s_smooth=0.0,
     )
 
-    assert np.isclose(reward(_obs(vx=8.0), terminated=False), 0.8)
+    assert np.isclose(reward(_obs(vx=8.0, px=5.0), terminated=False), 0.0)
 
 
 def test_forward_progress_rewarded(tmp_path: Path):
     reward = _reward(
         tmp_path,
-        speed_reward_weight=0.0,
-        progress_weight=2.0,
-        steer_smoothness_weight=0.0,
+        q_s_progress=2.0,
+        q_s_alpha=0.0,
+        q_s_smooth=0.0,
     )
 
     reward.prev_arc_length = 0.0
-    reward.prev_steer = 0.0
-    # Car at (0.6, 0).  Nearest waypoint is (1, 0) → arc ≈ 1.0.
-    # Progress = 1.0 − 0.0 = 1.0, reward = 2.0 × 1.0 = 2.0.
-    r = reward(_obs(px=0.6, py=0.0, steer=0.0), terminated=False)
-    assert np.isclose(r, 2.0, atol=0.1)
+    reward.last_action_0 = 0.0
+    reward.last_action_1 = 0.0
+    reward.has_last_action = False
+    # Car at (0.6, 0).  Projection onto the line gives s ≈ 0.6.
+    # Reward = 2.0 × 0.6 = 1.2.
+    r = reward(_obs(px=0.6, py=0.0), terminated=False)
+    assert np.isclose(r, 1.2, atol=0.1)
 
 
-def test_collision_returns_fixed_penalty(tmp_path: Path):
+def test_backward_terminal_penalty(tmp_path: Path):
     reward = _reward(
         tmp_path,
-        speed_reward_weight=0.0,
-        progress_weight=0.0,
-        steer_smoothness_weight=0.0,
-        collision_penalty=2.0,
+        q_s_progress=0.0,
+        q_s_alpha=0.0,
+        q_s_smooth=0.0,
+        terminal_penalty=2.0,
     )
 
-    assert reward(_obs(vx=8.0, collision=True), terminated=True) == -2.0
+    assert reward(_obs(vx=8.0, theta=3.2, px=5.0), terminated=True) == -2.0
 
 
 def test_steer_smoothness_penalty(tmp_path: Path):
     reward = _reward(
         tmp_path,
-        speed_reward_weight=0.0,
-        progress_weight=0.0,
-        steer_smoothness_weight=1.0,
+        q_s_progress=0.0,
+        q_s_alpha=0.0,
+        q_s_smooth=1.0,
     )
 
-    # steer=0.5, prev_steer=0.0 (initial) → delta=0.5 → penalty=0.5
-    r = reward(_obs(vx=0.0, steer=0.5), terminated=False)
-    assert np.isclose(r, -0.5)
+    reward(_obs(vx=0.0, px=5.0, action_0=0.0, action_1=0.0), terminated=False)
+    # action_0=0.5, prev_action=(0.0, 0.0) → delta^2 = 0.25
+    r = reward(_obs(vx=0.0, px=5.0, action_0=0.5, action_1=0.0), terminated=False)
+    assert np.isclose(r, -0.25)
 
 
 def test_default_ppo_config_uses_progress_reward(tmp_path: Path):
     config = PPOConfig.from_yaml(Path("configs/ppo/default.yaml"))
 
     assert config.action["velocity_min"] > 0.0
-    assert config.reward["speed_reward_weight"] == 0.1
-    assert config.reward["progress_weight"] == 2.0
-    assert config.reward["steer_smoothness_weight"] == 0.5
-    assert config.reward["collision_penalty"] == 50
+    assert config.reward["q_s_progress"] == 1.0
+    assert config.reward["q_s_alpha"] == 1.0
+    assert config.reward["q_s_smooth"] == 0.0
+    assert config.reward["terminal_penalty"] == 1000000.0
     assert config.training.c2 == 0.01

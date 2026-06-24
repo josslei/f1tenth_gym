@@ -19,16 +19,30 @@ public:
   F110ProgressReward(const f110_rollout_kernel::TrackMap &track_map,
                      const std::vector<double> &waypoints_x,
                      const std::vector<double> &waypoints_y,
-                     double q_progress = 1.0, double q_alpha = 1.0,
-                     double q_smooth = 0.0, double terminal_penalty = 1000.0,
+                     double q_s_progress = 1.0, double q_s_alpha = 1.0,
+                     double q_s_smooth = 0.0, double terminal_penalty = 1000.0,
                      double alpha_th = 0.0, double slip_terminal_penalty = 0.0,
                      double q_offtrack_grad = 0.0)
       : track_map_(&track_map), waypoints_x_(waypoints_x),
-        waypoints_y_(waypoints_y), q_progress_(q_progress), q_alpha_(q_alpha),
-        q_smooth_(q_smooth), terminal_penalty_(terminal_penalty),
+        waypoints_y_(waypoints_y), q_s_progress_(q_s_progress),
+        q_s_alpha_(q_s_alpha), q_s_smooth_(q_s_smooth),
+        terminal_penalty_(terminal_penalty), alpha_th_(alpha_th),
+        slip_terminal_penalty_(slip_terminal_penalty),
+        q_offtrack_grad_(q_offtrack_grad) {
+    build_arc();
+  }
+
+  F110ProgressReward(const std::vector<double> &waypoints_x,
+                     const std::vector<double> &waypoints_y,
+                     double q_s_progress = 1.0, double q_s_alpha = 1.0,
+                     double q_s_smooth = 0.0, double terminal_penalty = 1000.0,
+                     double alpha_th = 0.0, double slip_terminal_penalty = 0.0,
+                     double q_offtrack_grad = 0.0)
+      : waypoints_x_(waypoints_x), waypoints_y_(waypoints_y),
+        q_s_progress_(q_s_progress), q_s_alpha_(q_s_alpha),
+        q_s_smooth_(q_s_smooth), terminal_penalty_(terminal_penalty),
         alpha_th_(alpha_th), slip_terminal_penalty_(slip_terminal_penalty),
-        q_offtrack_grad_(q_offtrack_grad), prev_arc_length_(0.0),
-        last_action_0_(0.0), last_action_1_(0.0) {
+        q_offtrack_grad_(q_offtrack_grad) {
     build_arc();
   }
 
@@ -52,40 +66,37 @@ public:
                     bool terminated) {
     (void)terminated;
 
-    if (collision) {
-      return -collision_penalty_;
-    }
-
     const double current_arc = arclength_at(px, py);
     double delta_s = current_arc - prev_arc_length_;
     if (total_length_ > 0.0) {
-      if (delta_s < -total_length_ * 0.5) {
+      if (delta_s < -0.5 * total_length_) {
         delta_s += total_length_;
-      } else if (delta_s > total_length_ * 0.5) {
+      } else if (delta_s > 0.5 * total_length_) {
         delta_s -= total_length_;
       }
     }
 
     const double beta = std::atan2(vy, vx);
-    const double speed = std::hypot(vx, vy);
     const double d0 = has_last_action_ ? (action_0 - last_action_0_) : 0.0;
     const double d1 = has_last_action_ ? (action_1 - last_action_1_) : 0.0;
 
-    double reward = q_progress_ * delta_s;
-    reward -= q_alpha_ * (beta * beta);
-    reward -= q_smooth_ * (d0 * d0 + d1 * d1);
+    double reward = q_s_progress_ * delta_s;
+    reward -= q_s_alpha_ * (beta * beta);
+    reward -= q_s_smooth_ * (d0 * d0 + d1 * d1);
 
     if (track_map_ != nullptr && q_offtrack_grad_ > 0.0) {
       const double distance = track_map_->distance_at(px, py);
       const double off_real = std::clamp(1.0 - distance, 0.0, 1.0);
       reward -= q_offtrack_grad_ * off_real;
+    } else if (collision && q_offtrack_grad_ > 0.0) {
+      reward -= q_offtrack_grad_;
     }
 
     if (std::abs(beta) > alpha_th_) {
       reward -= slip_terminal_penalty_;
     }
 
-    if (speed > 12.0) {
+    if (std::hypot(vx, vy) > 12.0) {
       reward -= 10000.0;
     }
 
@@ -98,6 +109,10 @@ public:
     last_action_1_ = action_1;
     has_last_action_ = true;
 
+    if (terminated) {
+      reset();
+    }
+
     return reward;
   }
 
@@ -106,34 +121,25 @@ public:
   }
 
 private:
-  bool is_backward_terminal(double px, double py, double theta) const {
-    if (waypoints_x_.empty()) {
-      return false;
-    }
-    const double ref_heading = nearest_heading(px, py);
-    double hdiff = std::abs(theta - ref_heading);
-    if (hdiff > M_PI) {
-      hdiff = TWO_PI - hdiff;
-    }
-    return hdiff > M_PI / 2.0;
-  }
-
   void build_arc() {
-    std::size_t n = waypoints_x_.size();
-    cum_arc_lengths_.resize(n);
-    headings_.resize(n);
+    const std::size_t n = waypoints_x_.size();
     if (n == 0) {
+      cum_arc_lengths_.assign(1, 0.0);
+      headings_.clear();
       total_length_ = 0.0;
       return;
     }
+
+    cum_arc_lengths_.resize(n);
+    headings_.resize(n);
     cum_arc_lengths_[0] = 0.0;
     for (std::size_t i = 1; i < n; ++i) {
-      double dx = waypoints_x_[i] - waypoints_x_[i - 1];
-      double dy = waypoints_y_[i] - waypoints_y_[i - 1];
+      const double dx = waypoints_x_[i] - waypoints_x_[i - 1];
+      const double dy = waypoints_y_[i] - waypoints_y_[i - 1];
       cum_arc_lengths_[i] =
           cum_arc_lengths_[i - 1] + std::sqrt(dx * dx + dy * dy);
     }
-    total_length_ = n > 0 ? cum_arc_lengths_.back() : 0.0;
+    total_length_ = cum_arc_lengths_.back();
 
     for (std::size_t i = 0; i < n; ++i) {
       const std::size_t prev = (i == 0) ? (n - 1) : (i - 1);
@@ -142,10 +148,6 @@ private:
       const double dy = waypoints_y_[next] - waypoints_y_[prev];
       headings_[i] = std::atan2(dy, dx);
     }
-  }
-
-  double nearest_heading(double px, double py) const {
-    return headings_[nearest_index(px, py)];
   }
 
   std::size_t nearest_index(double px, double py) const {
@@ -161,6 +163,22 @@ private:
       }
     }
     return nearest_idx;
+  }
+
+  bool is_backward_terminal(double px, double py, double theta) const {
+    if (waypoints_x_.empty()) {
+      return false;
+    }
+    const double ref_heading = nearest_heading(px, py);
+    double hdiff = std::abs(theta - ref_heading);
+    if (hdiff > M_PI) {
+      hdiff = TWO_PI - hdiff;
+    }
+    return hdiff > M_PI / 2.0;
+  }
+
+  double nearest_heading(double px, double py) const {
+    return headings_[nearest_index(px, py)];
   }
 
   double arclength_at(double px, double py) const {
@@ -204,22 +222,20 @@ private:
     return cum_arc_lengths_[idx] + p_next.first;
   }
 
-  const f110_rollout_kernel::TrackMap *track_map_ = nullptr;
-
   std::vector<double> waypoints_x_;
   std::vector<double> waypoints_y_;
   std::vector<double> cum_arc_lengths_;
   std::vector<double> headings_;
   double total_length_ = 0.0;
 
-  double q_progress_ = 1.0;
-  double q_alpha_ = 1.0;
-  double q_smooth_ = 0.0;
+  const f110_rollout_kernel::TrackMap *track_map_ = nullptr;
+  double q_s_progress_ = 1.0;
+  double q_s_alpha_ = 1.0;
+  double q_s_smooth_ = 0.0;
   double terminal_penalty_ = 1000.0;
   double alpha_th_ = 0.0;
   double slip_terminal_penalty_ = 0.0;
   double q_offtrack_grad_ = 0.0;
-  double collision_penalty_ = 50.0;
 
   double prev_arc_length_ = 0.0;
   double last_action_0_ = 0.0;

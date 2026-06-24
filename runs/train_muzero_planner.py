@@ -38,6 +38,7 @@ from utils.f110_env import (
 )
 from utils.track_map import load_track_map
 from utils.waypoint_view import initial_pose_from_waypoints
+from utils.waypoint_utils import cumulative_arc_lengths
 
 
 def parse_args() -> argparse.Namespace:
@@ -62,12 +63,6 @@ def resolve_device(device_name: str):
 
 def device_name(device) -> str:
     return str(device).split(":", maxsplit=1)[0]
-
-
-def cumulative_arc_lengths(waypoints: np.ndarray) -> np.ndarray:
-    deltas = np.diff(waypoints, axis=0, append=waypoints[:1])
-    segment_lengths = np.linalg.norm(deltas, axis=1)
-    return np.concatenate(([0.0], np.cumsum(segment_lengths[:-1]))).astype(np.float64)
 
 
 def native_observation_config(config: F1TenthObservationConfig) -> ObservationConfig:
@@ -271,9 +266,9 @@ def main() -> None:
         dynamics_params,
         car_length,
         car_width,
-        reward_section["q_progress"],
-        reward_section["q_alpha"],
-        reward_section["q_smooth"],
+        reward_section["q_s_progress"],
+        reward_section["q_s_alpha"],
+        reward_section["q_s_smooth"],
         reward_section["terminal_penalty"],
         reward_section["alpha_th"],
         reward_section["slip_terminal_penalty"],

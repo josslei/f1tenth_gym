@@ -1,7 +1,6 @@
 """Shared fixtures for rollout kernel parity tests."""
 
 from importlib import import_module
-import math
 import sys
 from pathlib import Path
 
@@ -32,33 +31,34 @@ def rollout_kernel():
 def track_map(rollout_kernel):
     from f110_gym.envs.laser_models import ScanSimulator2D
 
+    from utils.track_map import load_track_map
+
     map_path = str(ROOT / "maps" / "custom" / "f110_gym_10" / "f110_gym_map.yaml")
     map_ext = ".png"
 
     py_sim = ScanSimulator2D(1080, 4.7)
     py_sim.set_map(map_path, map_ext)
 
+    backend_track, _, _ = load_track_map(map_path, map_ext)
+
     C = rollout_kernel
     track = C.TrackMap()
-    track.height = py_sim.map_height
-    track.width = py_sim.map_width
-    track.resolution = py_sim.map_resolution
-    track.orig_x = py_sim.orig_x
-    track.orig_y = py_sim.orig_y
-    track.orig_c = py_sim.orig_c
-    track.orig_s = py_sim.orig_s
-    track.dt = py_sim.dt.ravel().tolist()
-    track.theta_dis = py_sim.theta_dis
-    track.num_beams = py_sim.num_beams
-    track.fov = py_sim.fov
-    track.max_range = py_sim.max_range
-    track.eps = py_sim.eps
+    track.height = backend_track.height
+    track.width = backend_track.width
+    track.resolution = backend_track.resolution
+    track.orig_x = backend_track.orig_x
+    track.orig_y = backend_track.orig_y
+    track.orig_c = backend_track.orig_c
+    track.orig_s = backend_track.orig_s
+    track.dt = backend_track.dt
+    track.theta_dis = backend_track.theta_dis
+    track.num_beams = backend_track.num_beams
+    track.fov = backend_track.fov
+    track.max_range = backend_track.max_range
+    track.eps = backend_track.eps
+    track.ttc_thresh = backend_track.ttc_thresh
+    track.side_distances = backend_track.side_distances
     track.compute_scan_tables()
-
-    car_length = 0.58
-    car_width = 0.31
-    side_dist = 0.5 * math.sqrt(car_length**2 + car_width**2)
-    track.side_distances = [float(side_dist)] * track.num_beams
 
     return track, py_sim
 

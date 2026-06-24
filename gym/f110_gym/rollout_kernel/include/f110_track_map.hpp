@@ -29,7 +29,7 @@ struct TrackMap {
   std::vector<double> cosines;
 
   std::vector<float> side_distances;
-  double ttc_thresh = 0.15;
+  double ttc_thresh = 0.005;
 
   void compute_scan_tables() {
     angle_increment = fov / static_cast<double>(num_beams - 1);

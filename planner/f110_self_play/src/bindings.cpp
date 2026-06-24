@@ -61,7 +61,7 @@ py::object self_play_result_to_python(const sp::SelfPlayResult &result) {
 PYBIND11_MODULE(f110_self_play_native, m) {
   m.doc() = "Native F110 self-play bindings";
 
-  py::class_<rk::TrackMap>(m, "TrackMap")
+  py::class_<rk::TrackMap>(m, "TrackMap", py::module_local())
       .def(py::init<>())
       .def_readwrite("height", &rk::TrackMap::height)
       .def_readwrite("width", &rk::TrackMap::width)
@@ -82,7 +82,7 @@ PYBIND11_MODULE(f110_self_play_native, m) {
       .def_readwrite("side_distances", &rk::TrackMap::side_distances)
       .def("compute_scan_tables", &rk::TrackMap::compute_scan_tables);
 
-  py::class_<rk::ObservationConfig>(m, "ObservationConfig")
+  py::class_<rk::ObservationConfig>(m, "ObservationConfig", py::module_local())
       .def(py::init<>())
       .def_readwrite("scan_size", &rk::ObservationConfig::scan_size)
       .def_readwrite("scan_max_m", &rk::ObservationConfig::scan_max_m)
@@ -99,7 +99,7 @@ PYBIND11_MODULE(f110_self_play_native, m) {
       .def_readwrite("waypoint_resample_spacing",
                      &rk::ObservationConfig::waypoint_resample_spacing);
 
-  py::class_<rk::F110State>(m, "F110State")
+  py::class_<rk::F110State>(m, "F110State", py::module_local())
       .def(py::init<>())
       .def_readwrite("x", &rk::F110State::x)
       .def_readwrite("y", &rk::F110State::y)
@@ -211,8 +211,8 @@ PYBIND11_MODULE(f110_self_play_native, m) {
                   py::array_t<double, py::array::c_style | py::array::forcecast>
                       cum_arc_lengths,
                   const rk::F110Params &dynamics_params, double car_length,
-                  double car_width, double q_progress, double q_alpha,
-                  double q_smooth, double terminal_penalty, double alpha_th,
+                  double car_width, double q_s_progress, double q_s_alpha,
+                  double q_s_smooth, double terminal_penalty, double alpha_th,
                   double slip_terminal_penalty, double q_offtrack_grad) {
                  auto wx = waypoints_x.unchecked<1>();
                  auto wy = waypoints_y.unchecked<1>();
@@ -234,18 +234,19 @@ PYBIND11_MODULE(f110_self_play_native, m) {
                      std::move(action_lattice), discount, sample_actions,
                      print_metrics, std::move(wxv), std::move(wyv),
                      std::move(cav), dynamics_params, car_length, car_width,
-                     q_progress, q_alpha, q_smooth, terminal_penalty, alpha_th,
-                     slip_terminal_penalty, q_offtrack_grad);
+                     q_s_progress, q_s_alpha, q_s_smooth, terminal_penalty,
+                     alpha_th, slip_terminal_penalty, q_offtrack_grad);
                }),
            py::arg("search"), py::arg("track_map"), py::arg("obs_config"),
            py::arg("action_lattice"), py::arg("discount"),
            py::arg("sample_actions"), py::arg("print_metrics"),
            py::arg("waypoints_x"), py::arg("waypoints_y"),
            py::arg("cum_arc_lengths"), py::arg("dynamics_params"),
-           py::arg("car_length"), py::arg("car_width"), py::arg("q_progress"),
-           py::arg("q_alpha"), py::arg("q_smooth"), py::arg("terminal_penalty"),
-           py::arg("alpha_th"), py::arg("slip_terminal_penalty"),
-           py::arg("q_offtrack_grad"))
+           py::arg("car_length"), py::arg("car_width"),
+           py::arg("q_s_progress") = 1.0, py::arg("q_s_alpha") = 1.0,
+           py::arg("q_s_smooth") = 0.0, py::arg("terminal_penalty") = 1000.0,
+           py::arg("alpha_th") = 0.0, py::arg("slip_terminal_penalty") = 0.0,
+           py::arg("q_offtrack_grad") = 0.0)
       .def(
           "generate",
           [](sp::SelfPlayEngine &self, int32_t rollout_steps,
@@ -265,7 +266,7 @@ PYBIND11_MODULE(f110_self_play_native, m) {
           py::arg("rollout_steps"), py::arg("batch_size"),
           py::arg("initial_states"));
 
-  py::class_<rk::F110Params>(m, "F110Params")
+  py::class_<rk::F110Params>(m, "F110Params", py::module_local())
       .def(py::init<>())
       .def_readwrite("mu", &rk::F110Params::mu)
       .def_readwrite("c_sf", &rk::F110Params::c_sf)

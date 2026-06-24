@@ -280,6 +280,7 @@ def _env_worker(
             )
             obs_dict, _, terminated, truncated, info = env.step(env_action)
             obs_dict = add_control_state(obs_dict, env)
+            obs_dict["prev_action"] = env_action[0]
             episode_steps += 1
             if episode_steps >= max_episode_steps:
                 truncated = True
@@ -412,6 +413,8 @@ class RolloutDataset(
         Pre-loaded waypoints keyed by map name.
     map_poses:
         Pre-loaded reset poses keyed by map name.
+    map_track_maps:
+        Pre-loaded track maps keyed by map name.
     """
 
     def __init__(
@@ -432,6 +435,7 @@ class RolloutDataset(
         map_schedule: list[MapConfig] | None = None,
         map_waypoints: dict[str, np.ndarray] | None = None,
         map_poses: dict[str, np.ndarray] | None = None,
+        map_track_maps: dict[str, Any] | None = None,
     ) -> None:
         self.sve = SubprocVecEnv(env_fns, action_config, max_episode_steps)
         self.policy = policy
@@ -449,6 +453,7 @@ class RolloutDataset(
         self.map_schedule = map_schedule or []
         self.map_waypoints = map_waypoints or {}
         self.map_poses = map_poses or {}
+        self.map_track_maps = map_track_maps or {}
         self._iteration_count = 0
         self._force_reset = True
 
@@ -482,6 +487,11 @@ class RolloutDataset(
             if wp_xy is not None:
                 for rf in self.reward_fns:
                     rf.set_waypoints(wp_xy)  # type: ignore[union-attr]
+
+            track_map = self.map_track_maps.get(current_map.name)
+            if track_map is not None:
+                for rf in self.reward_fns:
+                    rf.set_track_map(track_map)  # type: ignore[union-attr]
 
             self._force_reset = True
 
@@ -521,7 +531,6 @@ class RolloutDataset(
 
             # Step all envs in parallel (child processes, separate GILs).
             actions_np = action_batch.cpu().numpy()
-            prev_action_batch = actions_np
             (
                 next_obs_list,
                 terminated_list,
@@ -552,8 +561,12 @@ class RolloutDataset(
                     completed_episode_returns.append(self.ep_return[i])
                     self.ep_return[i] = 0.0
                     self.current_obs[i] = reset_obs_list[i]
+                    prev_action_batch[i] = 0.0
                 else:
                     self.current_obs[i] = next_obs_list[i]
+                    prev_action_batch[i] = np.asarray(
+                        next_obs_list[i]["prev_action"], dtype=np.float64
+                    )
 
         final_obs_list: list[dict[str, Any]] = cast(
             list[dict[str, Any]], self.current_obs

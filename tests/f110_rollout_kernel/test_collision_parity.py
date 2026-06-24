@@ -76,3 +76,21 @@ class TestCollisionParity:
                 f"GJK mismatch at ({x1},{y1}) vs ({x2},{y2}): "
                 f"C++={cpp_result}, Python={py_result}"
             )
+
+    def test_ttc_matches_python(self, rollout_kernel, track_map):
+        C = rollout_kernel
+        cpp_map = track_map[0]
+
+        from gym.f110_gym.envs.laser_models import check_ttc_jit as py_check_ttc
+
+        num_beams = cpp_map.num_beams
+        fov = cpp_map.fov
+        scan_angles = np.linspace(-fov / 2.0, fov / 2.0, num=num_beams)
+        cosines = np.cos(scan_angles)
+        side_distances = np.asarray(cpp_map.side_distances, dtype=np.float64)
+
+        scan = C.get_scan(0.5, 0.0, 0.0, cpp_map)
+        vel = 5.0
+        cpp_result = C.check_ttc(scan, vel, cpp_map)
+        py_result = py_check_ttc(scan, vel, scan_angles, cosines, side_distances, 0.005)
+        assert cpp_result == py_result

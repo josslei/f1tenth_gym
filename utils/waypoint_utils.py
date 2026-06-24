@@ -2,6 +2,12 @@ import numpy as np
 from numba import njit
 
 
+def cumulative_arc_lengths(waypoints_xy: np.ndarray) -> np.ndarray:
+    diffs = np.diff(waypoints_xy, axis=0)
+    seg_lengths = np.sqrt((diffs**2).sum(axis=1))
+    return np.concatenate([[0.0], np.cumsum(seg_lengths)])
+
+
 def nearest_waypoint_index(
     waypoints: np.ndarray,
     position: np.ndarray,
@@ -31,9 +37,7 @@ def resample_path(waypoints_xy: np.ndarray, spacing: float = 0.5) -> np.ndarray:
     Returns:
         ``(M, 2)`` array of uniformly spaced points.
     """
-    diffs = np.diff(waypoints_xy, axis=0)
-    seg_lengths = np.sqrt((diffs**2).sum(axis=1))
-    cum_lengths = np.concatenate([[0.0], np.cumsum(seg_lengths)])
+    cum_lengths = cumulative_arc_lengths(waypoints_xy)
     total_length = float(cum_lengths[-1])
     if total_length == 0.0:
         return waypoints_xy.astype(np.float64, copy=True)

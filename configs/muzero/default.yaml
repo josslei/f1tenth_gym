@@ -25,9 +25,9 @@ action:
   velocity_bins: [0.0, 2.0, 4.0, 6.0, 8.0]
 
 reward:
-  q_progress: 1.0
-  q_alpha: 1.0
-  q_smooth: 0.0
+  q_s_progress: 1.0
+  q_s_alpha: 1.0
+  q_s_smooth: 0.0
   terminal_penalty: 1000000.0
   alpha_th: 0.475
   slip_terminal_penalty: 10000.0

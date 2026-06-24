@@ -55,10 +55,11 @@ inline int nearest_waypoint_index_default(const double *waypoints_x,
                                           int num_waypoints, double px,
                                           double py) {
   constexpr int search_window = 200;
+  constexpr int start_idx = -1;
   int best_idx = 0;
   double best_dist_sq = std::numeric_limits<double>::infinity();
 
-  if (search_window >= num_waypoints) {
+  if (search_window <= 0 || search_window >= num_waypoints) {
     for (int idx = 0; idx < num_waypoints; ++idx) {
       double dx = waypoints_x[idx] - px;
       double dy = waypoints_y[idx] - py;
@@ -71,7 +72,6 @@ inline int nearest_waypoint_index_default(const double *waypoints_x,
     return best_idx;
   }
 
-  constexpr int start_idx = -1;
   int half_window = search_window / 2;
   int first_offset = -half_window;
   int last_offset = search_window - half_window;

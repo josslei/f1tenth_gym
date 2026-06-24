@@ -102,9 +102,9 @@ inline bool check_ttc_one(const float *scan, double vel, const TrackMap &map) {
     return false;
   }
   for (int i = 0; i < map.num_beams; ++i) {
-    float proj_vel =
-        static_cast<float>(vel * map.cosines[static_cast<std::size_t>(i) *
-                                             map.theta_dis / map.num_beams]);
+    const double beam_angle =
+        -0.5 * map.fov + static_cast<double>(i) * map.angle_increment;
+    float proj_vel = static_cast<float>(vel * std::cos(beam_angle));
     if (std::fabs(proj_vel) < 0.01f) {
       continue;
     }

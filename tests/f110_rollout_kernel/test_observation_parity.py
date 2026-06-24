@@ -89,9 +89,9 @@ class TestObservationParity:
 
         waypoints = resample_path(waypoints, config.waypoint_resample_spacing)
 
-        diffs = np.diff(waypoints, axis=0)
-        seg_lengths = np.sqrt((diffs**2).sum(axis=1))
-        cum_arc = np.concatenate([[0.0], np.cumsum(seg_lengths)])
+        from utils.waypoint_utils import cumulative_arc_lengths
+
+        cum_arc = cumulative_arc_lengths(waypoints)
 
         cpp_map = track_map[0]
         scan = C.get_scan(0.5, 0.0, 0.0, cpp_map)

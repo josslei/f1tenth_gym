@@ -61,7 +61,32 @@ def load_track_map(
     track.eps = float(eps)
     track.compute_scan_tables()
 
-    side_dist = 0.5 * math.sqrt(car_length**2 + car_width**2)
-    track.side_distances = [float(side_dist)] * num_beams
+    dist_sides = car_width / 2.0
+    dist_fr = car_length / 2.0
+    scan_ang_incr = fov / float(num_beams - 1)
+    side_distances = np.empty((num_beams,), dtype=np.float32)
+    for i in range(num_beams):
+        angle = -fov / 2.0 + float(i) * scan_ang_incr
+        if angle > 0.0:
+            if angle < math.pi / 2.0:
+                to_side = dist_sides / math.sin(angle)
+                to_fr = dist_fr / math.cos(angle)
+                side_distances[i] = float(min(to_side, to_fr))
+            else:
+                to_side = dist_sides / math.cos(angle - math.pi / 2.0)
+                to_fr = dist_fr / math.sin(angle - math.pi / 2.0)
+                side_distances[i] = float(min(to_side, to_fr))
+        else:
+            if angle > -math.pi / 2.0:
+                to_side = dist_sides / math.sin(-angle)
+                to_fr = dist_fr / math.cos(-angle)
+                side_distances[i] = float(min(to_side, to_fr))
+            else:
+                to_side = dist_sides / math.cos(-angle - math.pi / 2.0)
+                to_fr = dist_fr / math.sin(-angle - math.pi / 2.0)
+                side_distances[i] = float(min(to_side, to_fr))
+
+    track.side_distances = side_distances.tolist()
+    track.ttc_thresh = 0.005
 
     return track, car_length, car_width

@@ -48,6 +48,7 @@ from utils.f110_env import (
     with_resampled_waypoints,
 )
 from utils.f110_reward import F1TenthProgressReward as F1TenthPPOReward
+from utils.track_map import load_track_map
 from utils.waypoint_view import initial_pose_from_waypoints
 
 DEFAULT_DEVICE = torch.device(
@@ -296,12 +297,15 @@ def main() -> None:
         )
         map_waypoints: dict[str, np.ndarray] = {}
         map_poses: dict[str, np.ndarray] = {}
+        map_track_maps: dict[str, Any] = {}
         for m in [*train_maps, *val_maps]:
             cl = np.loadtxt(m.centerline_csv, delimiter=",", skiprows=1)[:, :2]
             map_waypoints[m.name] = cl
             map_poses[m.name] = initial_pose_from_waypoints(cl)
+            map_track_maps[m.name] = load_track_map(m.map, m.map_ext)[0]
         first_map = epoch_schedule[0]
         first_wp = map_waypoints[first_map.name]
+        first_track_map = map_track_maps[first_map.name]
         reset_pose = map_poses[first_map.name]
     else:
         # Fallback for single-map configs (no maps section).
@@ -316,7 +320,11 @@ def main() -> None:
         epoch_schedule = []
         map_waypoints = {}
         map_poses = {}
+        map_track_maps = {}
         first_wp = centerline_data[:, :2] if centerline_data is not None else None
+        first_track_map = load_track_map(
+            env_config["map"], env_config.get("map_ext", ".png")
+        )[0]
 
     # Wire first map's waypoints into the observation config.
     if observation_config.include_waypoints and first_wp is not None:
@@ -331,6 +339,7 @@ def main() -> None:
     # Reward setup.
     reward_params = dict(config.reward)
     reward_params.pop("waypoints_path", None)
+    reward_params["track_map"] = first_track_map
     reward_fns = [F1TenthPPOReward(**reward_params) for _ in range(num_envs)]
     if first_wp is not None:
         for rf in reward_fns:
@@ -354,6 +363,7 @@ def main() -> None:
         map_schedule=epoch_schedule if has_maps else None,
         map_waypoints=map_waypoints if has_maps else None,
         map_poses=map_poses if has_maps else None,
+        map_track_maps=map_track_maps if has_maps else None,
     )
     datamodule = RolloutDataModule(dataset)
     logger = TensorBoardLogger(save_dir=output_dir, name="tensorboard")

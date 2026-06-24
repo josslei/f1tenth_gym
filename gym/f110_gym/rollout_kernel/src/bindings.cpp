@@ -83,17 +83,32 @@ PYBIND11_MODULE(_f110_rollout_kernel, m) {
       .def(py::init([](const rk::TrackMap &track_map,
                        const std::vector<double> &waypoints_x,
                        const std::vector<double> &waypoints_y,
-                       double q_progress, double q_alpha, double q_smooth,
+                       double q_s_progress, double q_s_alpha, double q_s_smooth,
                        double terminal_penalty, double alpha_th,
                        double slip_terminal_penalty, double q_offtrack_grad) {
              return f110_gym::F110ProgressReward(
-                 track_map, waypoints_x, waypoints_y, q_progress, q_alpha,
-                 q_smooth, terminal_penalty, alpha_th, slip_terminal_penalty,
+                 track_map, waypoints_x, waypoints_y, q_s_progress, q_s_alpha,
+                 q_s_smooth, terminal_penalty, alpha_th, slip_terminal_penalty,
                  q_offtrack_grad);
            }),
            py::arg("track_map"), py::arg("waypoints_x"), py::arg("waypoints_y"),
-           py::arg("q_progress") = 1.0, py::arg("q_alpha") = 1.0,
-           py::arg("q_smooth") = 0.0, py::arg("terminal_penalty") = 1000.0,
+           py::arg("q_s_progress") = 1.0, py::arg("q_s_alpha") = 1.0,
+           py::arg("q_s_smooth") = 0.0, py::arg("terminal_penalty") = 1000.0,
+           py::arg("alpha_th") = 0.0, py::arg("slip_terminal_penalty") = 0.0,
+           py::arg("q_offtrack_grad") = 0.0)
+      .def(py::init([](const std::vector<double> &waypoints_x,
+                       const std::vector<double> &waypoints_y,
+                       double q_s_progress, double q_s_alpha, double q_s_smooth,
+                       double terminal_penalty, double alpha_th,
+                       double slip_terminal_penalty, double q_offtrack_grad) {
+             return f110_gym::F110ProgressReward(
+                 waypoints_x, waypoints_y, q_s_progress, q_s_alpha, q_s_smooth,
+                 terminal_penalty, alpha_th, slip_terminal_penalty,
+                 q_offtrack_grad);
+           }),
+           py::arg("waypoints_x"), py::arg("waypoints_y"),
+           py::arg("q_s_progress") = 1.0, py::arg("q_s_alpha") = 1.0,
+           py::arg("q_s_smooth") = 0.0, py::arg("terminal_penalty") = 1000.0,
            py::arg("alpha_th") = 0.0, py::arg("slip_terminal_penalty") = 0.0,
            py::arg("q_offtrack_grad") = 0.0)
       .def(
@@ -107,6 +122,8 @@ PYBIND11_MODULE(_f110_rollout_kernel, m) {
           py::arg("px"), py::arg("py"), py::arg("theta"), py::arg("vx"),
           py::arg("vy"), py::arg("action_0"), py::arg("action_1"),
           py::arg("collision"), py::arg("terminated"))
+      .def("is_terminal", &rk::F110ProgressReward::is_terminal, py::arg("px"),
+           py::arg("py"), py::arg("theta"), py::arg("collision"))
       .def("set_waypoints", &rk::F110ProgressReward::set_waypoints,
            py::arg("waypoints_x"), py::arg("waypoints_y"))
       .def("reset", &rk::F110ProgressReward::reset);
