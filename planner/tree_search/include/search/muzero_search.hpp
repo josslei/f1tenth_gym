@@ -7,6 +7,7 @@
 #include <iostream>
 #include <limits>
 #include <map>
+#include <random>
 #include <string>
 #include <utility>
 #include <vector>
@@ -24,12 +25,14 @@ class MuZeroSearch {
 
 public:
   inline MuZeroSearch(torch::jit::Module model, int32_t num_iters,
-                      float temperature, float c_puct,
-                      const BatchedTreeShape &shape, torch::Device device,
-                      bool print_metrics = false)
+                      float temperature, float c_puct, float dirichlet_alpha,
+                      float dirichlet_epsilon, const BatchedTreeShape &shape,
+                      torch::Device device, bool print_metrics = false)
       : model(std::move(model)), num_iters(num_iters), temperature(temperature),
-        c_puct(c_puct), shape(shape), index(shape), tree(shape, device),
-        tree_policy(c_puct), device(device), print_metrics(print_metrics),
+        c_puct(c_puct), dirichlet_alpha(dirichlet_alpha),
+        dirichlet_epsilon(dirichlet_epsilon), shape(shape), index(shape),
+        tree(shape, device), tree_policy(c_puct), device(device),
+        print_metrics(print_metrics),
         initial_method(this->model.get_method("initial_inference")),
         recurrent_method(this->model.get_method("recurrent_inference")),
         recurrent_hidden(torch::empty(
@@ -255,6 +258,8 @@ private:
   int32_t num_iters;
   float temperature;
   float c_puct;
+  float dirichlet_alpha;
+  float dirichlet_epsilon;
 
   BatchedTreeShape shape;
   BatchedTreeIndex index;
@@ -270,6 +275,8 @@ private:
   torch::Tensor recurrent_payload_cpu;
   torch::Tensor recurrent_action_cpu;
   torch::Tensor legal_mask_cpu;
+
+  std::mt19937 rng{std::random_device{}()};
 
   std::vector<int32_t> selected_parent;
   std::vector<int32_t> selected_action;
@@ -390,13 +397,50 @@ private:
     const uint8_t *legal_ptr = root_legal_mask.data_ptr<uint8_t>();
 
     for (int32_t b = 0; b < shape.B; ++b) {
+      std::vector<float> priors(static_cast<std::size_t>(shape.A), 0.0f);
+      std::vector<int32_t> legal_actions;
+      legal_actions.reserve(static_cast<std::size_t>(shape.A));
+
       tree.topology.set_expanded(b, 0, true);
       tree.topology.clear_legal_actions(b, 0);
 
       for (int32_t a = 0; a < shape.A; ++a) {
-        tree.edge_stats.set_prior(b, 0, a, payload_ptr[initial_policy(b, a)]);
-        tree.topology.set_legal(b, 0, a,
-                                legal_ptr[index.batch_action(b, a)] != 0);
+        const bool legal = legal_ptr[index.batch_action(b, a)] != 0;
+        tree.topology.set_legal(b, 0, a, legal);
+        if (!legal) {
+          continue;
+        }
+        priors[static_cast<std::size_t>(a)] = payload_ptr[initial_policy(b, a)];
+        legal_actions.push_back(a);
+      }
+
+      if (dirichlet_alpha > 0.0f && dirichlet_epsilon > 0.0f &&
+          legal_actions.size() > 1) {
+        std::gamma_distribution<float> gamma_dist(dirichlet_alpha, 1.0f);
+        std::vector<float> noise(legal_actions.size(), 0.0f);
+        float noise_sum = 0.0f;
+        for (std::size_t i = 0; i < legal_actions.size(); ++i) {
+          noise[i] = gamma_dist(rng);
+          noise_sum += noise[i];
+        }
+        const float inv_noise_sum = noise_sum > 0.0f ? 1.0f / noise_sum : 0.0f;
+        float prior_sum = 0.0f;
+        for (int32_t a : legal_actions) {
+          prior_sum += priors[static_cast<std::size_t>(a)];
+        }
+        const float inv_prior_sum = prior_sum > 0.0f ? 1.0f / prior_sum : 0.0f;
+        for (std::size_t i = 0; i < legal_actions.size(); ++i) {
+          const int32_t a = legal_actions[i];
+          const std::size_t idx_a = static_cast<std::size_t>(a);
+          const float prior = priors[idx_a] * inv_prior_sum;
+          const float sampled = noise[i] * inv_noise_sum;
+          priors[idx_a] =
+              (1.0f - dirichlet_epsilon) * prior + dirichlet_epsilon * sampled;
+        }
+      }
+
+      for (int32_t a = 0; a < shape.A; ++a) {
+        tree.edge_stats.set_prior(b, 0, a, priors[static_cast<std::size_t>(a)]);
       }
     }
   }

@@ -54,7 +54,8 @@ PYBIND11_MODULE(tree_search_native, m) {
 
   py::class_<planner::tree_search::MuZeroSearch>(m, "MuZeroSearch")
       .def(py::init([](const std::string &model_path, int32_t num_iters,
-                       float temperature, float c_puct, int32_t batch_size,
+                       float temperature, float c_puct, float dirichlet_alpha,
+                       float dirichlet_epsilon, int32_t batch_size,
                        int32_t action_count, int32_t hidden_size,
                        int32_t max_nodes, const std::string &device_name,
                        bool print_metrics) {
@@ -84,14 +85,17 @@ PYBIND11_MODULE(tree_search_native, m) {
              model.eval();
              return planner::tree_search::MuZeroSearch(
                  std::move(model), num_iters, temperature, c_puct,
+                 dirichlet_alpha, dirichlet_epsilon,
                  planner::tree_search::BatchedTreeShape(
                      batch_size, max_nodes, action_count, hidden_size),
                  device, print_metrics);
            }),
            py::arg("model_path"), py::arg("num_iters"), py::arg("temperature"),
-           py::arg("c_puct"), py::arg("batch_size"), py::arg("action_count"),
-           py::arg("hidden_size"), py::arg("max_nodes") = 0,
-           py::arg("device") = "", py::arg("print_metrics") = false)
+           py::arg("c_puct"), py::arg("dirichlet_alpha") = 0.3f,
+           py::arg("dirichlet_epsilon") = 0.25f, py::arg("batch_size"),
+           py::arg("action_count"), py::arg("hidden_size"),
+           py::arg("max_nodes") = 0, py::arg("device") = "",
+           py::arg("print_metrics") = false)
       .def(
           "search_batch",
           [](planner::tree_search::MuZeroSearch &self,

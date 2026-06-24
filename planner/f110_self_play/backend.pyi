@@ -101,6 +101,9 @@ class MuZeroSearchAdapter:
         max_nodes: int = 0,
         device: str = "",
         print_metrics: bool = False,
+        *,
+        dirichlet_alpha: float = 0.3,
+        dirichlet_epsilon: float = 0.25,
     ) -> None: ...
 
 class SelfPlayEngine:

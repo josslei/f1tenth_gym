@@ -151,7 +151,8 @@ PYBIND11_MODULE(f110_self_play_native, m) {
   py::class_<sp::MuZeroSearchAdapter, std::shared_ptr<sp::MuZeroSearchAdapter>>(
       m, "MuZeroSearchAdapter")
       .def(py::init([](const std::string &model_path, int32_t num_iters,
-                       float temperature, float c_puct, int32_t batch_size,
+                       float temperature, float c_puct, float dirichlet_alpha,
+                       float dirichlet_epsilon, int32_t batch_size,
                        int32_t action_count, int32_t hidden_size,
                        int32_t max_nodes, const std::string &device_name,
                        bool print_metrics) {
@@ -173,13 +174,16 @@ PYBIND11_MODULE(f110_self_play_native, m) {
                max_nodes = num_iters + 1;
              }
              return sp::MuZeroSearchAdapter(
-                 model_path, num_iters, temperature, c_puct, batch_size,
-                 action_count, hidden_size, max_nodes, device, print_metrics);
+                 model_path, num_iters, temperature, c_puct, dirichlet_alpha,
+                 dirichlet_epsilon, batch_size, action_count, hidden_size,
+                 max_nodes, device, print_metrics);
            }),
            py::arg("model_path"), py::arg("num_iters"), py::arg("temperature"),
-           py::arg("c_puct"), py::arg("batch_size"), py::arg("action_count"),
-           py::arg("hidden_size"), py::arg("max_nodes") = 0,
-           py::arg("device") = "", py::arg("print_metrics") = false);
+           py::arg("c_puct"), py::arg("dirichlet_alpha") = 0.3f,
+           py::arg("dirichlet_epsilon") = 0.25f, py::arg("batch_size"),
+           py::arg("action_count"), py::arg("hidden_size"),
+           py::arg("max_nodes") = 0, py::arg("device") = "",
+           py::arg("print_metrics") = false);
 
   py::class_<sp::SelfPlayEngine>(m, "SelfPlayEngine")
       .def(py::init(

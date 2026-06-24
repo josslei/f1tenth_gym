@@ -21,11 +21,12 @@ class MuZeroSearchAdapter final {
 public:
   inline MuZeroSearchAdapter(const std::string &model_path, int32_t num_iters,
                              float temperature, float c_puct,
+                             float dirichlet_alpha, float dirichlet_epsilon,
                              int32_t batch_size, int32_t action_count,
                              int32_t hidden_size, int32_t max_nodes,
                              torch::Device device, bool print_metrics)
       : search(load_model(model_path, supported_device(device)), num_iters,
-               temperature, c_puct,
+               temperature, c_puct, dirichlet_alpha, dirichlet_epsilon,
                planner::tree_search::BatchedTreeShape(
                    batch_size, max_nodes, action_count, hidden_size),
                supported_device(device), print_metrics),

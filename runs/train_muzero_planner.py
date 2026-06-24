@@ -109,12 +109,15 @@ def native_dynamics_params(env_config: dict) -> F110Params:
     return native
 
 
-def initial_states_from_pose(reset_pose: np.ndarray, batch_size: int) -> np.ndarray:
+def initial_states_from_pose(
+    reset_pose: np.ndarray, batch_size: int, initial_velocity: float
+) -> np.ndarray:
     pose = np.asarray(reset_pose, dtype=np.float64).reshape(-1, 3)[0]
     states = np.zeros((batch_size, 7), dtype=np.float64)
     states[:, 0] = pose[0]
     states[:, 1] = pose[1]
     states[:, 4] = pose[2]
+    states[:, 3] = initial_velocity
     return states
 
 
@@ -227,7 +230,11 @@ def main() -> None:
     waypoints = np.asarray(waypoint_path, dtype=np.float64)
     cum_arc_lengths = cumulative_arc_lengths(waypoints)
     dynamics_params = native_dynamics_params(env_config)
-    initial_states = initial_states_from_pose(reset_pose, search_section["batch_size"])
+    initial_states = initial_states_from_pose(
+        reset_pose,
+        search_section["batch_size"],
+        float(self_play_section["initial_velocity"]),
+    )
 
     model_path = output_dir / "current_model.pt"
     scripted = torch.jit.script(model.eval()).to(device)
@@ -240,12 +247,14 @@ def main() -> None:
         search_section["num_iters"],
         search_section["temperature"],
         search_section["c_puct"],
-        search_section["batch_size"],
-        action_lattice.action_count,
-        model.hidden_size,
-        0,
-        device_name(device),
-        search_section.get("print_metrics", False),
+        dirichlet_alpha=search_section.get("dirichlet_alpha", 0.3),
+        dirichlet_epsilon=search_section.get("dirichlet_epsilon", 0.25),
+        batch_size=search_section["batch_size"],
+        action_count=action_lattice.action_count,
+        hidden_size=model.hidden_size,
+        max_nodes=0,
+        device=device_name(device),
+        print_metrics=search_section.get("print_metrics", False),
     )
     print("MuZero native search constructed", flush=True)
     engine = SelfPlayEngine(
@@ -294,6 +303,8 @@ def main() -> None:
             rollout_steps=self_play_section["rollout_steps"],
             num_iters=search_section["num_iters"],
             c_puct=search_section["c_puct"],
+            dirichlet_alpha=search_section.get("dirichlet_alpha", 0.3),
+            dirichlet_epsilon=search_section.get("dirichlet_epsilon", 0.25),
             temperature=search_section["temperature"],
             search_print_metrics=search_section.get("print_metrics", False),
             self_play_print_metrics=self_play_section.get("print_metrics", False),

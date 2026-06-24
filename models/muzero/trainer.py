@@ -157,6 +157,8 @@ class SelfPlayCallback(pl.Callback):
         rollout_steps: int,
         num_iters: int,
         c_puct: float,
+        dirichlet_alpha: float,
+        dirichlet_epsilon: float,
         temperature: float,
         search_print_metrics: bool,
         self_play_print_metrics: bool,
@@ -177,6 +179,8 @@ class SelfPlayCallback(pl.Callback):
         self.rollout_steps = rollout_steps
         self.num_iters = num_iters
         self.c_puct = c_puct
+        self.dirichlet_alpha = dirichlet_alpha
+        self.dirichlet_epsilon = dirichlet_epsilon
         self.temperature = temperature
         self.search_print_metrics = search_print_metrics
         self.self_play_print_metrics = self_play_print_metrics
@@ -198,6 +202,8 @@ class SelfPlayCallback(pl.Callback):
             self.num_iters,
             self.temperature,
             self.c_puct,
+            self.dirichlet_alpha,
+            self.dirichlet_epsilon,
             int(self.initial_states.shape[0]),
             self.action_lattice.action_count,
             module.model.hidden_size,
