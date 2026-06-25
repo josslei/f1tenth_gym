@@ -36,16 +36,30 @@ add_subdirectory(
   EXCLUDE_FROM_ALL
 )
 
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
 find_package(Torch REQUIRED CONFIG PATHS "${F110_SELF_PLAY_THIRDPARTY_DIR}/libtorch" NO_DEFAULT_PATH)
 separate_arguments(TORCH_CXX_FLAGS_LIST NATIVE_COMMAND "${TORCH_CXX_FLAGS}")
 
 if(UNIX AND NOT APPLE)
+  execute_process(
+    COMMAND "${Python3_EXECUTABLE}" -c "import pathlib, torch; print(pathlib.Path(torch.__file__).resolve().parent / 'lib')"
+    OUTPUT_VARIABLE PYTHON_TORCH_LIBRARY_DIR
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_VARIABLE PYTHON_TORCH_LIBRARY_ERROR
+    RESULT_VARIABLE PYTHON_TORCH_LIBRARY_RESULT
+  )
+  if(NOT PYTHON_TORCH_LIBRARY_RESULT EQUAL 0)
+    message(FATAL_ERROR "Could not locate the Python torch package: ${PYTHON_TORCH_LIBRARY_ERROR}")
+  endif()
   find_library(
     TORCH_PYTHON_LIBRARY
     torch_python
-    PATHS "${F110_SELF_PLAY_THIRDPARTY_DIR}/libtorch/lib"
+    PATHS "${PYTHON_TORCH_LIBRARY_DIR}"
     NO_DEFAULT_PATH
   )
+  if(NOT TORCH_PYTHON_LIBRARY)
+    message(FATAL_ERROR "Could not find libtorch_python in ${PYTHON_TORCH_LIBRARY_DIR}")
+  endif()
 endif()
 
 pybind11_add_module(
