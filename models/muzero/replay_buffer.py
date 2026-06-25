@@ -20,6 +20,7 @@ class MuZeroTransition:
     reward: float
     done: bool
     root_policy: np.ndarray
+    root_value: float
 
 
 class MuZeroReplayBuffer(
@@ -54,6 +55,7 @@ class MuZeroReplayBuffer(
                     reward=float(transition.reward),
                     done=bool(transition.done),
                     root_policy=np.asarray(root_policy, dtype=np.float32),
+                    root_value=float(getattr(transition, "root_value", 0.0)),
                 )
             )
         if converted:
@@ -115,6 +117,9 @@ class MuZeroReplayBuffer(
             if trajectory[idx].done:
                 break
             discount *= self.discount
+        else:
+            if end < len(trajectory):
+                value += discount * trajectory[end].root_value
         return float(value)
 
 

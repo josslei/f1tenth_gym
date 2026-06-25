@@ -65,7 +65,7 @@ def _nearest_waypoint_index(
     position_x = position[0]
     position_y = position[1]
 
-    if search_window <= 0 or search_window >= point_count:
+    if start_idx < 0 or search_window <= 0 or search_window >= point_count:
         best_idx = 0
         best_distance_sq = np.inf
         for idx in range(point_count):

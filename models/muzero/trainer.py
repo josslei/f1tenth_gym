@@ -71,7 +71,7 @@ class LightningMuZero(pl.LightningModule):
             )
             reward_loss = reward_loss + F.mse_loss(reward, target_rewards[:, step])
             discount_loss = discount_loss + F.mse_loss(
-                discount, target_discounts[:, step + 1]
+                discount, target_discounts[:, step]
             )
 
         normalizer = float(self.replay_config["unroll_steps"] + 1)
@@ -80,7 +80,9 @@ class LightningMuZero(pl.LightningModule):
         recurrent_policy_loss = recurrent_policy_loss / normalizer
         recurrent_value_loss = recurrent_value_loss / normalizer
         reward_loss = reward_loss / max(1.0, float(self.replay_config["unroll_steps"]))
-        discount_loss = discount_loss / normalizer
+        discount_loss = discount_loss / max(
+            1.0, float(self.replay_config["unroll_steps"])
+        )
 
         policy_loss = root_policy_loss + recurrent_policy_loss
         value_loss = root_value_loss + recurrent_value_loss

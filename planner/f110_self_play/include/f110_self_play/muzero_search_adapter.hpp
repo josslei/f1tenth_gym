@@ -14,6 +14,7 @@ namespace planner::f110_self_play {
 
 struct SearchBatchResult {
   torch::Tensor action_probs;
+  torch::Tensor root_values;
   std::map<std::string, double> metrics;
 };
 
@@ -33,7 +34,8 @@ public:
         device(supported_device(device)) {}
 
   inline SearchBatchResult search_batch(const torch::Tensor &obs_batch) {
-    return {search.search_batch(obs_batch.to(device)), search.get_metrics()};
+    auto action_probs = search.search_batch(obs_batch.to(device));
+    return {action_probs, search.root_values(), search.get_metrics()};
   }
 
 private:

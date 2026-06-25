@@ -49,7 +49,8 @@ py::object self_play_result_to_python(const sp::SelfPlayResult &result) {
       transitions.append(
           ns("obs"_a = tensor_row_to_array(step.obs), "action"_a = step.action,
              "reward"_a = step.reward, "done"_a = step.done,
-             "root_policy"_a = tensor_row_to_array(step.root_policy)));
+             "root_policy"_a = tensor_row_to_array(step.root_policy),
+             "root_value"_a = step.root_value));
     }
     trajectories.append(ns("transitions"_a = transitions));
   }
@@ -193,6 +194,7 @@ PYBIND11_MODULE(f110_self_play_native, m) {
                              const torch::Tensor &obs_batch) {
             auto result = self.search_batch(obs_batch);
             return simple_namespace("action_probs"_a = result.action_probs,
+                                    "root_values"_a = result.root_values,
                                     "metrics"_a = result.metrics);
           },
           py::arg("obs_batch"));

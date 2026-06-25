@@ -32,6 +32,7 @@ struct TrajectoryStep {
   float reward;
   bool done;
   torch::Tensor root_policy;
+  float root_value;
 };
 
 struct Trajectory {
@@ -89,9 +90,6 @@ public:
                               slip_terminal_penalty, q_offtrack_grad);
     }
 
-    std::vector<float> prev_actions(static_cast<std::size_t>(batch_size) * 2,
-                                    0.0f);
-
     auto obs_tensor = compute_initial_observations(states, batch_size, obs_dim);
 
     std::vector<Trajectory> active(static_cast<std::size_t>(batch_size));
@@ -105,22 +103,28 @@ public:
 
       auto action_probs =
           search_result.action_probs.to(torch::kCPU).contiguous();
+      auto root_values = search_result.root_values.to(torch::kCPU).contiguous();
       auto action_indices = sample_action_batch(action_probs);
       auto normalized_actions = action_lattice.normalized_batch(action_indices);
 
       std::vector<f110_rollout_kernel::F110Action> f110_actions(
           static_cast<std::size_t>(batch_size));
+      std::vector<float> executed_actions(
+          static_cast<std::size_t>(batch_size) * 2, 0.0f);
       auto norm_np = normalized_actions.detach().cpu().contiguous();
       for (int b = 0; b < batch_size; ++b) {
+        const float steer = norm_np[b][0].item<float>();
+        const float velocity = norm_np[b][1].item<float>();
         f110_actions[static_cast<std::size_t>(b)] = {
-            static_cast<double>(norm_np[b][0].item<float>()),
-            static_cast<double>(norm_np[b][1].item<float>())};
+            static_cast<double>(steer), static_cast<double>(velocity)};
+        executed_actions[static_cast<std::size_t>(b) * 2] = steer;
+        executed_actions[static_cast<std::size_t>(b) * 2 + 1] = velocity;
       }
 
       f110_rollout_kernel::CompleteStepBatchResult step_result;
       f110_rollout_kernel::complete_step_batch(
-          states.data(), f110_actions.data(), prev_actions.data(), track_map,
-          dynamics_params, f110_rollout_kernel::Integrator::RK4,
+          states.data(), f110_actions.data(), executed_actions.data(),
+          track_map, dynamics_params, f110_rollout_kernel::Integrator::RK4,
           reward_fns.data(), obs_config, waypoints_x.data(), waypoints_y.data(),
           static_cast<int>(waypoints_x.size()), cum_arc_lengths.data(),
           batch_size, car_length, car_width, step_result, false);
@@ -140,6 +144,7 @@ public:
             step_result.states[static_cast<std::size_t>(b)];
         auto obs_row = prev_obs.select(0, b).clone();
         auto policy_row = action_probs.select(0, b).clone();
+        float root_value = root_values[b].item<float>();
         int32_t action =
             static_cast<int32_t>(action_indices[b].item<int64_t>());
         float r = static_cast<float>(
@@ -147,7 +152,7 @@ public:
         bool done = step_result.terminals[static_cast<std::size_t>(b)] != 0;
 
         active[static_cast<std::size_t>(b)].steps.push_back(
-            {obs_row, action, r, done, policy_row});
+            {obs_row, action, r, done, policy_row, root_value});
 
         if (done) {
           completed.push_back(std::move(active[static_cast<std::size_t>(b)]));
@@ -155,19 +160,12 @@ public:
           states[static_cast<std::size_t>(b)] =
               initial_states[static_cast<std::size_t>(b)];
           reward_fns[static_cast<std::size_t>(b)].reset();
-          prev_actions[static_cast<std::size_t>(b) * 2] = 0.0f;
-          prev_actions[static_cast<std::size_t>(b) * 2 + 1] = 0.0f;
 
           std::vector<f110_rollout_kernel::F110State> reset_state{
               states[static_cast<std::size_t>(b)]};
           auto reset_obs =
               compute_initial_observations(reset_state, 1, obs_dim);
           obs_tensor.select(0, b).copy_(reset_obs.select(0, 0));
-        } else {
-          prev_actions[static_cast<std::size_t>(b) * 2] =
-              static_cast<float>(norm_np[b][0].item<float>());
-          prev_actions[static_cast<std::size_t>(b) * 2 + 1] =
-              static_cast<float>(norm_np[b][1].item<float>());
         }
       }
     }

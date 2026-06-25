@@ -59,7 +59,7 @@ inline int nearest_waypoint_index_default(const double *waypoints_x,
   int best_idx = 0;
   double best_dist_sq = std::numeric_limits<double>::infinity();
 
-  if (search_window <= 0 || search_window >= num_waypoints) {
+  if (start_idx < 0 || search_window <= 0 || search_window >= num_waypoints) {
     for (int idx = 0; idx < num_waypoints; ++idx) {
       double dx = waypoints_x[idx] - px;
       double dy = waypoints_y[idx] - py;

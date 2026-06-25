@@ -148,7 +148,6 @@ def main() -> None:
 
     args = parse_args()
     device = resolve_device(args.device)
-    torch.set_default_device(device)  # type: ignore[attr-defined]
     print(f"MuZero device: {device_name(device)}", flush=True)
     config = load_muzero_config(args.config)
     env_section = config["env"]

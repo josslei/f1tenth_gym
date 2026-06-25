@@ -144,6 +144,31 @@ struct BatchedMuZeroTree {
     return probs;
   }
 
+  inline torch::Tensor root_values_batch(int root_node) const {
+    auto values =
+        torch::zeros({shape.B}, torch::TensorOptions().dtype(torch::kFloat32));
+    float *value_ptr = values.data_ptr<float>();
+
+    for (int32_t b = 0; b < shape.B; ++b) {
+      float weighted_sum = 0.0f;
+      int32_t visit_sum = 0;
+      for (int32_t a = 0; a < shape.A; ++a) {
+        if (!is_legal(b, root_node, a)) {
+          continue;
+        }
+
+        const int32_t visits = edge_visits(b, root_node, a);
+        weighted_sum += static_cast<float>(visits) * q_value(b, root_node, a);
+        visit_sum += visits;
+      }
+
+      value_ptr[index.batch(b)] =
+          visit_sum > 0 ? weighted_sum / static_cast<float>(visit_sum) : 0.0f;
+    }
+
+    return values;
+  }
+
   inline void init_roots(int32_t player = 0) {
     for (int b = 0; b < shape.B; ++b) {
       topology.init_root(b, player);

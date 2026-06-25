@@ -44,6 +44,8 @@ public:
         selected_parent(static_cast<std::size_t>(shape.B), 0),
         selected_action(static_cast<std::size_t>(shape.B), 0),
         selected_child(static_cast<std::size_t>(shape.B), 0),
+        selected_terminal(static_cast<std::size_t>(shape.B), 0),
+        selected_child_terminal(static_cast<std::size_t>(shape.B), 0),
         path_node(static_cast<std::size_t>(shape.B) * shape.Nmax, 0),
         path_action(static_cast<std::size_t>(shape.B) * shape.Nmax, 0),
         path_length(static_cast<std::size_t>(shape.B), 0),
@@ -96,6 +98,7 @@ public:
 
     const auto root_policy_start = Clock::now();
     auto probs = root_action_probabilities();
+    last_root_values = tree.root_values_batch(/*root_node=*/0);
     metrics.root_policy_time_us += elapsed_us(root_policy_start, Clock::now());
 
     metrics.search_total_time_us = elapsed_us(total_start, Clock::now());
@@ -115,6 +118,8 @@ public:
   inline std::map<std::string, double> get_metrics() const {
     return metrics.to_map();
   }
+
+  inline torch::Tensor root_values() const { return last_root_values; }
 
 private:
   static constexpr int32_t kInitialValueOffset = 0;
@@ -282,12 +287,15 @@ private:
   torch::Tensor recurrent_payload_cpu;
   torch::Tensor recurrent_action_cpu;
   torch::Tensor legal_mask_cpu;
+  torch::Tensor last_root_values;
 
   std::mt19937 rng{std::random_device{}()};
 
   std::vector<int32_t> selected_parent;
   std::vector<int32_t> selected_action;
   std::vector<int32_t> selected_child;
+  std::vector<uint8_t> selected_terminal;
+  std::vector<uint8_t> selected_child_terminal;
 
   std::vector<int32_t> path_node;
   std::vector<int32_t> path_action;
@@ -456,6 +464,9 @@ private:
     // Selection is intentionally kept as a separate phase.
     // The final implementation can use Highway across batch lanes.
     std::fill(selected_action.begin(), selected_action.end(), 0);
+    std::fill(selected_terminal.begin(), selected_terminal.end(), 0);
+    std::fill(selected_child_terminal.begin(), selected_child_terminal.end(),
+              0);
     for (int32_t b = 0; b < shape.B; ++b) {
       int32_t node = 0;
       int32_t depth = 0;
@@ -484,6 +495,7 @@ private:
       if (!found_leaf) {
         selected_parent[index.batch(b)] = node;
         path_length[index.batch(b)] = depth;
+        selected_terminal[index.batch(b)] = tree.is_terminal(b, node) ? 1 : 0;
       }
     }
   }
@@ -501,7 +513,9 @@ private:
 
     int64_t *action_ptr = recurrent_action_cpu.data_ptr<int64_t>();
     for (int32_t b = 0; b < shape.B; ++b) {
-      action_ptr[index.batch(b)] = selected_action[index.batch(b)];
+      action_ptr[index.batch(b)] = selected_terminal[index.batch(b)]
+                                       ? 0
+                                       : selected_action[index.batch(b)];
     }
     metrics.payload_copy_time_us += elapsed_us(hidden_start, Clock::now());
 
@@ -529,6 +543,11 @@ private:
     const float *payload_ptr = recurrent.payload.data_ptr<float>();
 
     for (int32_t b = 0; b < shape.B; ++b) {
+      if (selected_terminal[index.batch(b)] != 0) {
+        selected_child[index.batch(b)] = selected_parent[index.batch(b)];
+        continue;
+      }
+
       const int32_t parent = selected_parent[index.batch(b)];
       const int32_t action = selected_action[index.batch(b)];
       const float reward = payload_ptr[recurrent_reward(b)];
@@ -537,32 +556,48 @@ private:
       const int32_t child = tree.allocate_child(
           b, parent, action, /*next_player=*/0, reward, discount);
       selected_child[index.batch(b)] = child;
-      if (child != BatchedTreeTopology::kInvalidNode && discount < 0.5f) {
+      if (child == BatchedTreeTopology::kInvalidNode) {
+        continue;
+      }
+      if (discount < 0.5f) {
         tree.topology.set_terminal(b, child, true);
+        selected_child_terminal[index.batch(b)] = 1;
+        continue;
+      }
+
+      tree.muzero.hidden_state.select(0, b).select(0, child).copy_(
+          recurrent.hidden.select(0, b));
+      tree.topology.set_expanded(b, child, true);
+      tree.topology.clear_legal_actions(b, child);
+      for (int32_t a = 0; a < shape.A; ++a) {
+        tree.edge_stats.set_prior(
+            b, child, a,
+            payload_ptr[index.batch_matrix(b, kRecurrentPolicyOffset + a,
+                                           recurrent_payload_width())]);
+        tree.topology.set_legal(b, child, a, true);
       }
     }
-
-    tree.set_hidden_batch(selected_child, recurrent.hidden);
-    tree.expand_batch(selected_child, recurrent.payload,
-                      latent_legal_mask_batch(selected_child),
-                      /*policy_offset=*/3);
   }
 
   inline void backup_selected_paths(const torch::Tensor &payload) {
     const float *payload_ptr = payload.data_ptr<float>();
 
     for (int32_t b = 0; b < shape.B; ++b) {
-      float value = payload_ptr[recurrent_value(b)];
+      float value = selected_terminal[index.batch(b)] != 0
+                        ? 0.0f
+                        : payload_ptr[recurrent_value(b)];
+      if (selected_child_terminal[index.batch(b)] != 0) {
+        value = 0.0f;
+      }
 
       for (int32_t d = path_length[index.batch(b)] - 1; d >= 0; --d) {
         const int32_t node = path_node[index.path(d, b)];
         const int32_t action = path_action[index.path(d, b)];
 
-        tree.backup_edge(b, node, action, value);
-
         const float reward = tree.reward(b, node, action);
         const float discount = tree.discount(b, node, action);
         value = reward + discount * value;
+        tree.backup_edge(b, node, action, value);
       }
     }
   }

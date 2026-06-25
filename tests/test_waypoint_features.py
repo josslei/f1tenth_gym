@@ -1,7 +1,7 @@
 import numpy as np
 
 from utils.f110_env import F1TenthObservationConfig, build_observation, observation_dim
-from utils.waypoint_utils import resample_path
+from utils.waypoint_utils import nearest_waypoint_index, resample_path
 
 
 # ── resample_path ─────────────────────────────────────────────────────────────
@@ -34,6 +34,16 @@ class TestResamplePath:
         resampled = resample_path(path, spacing=0.5)
         assert resampled.shape == (1, 2)
         assert np.allclose(resampled[0], [0.0, 0.0])
+
+
+class TestNearestWaypointIndex:
+    def test_default_start_scans_full_track(self):
+        waypoints = np.stack(
+            [np.arange(300, dtype=np.float64), np.zeros(300, dtype=np.float64)],
+            axis=1,
+        )
+
+        assert nearest_waypoint_index(waypoints, np.array([125.2, 0.0])) == 125
 
 
 # ── observation_dim with waypoints ────────────────────────────────────────────
