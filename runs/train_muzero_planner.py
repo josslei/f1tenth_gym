@@ -45,6 +45,16 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="configs/muzero/default.yaml")
     parser.add_argument(
+        "--resume",
+        default=None,
+        help="Lightning checkpoint to resume training from.",
+    )
+    parser.add_argument(
+        "--tensorboard-version",
+        default="run",
+        help="TensorBoard version subdirectory under output/tensorboard.",
+    )
+    parser.add_argument(
         "--device",
         choices=("auto", "cpu", "cuda"),
         default="auto",
@@ -276,12 +286,18 @@ def main() -> None:
 
     # Seed replay before Lightning asks the module for a dataloader.
     result = engine.generate(
-        self_play_section["rollout_steps"], search_section["batch_size"], initial_states
+        self_play_section["rollout_steps"],
+        search_section["batch_size"],
+        initial_states,
     )
     for trajectory in result.trajectories:
         replay_buffer.push(trajectory)
 
-    logger = TensorBoardLogger(save_dir=output_dir, name="tensorboard")
+    logger = TensorBoardLogger(
+        save_dir=output_dir,
+        name="tensorboard",
+        version=args.tensorboard_version,
+    )
     callbacks = [
         SelfPlayCallback(
             track_map=track_map,
@@ -325,7 +341,7 @@ def main() -> None:
         callbacks=callbacks,
         reload_dataloaders_every_n_epochs=1,
     )
-    trainer.fit(module)
+    trainer.fit(module, ckpt_path=args.resume)
 
 
 if __name__ == "__main__":
