@@ -28,10 +28,12 @@ reward:
   q_s_progress: 1.0
   q_s_alpha: 1.0
   q_s_smooth: 0.0
-  terminal_penalty: 1000000.0
+  terminal_penalty: 1000.0
   alpha_th: 0.475
-  slip_terminal_penalty: 10000.0
-  q_offtrack_grad: 1000000.0
+  slip_terminal_penalty: 100.0
+  q_offtrack_grad: 100.0
+  speed_cap_velocity: 12.0
+  speed_cap_penalty: 100.0
 
 model:
   hidden_size: 128

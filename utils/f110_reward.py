@@ -23,6 +23,8 @@ class F1TenthProgressReward:
         alpha_th: float = 0.0,
         slip_terminal_penalty: float = 0.0,
         q_offtrack_grad: float = 0.0,
+        speed_cap_velocity: float = 12.0,
+        speed_cap_penalty: float = 0.0,
         delimiter: str = ";",
         usecols: tuple[int, int] = (1, 2),
     ) -> None:
@@ -34,6 +36,8 @@ class F1TenthProgressReward:
         self.alpha_th = alpha_th
         self.slip_terminal_penalty = slip_terminal_penalty
         self.q_offtrack_grad = q_offtrack_grad
+        self.speed_cap_velocity = speed_cap_velocity
+        self.speed_cap_penalty = speed_cap_penalty
 
         if waypoints_path is not None:
             self.waypoints = np.genfromtxt(
@@ -167,8 +171,8 @@ class F1TenthProgressReward:
         reward -= self.q_offtrack_grad * self._offtrack_real(px, py, collision)
         if abs(beta) > self.alpha_th:
             reward -= self.slip_terminal_penalty
-        if np.hypot(vx, vy) > 12.0:
-            reward -= 10000.0
+        if np.hypot(vx, vy) > self.speed_cap_velocity:
+            reward -= self.speed_cap_penalty
         if self._is_backward_terminal(px, py, theta):
             reward -= self.terminal_penalty
 

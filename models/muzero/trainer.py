@@ -310,6 +310,8 @@ class SelfPlayCallback(pl.Callback):
             self.reward_config["alpha_th"],
             self.reward_config["slip_terminal_penalty"],
             self.reward_config["q_offtrack_grad"],
+            self.reward_config["speed_cap_velocity"],
+            self.reward_config["speed_cap_penalty"],
         ).generate(
             self.rollout_steps,
             int(self.initial_states.shape[0]),

@@ -59,7 +59,8 @@ public:
       const f110_rollout_kernel::F110Params &dynamics_params, double car_length,
       double car_width, double q_s_progress, double q_s_alpha,
       double q_s_smooth, double terminal_penalty, double alpha_th,
-      double slip_terminal_penalty, double q_offtrack_grad)
+      double slip_terminal_penalty, double q_offtrack_grad,
+      double speed_cap_velocity, double speed_cap_penalty)
       : search(std::move(search)), track_map(track_map), obs_config(obs_config),
         action_lattice(std::move(action_lattice)), discount(discount),
         sample_actions(sample_actions), print_metrics(print_metrics),
@@ -69,7 +70,9 @@ public:
         q_s_progress(q_s_progress), q_s_alpha(q_s_alpha),
         q_s_smooth(q_s_smooth), terminal_penalty(terminal_penalty),
         alpha_th(alpha_th), slip_terminal_penalty(slip_terminal_penalty),
-        q_offtrack_grad(q_offtrack_grad), rng(std::random_device{}()) {}
+        q_offtrack_grad(q_offtrack_grad),
+        speed_cap_velocity(speed_cap_velocity),
+        speed_cap_penalty(speed_cap_penalty), rng(std::random_device{}()) {}
 
   inline SelfPlayResult
   generate(int32_t rollout_steps, int32_t batch_size,
@@ -88,7 +91,8 @@ public:
     for (int b = 0; b < batch_size; ++b) {
       reward_fns.emplace_back(track_map, waypoints_x, waypoints_y, q_s_progress,
                               q_s_alpha, q_s_smooth, terminal_penalty, alpha_th,
-                              slip_terminal_penalty, q_offtrack_grad);
+                              slip_terminal_penalty, q_offtrack_grad,
+                              speed_cap_velocity, speed_cap_penalty);
     }
 
     auto obs_tensor = compute_initial_observations(states, batch_size, obs_dim);
@@ -230,6 +234,7 @@ private:
   double car_length, car_width;
   double q_s_progress, q_s_alpha, q_s_smooth;
   double terminal_penalty, alpha_th, slip_terminal_penalty, q_offtrack_grad;
+  double speed_cap_velocity, speed_cap_penalty;
   std::mt19937 rng;
 
   static inline long long elapsed_us(const Clock::time_point &start,

@@ -290,6 +290,8 @@ def main() -> None:
         reward_section["alpha_th"],
         reward_section["slip_terminal_penalty"],
         reward_section["q_offtrack_grad"],
+        reward_section["speed_cap_velocity"],
+        reward_section["speed_cap_penalty"],
     )
 
     # Seed replay before Lightning asks the module for a dataloader.

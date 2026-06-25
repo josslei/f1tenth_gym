@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
+import yaml
 
 from utils.f110_reward import F1TenthProgressReward
 
@@ -34,6 +37,9 @@ class TestRewardParity:
     def test_reward_matches_python(self, rollout_kernel, track_map, waypoints):
         C = rollout_kernel
         track, _ = track_map
+        reward_cfg = yaml.safe_load(
+            Path("configs/muzero/default.yaml").read_text(encoding="utf-8")
+        )["reward"]
 
         wx = waypoints[:, 0].astype(np.float64)
         wy = waypoints[:, 1].astype(np.float64)
@@ -42,24 +48,28 @@ class TestRewardParity:
             track,
             wx.tolist(),
             wy.tolist(),
-            1.0,
-            1.0,
-            0.0,
-            1000000.0,
-            0.475,
-            10000.0,
-            0.0,
+            reward_cfg["q_s_progress"],
+            reward_cfg["q_s_alpha"],
+            reward_cfg["q_s_smooth"],
+            reward_cfg["terminal_penalty"],
+            reward_cfg["alpha_th"],
+            reward_cfg["slip_terminal_penalty"],
+            reward_cfg["q_offtrack_grad"],
+            reward_cfg["speed_cap_velocity"],
+            reward_cfg["speed_cap_penalty"],
         )
 
         py_reward = F1TenthProgressReward(
             track_map=track,
-            q_s_progress=1.0,
-            q_s_alpha=1.0,
-            q_s_smooth=0.0,
-            terminal_penalty=1000000.0,
-            alpha_th=0.475,
-            slip_terminal_penalty=10000.0,
-            q_offtrack_grad=0.0,
+            q_s_progress=reward_cfg["q_s_progress"],
+            q_s_alpha=reward_cfg["q_s_alpha"],
+            q_s_smooth=reward_cfg["q_s_smooth"],
+            terminal_penalty=reward_cfg["terminal_penalty"],
+            alpha_th=reward_cfg["alpha_th"],
+            slip_terminal_penalty=reward_cfg["slip_terminal_penalty"],
+            q_offtrack_grad=reward_cfg["q_offtrack_grad"],
+            speed_cap_velocity=reward_cfg["speed_cap_velocity"],
+            speed_cap_penalty=reward_cfg["speed_cap_penalty"],
         )
         py_reward.set_waypoints(waypoints)
 

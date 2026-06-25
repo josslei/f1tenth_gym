@@ -22,13 +22,17 @@ public:
                      double q_s_progress = 1.0, double q_s_alpha = 1.0,
                      double q_s_smooth = 0.0, double terminal_penalty = 1000.0,
                      double alpha_th = 0.0, double slip_terminal_penalty = 0.0,
-                     double q_offtrack_grad = 0.0)
+                     double q_offtrack_grad = 0.0,
+                     double speed_cap_velocity = 12.0,
+                     double speed_cap_penalty = 0.0)
       : track_map_(&track_map), waypoints_x_(waypoints_x),
         waypoints_y_(waypoints_y), q_s_progress_(q_s_progress),
         q_s_alpha_(q_s_alpha), q_s_smooth_(q_s_smooth),
         terminal_penalty_(terminal_penalty), alpha_th_(alpha_th),
         slip_terminal_penalty_(slip_terminal_penalty),
-        q_offtrack_grad_(q_offtrack_grad) {
+        q_offtrack_grad_(q_offtrack_grad),
+        speed_cap_velocity_(speed_cap_velocity),
+        speed_cap_penalty_(speed_cap_penalty) {
     build_arc();
   }
 
@@ -37,12 +41,16 @@ public:
                      double q_s_progress = 1.0, double q_s_alpha = 1.0,
                      double q_s_smooth = 0.0, double terminal_penalty = 1000.0,
                      double alpha_th = 0.0, double slip_terminal_penalty = 0.0,
-                     double q_offtrack_grad = 0.0)
+                     double q_offtrack_grad = 0.0,
+                     double speed_cap_velocity = 12.0,
+                     double speed_cap_penalty = 0.0)
       : waypoints_x_(waypoints_x), waypoints_y_(waypoints_y),
         q_s_progress_(q_s_progress), q_s_alpha_(q_s_alpha),
         q_s_smooth_(q_s_smooth), terminal_penalty_(terminal_penalty),
         alpha_th_(alpha_th), slip_terminal_penalty_(slip_terminal_penalty),
-        q_offtrack_grad_(q_offtrack_grad) {
+        q_offtrack_grad_(q_offtrack_grad),
+        speed_cap_velocity_(speed_cap_velocity),
+        speed_cap_penalty_(speed_cap_penalty) {
     build_arc();
   }
 
@@ -96,8 +104,8 @@ public:
       reward -= slip_terminal_penalty_;
     }
 
-    if (std::hypot(vx, vy) > 12.0) {
-      reward -= 10000.0;
+    if (std::hypot(vx, vy) > speed_cap_velocity_) {
+      reward -= speed_cap_penalty_;
     }
 
     if (is_backward_terminal(px, py, theta)) {
@@ -236,6 +244,8 @@ private:
   double alpha_th_ = 0.0;
   double slip_terminal_penalty_ = 0.0;
   double q_offtrack_grad_ = 0.0;
+  double speed_cap_velocity_ = 12.0;
+  double speed_cap_penalty_ = 0.0;
 
   double prev_arc_length_ = 0.0;
   double last_action_0_ = 0.0;

@@ -215,7 +215,8 @@ PYBIND11_MODULE(f110_self_play_native, m) {
                   const rk::F110Params &dynamics_params, double car_length,
                   double car_width, double q_s_progress, double q_s_alpha,
                   double q_s_smooth, double terminal_penalty, double alpha_th,
-                  double slip_terminal_penalty, double q_offtrack_grad) {
+                  double slip_terminal_penalty, double q_offtrack_grad,
+                  double speed_cap_velocity, double speed_cap_penalty) {
                  auto wx = waypoints_x.unchecked<1>();
                  auto wy = waypoints_y.unchecked<1>();
                  auto ca = cum_arc_lengths.unchecked<1>();
@@ -237,7 +238,8 @@ PYBIND11_MODULE(f110_self_play_native, m) {
                      print_metrics, std::move(wxv), std::move(wyv),
                      std::move(cav), dynamics_params, car_length, car_width,
                      q_s_progress, q_s_alpha, q_s_smooth, terminal_penalty,
-                     alpha_th, slip_terminal_penalty, q_offtrack_grad);
+                     alpha_th, slip_terminal_penalty, q_offtrack_grad,
+                     speed_cap_velocity, speed_cap_penalty);
                }),
            py::arg("search"), py::arg("track_map"), py::arg("obs_config"),
            py::arg("action_lattice"), py::arg("discount"),
@@ -248,7 +250,9 @@ PYBIND11_MODULE(f110_self_play_native, m) {
            py::arg("q_s_progress") = 1.0, py::arg("q_s_alpha") = 1.0,
            py::arg("q_s_smooth") = 0.0, py::arg("terminal_penalty") = 1000.0,
            py::arg("alpha_th") = 0.0, py::arg("slip_terminal_penalty") = 0.0,
-           py::arg("q_offtrack_grad") = 0.0)
+           py::arg("q_offtrack_grad") = 0.0,
+           py::arg("speed_cap_velocity") = 12.0,
+           py::arg("speed_cap_penalty") = 0.0)
       .def(
           "generate",
           [](sp::SelfPlayEngine &self, int32_t rollout_steps,
