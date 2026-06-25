@@ -683,7 +683,7 @@ private:
   inline void print_metrics_summary() const {
     const auto metrics_map = metrics.to_map();
 
-    std::cout << "\n---------------- Search Metrics ----------------"
+    std::cout << "\n\n---------------- Search Metrics ----------------"
               << std::endl;
     std::cout << "[Search]" << std::endl;
     std::cout << "  total:   "
@@ -733,7 +733,7 @@ private:
     std::cout << "  simulations/sec: "
               << metrics_map.at("throughput/simulations_per_second")
               << std::endl;
-    std::cout << "------------------------------------------------\n"
+    std::cout << "------------------------------------------------\n\n"
               << std::endl;
   }
 };

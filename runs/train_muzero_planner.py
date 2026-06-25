@@ -18,6 +18,7 @@ from models.muzero import (
     DiscreteActionConfig,
     DiscreteActionSpace,
     F110MuZeroNet,
+    PublishedModelClock,
     LightningMuZero,
     MuZeroReplayBuffer,
     SelfPlayCallback,
@@ -218,6 +219,10 @@ def main() -> None:
         replay_config=replay_section,
     )
 
+    if args.resume is not None:
+        checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
+        module.load_state_dict(checkpoint["state_dict"])
+
     map_path = str(_resolve_map_path(env_config["map"]))
     track_map, car_length, car_width = load_track_map(
         map_path,
@@ -240,10 +245,13 @@ def main() -> None:
         float(self_play_section["initial_velocity"]),
     )
 
+    model_clock = PublishedModelClock()
+
     model_path = output_dir / "current_model.pt"
     scripted = torch.jit.script(model.eval()).to(device)
     scripted.save(str(model_path))
     model.train()
+    model_clock.publish()
     print(f"MuZero scripted model: {model_path}", flush=True)
 
     search = MuZeroSearchAdapter(
@@ -300,6 +308,8 @@ def main() -> None:
     )
     callbacks = [
         SelfPlayCallback(
+            model_clock=model_clock,
+            hidden_size=model.hidden_size,
             track_map=track_map,
             observation_config=native_obs_config,
             action_lattice=action_lattice,
@@ -322,7 +332,7 @@ def main() -> None:
             device=device,
             model_path=str(output_dir / "current_model.pt"),
         ),
-        TorchScriptExportCallback(str(output_dir / "checkpoints")),
+        TorchScriptExportCallback(str(output_dir / "checkpoints"), model_clock),
         ModelCheckpoint(
             dirpath=output_dir / "checkpoints",
             filename="muzero-{epoch:04d}",

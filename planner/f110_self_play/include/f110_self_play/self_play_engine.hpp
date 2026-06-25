@@ -79,8 +79,9 @@ public:
     metrics["self_play/batch_size"] = static_cast<double>(batch_size);
     std::vector<f110_rollout_kernel::F110State> states = initial_states;
     int obs_dim = f110_rollout_kernel::observation_dim(obs_config);
-    std::cout << "Self-play engine started: batch_size=" << batch_size
-              << ", rollout_steps=" << rollout_steps << std::endl;
+    std::cout << "\nSelf-play engine started: batch_size=" << batch_size
+              << ", rollout_steps=" << rollout_steps << "\n"
+              << std::endl;
 
     std::vector<f110_gym::F110ProgressReward> reward_fns;
     reward_fns.reserve(static_cast<std::size_t>(batch_size));
@@ -458,7 +459,7 @@ private:
       return it != m.end() ? it->second : 0.0;
     };
 
-    std::cout << "---------------- Self-Play Metrics ----------------"
+    std::cout << "\n---------------- Self-Play Metrics ----------------"
               << std::endl;
     std::cout << "[Rollout]" << std::endl;
     std::cout << "  search steps: " << v("self_play/search_steps")
@@ -499,6 +500,7 @@ private:
               << v("search/simulations_per_lane")
               << " | simulations/search_call: "
               << v("search/simulations_per_search_call") << std::endl;
+    std::cout << std::endl;
   }
 };
 
