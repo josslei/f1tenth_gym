@@ -186,10 +186,17 @@ public:
     result.metrics = std::move(metrics);
     result.metrics["self_play/trajectories"] =
         static_cast<double>(result.trajectories.size());
+    std::vector<Trajectory> completed_trajectories;
+    completed_trajectories.reserve(result.trajectories.size());
+    for (const auto &trajectory : result.trajectories) {
+      if (!trajectory.steps.empty() && trajectory.steps.back().done) {
+        completed_trajectories.push_back(trajectory);
+      }
+    }
     result.metrics["self_play/episode_return"] =
-        mean_trajectory_return(result.trajectories);
+        mean_trajectory_return(completed_trajectories);
     result.metrics["self_play/discounted_episode_return"] =
-        mean_discounted_trajectory_return(result.trajectories, discount);
+        mean_discounted_trajectory_return(completed_trajectories, discount);
     result.metrics["self_play/search_steps"] =
         result.metrics.count("self_play/search_steps")
             ? result.metrics.at("self_play/search_steps")

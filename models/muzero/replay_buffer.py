@@ -120,6 +120,8 @@ class MuZeroReplayBuffer(
         else:
             if end < len(trajectory):
                 value += discount * trajectory[end].root_value
+            elif not trajectory[-1].done:
+                value += discount * trajectory[-1].root_value
         return float(value)
 
 

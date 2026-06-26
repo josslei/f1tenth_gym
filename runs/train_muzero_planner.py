@@ -334,7 +334,7 @@ def main() -> None:
             device=device,
             model_path=str(output_dir / "current_model.pt"),
         ),
-        TorchScriptExportCallback(str(output_dir / "checkpoints"), model_clock),
+        TorchScriptExportCallback(str(output_dir), model_clock),
         ModelCheckpoint(
             dirpath=output_dir / "checkpoints",
             filename="muzero-{epoch:04d}",
