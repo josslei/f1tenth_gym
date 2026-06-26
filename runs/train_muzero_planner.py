@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import faulthandler
+import os
 from pathlib import Path
 
 import lightning as pl
@@ -40,6 +41,16 @@ from utils.f110_env import (
 from utils.track_map import load_track_map
 from utils.waypoint_view import initial_pose_from_waypoints
 from utils.waypoint_utils import cumulative_arc_lengths
+
+# Keep CPU thread pools small by default; this training loop already uses
+# application-level parallelism through self-play and native search.
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+
+# Keep the runtime torch pools small; self-play/search already provides
+# application-level parallelism.
+torch.set_num_threads(1)  # type: ignore[attr-defined]
+torch.set_num_interop_threads(1)  # type: ignore[attr-defined]
 
 
 def parse_args() -> argparse.Namespace:
