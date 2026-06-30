@@ -20,7 +20,7 @@ class MapConfig:
     grid, map image, and centerline.  ``map`` and ``map_ext`` are passed
     to ``gym.make(..., map=, map_ext=)`` (via ``F110Env.update_map``
     at epoch boundaries); ``centerline_csv`` supplies the forward-progress
-    waypoints and the initial reset pose.
+    waypoints and the reset pose.
     """
 
     name: str

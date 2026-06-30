@@ -310,18 +310,14 @@ def main() -> None:
     else:
         # Fallback for single-map configs (no maps section).
         env_config = dict(config.env)
-        centerline_csv = env_config.pop("centerline_csv", None)
-        centerline_data: np.ndarray | None = None
-        if centerline_csv:
-            centerline_data = np.loadtxt(centerline_csv, delimiter=",", skiprows=1)
-            reset_pose = initial_pose_from_waypoints(centerline_data[:, :2])
-        else:
-            reset_pose = np.asarray(env_config.pop("initial_pose"), dtype=np.float64)
+        centerline_csv = env_config.pop("centerline_csv")
+        centerline_data = np.loadtxt(centerline_csv, delimiter=",", skiprows=1)
+        reset_pose = initial_pose_from_waypoints(centerline_data[:, :2])
         epoch_schedule = []
         map_waypoints = {}
         map_poses = {}
         map_track_maps = {}
-        first_wp = centerline_data[:, :2] if centerline_data is not None else None
+        first_wp = centerline_data[:, :2]
         first_track_map = load_track_map(
             env_config["map"], env_config.get("map_ext", ".png")
         )[0]
@@ -392,6 +388,9 @@ def main() -> None:
         )
         callbacks.append(val_cb)
     elif config.validation is not None:
+        validation_centerline = np.loadtxt(
+            config.validation.centerline_csv, delimiter=",", skiprows=1
+        )[:, :2]
         val_cb = ValidationCallback(
             val_maps=[
                 MapConfig(
@@ -406,16 +405,12 @@ def main() -> None:
             action_config=action_config,
             max_episode_steps=rollout_steps,
             device=DEFAULT_DEVICE,
-            map_waypoints=(
-                {
-                    Path(config.validation.map).stem: np.loadtxt(
-                        config.validation.centerline_csv, delimiter=",", skiprows=1
-                    )[:, :2]
-                }
-                if config.validation.centerline_csv
-                else {}
-            ),
-            map_poses={},
+            map_waypoints={Path(config.validation.map).stem: validation_centerline},
+            map_poses={
+                Path(config.validation.map).stem: initial_pose_from_waypoints(
+                    validation_centerline
+                )
+            },
             laps_to_complete=int(config.env.get("laps_to_complete", 2)),
         )
         callbacks.append(val_cb)

@@ -191,7 +191,6 @@ def main() -> None:
 
     env_config = dict(env_section)
     centerline_csv = env_config.pop("centerline_csv")
-    env_config.pop("initial_pose", None)
     centerline = np.loadtxt(centerline_csv, delimiter=",", skiprows=1)[:, :2]
     reset_pose = initial_pose_from_waypoints(centerline)
 

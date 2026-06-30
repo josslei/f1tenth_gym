@@ -4,8 +4,6 @@ env:
   num_agents: 1
   laps_to_complete: 1
   render_mode:
-  initial_pose:
-    - [1.0748956, -0.1528569, 0.0349893]
   centerline_csv: maps/custom/f110_gym_10/f110_gym_centerline.csv
 
 observation:

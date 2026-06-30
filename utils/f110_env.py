@@ -21,12 +21,7 @@ from utils.waypoint_utils import nearest_waypoint_index, resample_path
 
 
 DEFAULT_MAP = "Spielberg"
-DEFAULT_POSE = np.array([[0.0, 0.0, 0.0]], dtype=np.float64)
 DEFAULT_DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-
-def initial_pose() -> np.ndarray:
-    return DEFAULT_POSE.copy()
 
 
 def add_control_state(obs: dict[str, Any], env: Any) -> dict[str, Any]:
@@ -658,14 +653,12 @@ class RolloutDataModule(pl.LightningDataModule):
 
 __all__ = [
     "DEFAULT_MAP",
-    "DEFAULT_POSE",
     "F1TenthActionConfig",
     "F1TenthObservationConfig",
     "RolloutDataModule",
     "RolloutDataset",
     "SubprocVecEnv",
     "build_observation",
-    "initial_pose",
     "observation_dim",
     "obs_tensor",
     "scale_action",
