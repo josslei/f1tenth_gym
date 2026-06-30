@@ -26,6 +26,8 @@ Rendering engine for f1tenth gym env based on pyglet and OpenGL
 Author: Hongrui Zheng
 """
 
+import time
+
 # other
 import numpy as np
 
@@ -113,19 +115,21 @@ class EnvRenderer(pyglet.window.Window):
             "Lap Time: {laptime:.2f}, Ego Lap Count: {count:.0f}".format(
                 laptime=0.0, count=0.0
             ),
-            font_size=36,
+            font_size=18,
             x=0,
-            y=-800,
-            anchor_x="center",
-            anchor_y="center",
-            # width=0.01,
-            # height=0.01,
+            y=0,
+            anchor_x="left",
+            anchor_y="top",
             color=(255, 255, 255, 255),
             batch=self.batch,
         )
 
         self.window_closed = False
         self.fps_display = pyglet.window.FPSDisplay(self)
+        self._last_draw_time = 0.0
+        self._latest_fps = 0.0
+        self._lap_time = 0.0
+        self._lap_count = 0.0
 
     def _apply_camera_bounds(self) -> None:
         self.left = self.camera_x - 0.5 * self.zoomed_width
@@ -310,9 +314,18 @@ class EnvRenderer(pyglet.window.Window):
         # Clear window with ClearColor
         gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT)  # pyright: ignore[reportPrivateImportUsage]
 
+        now = time.perf_counter()
+        if self._last_draw_time > 0.0:
+            self._latest_fps = 1.0 / (now - self._last_draw_time)
+        self._last_draw_time = now
+        self.score_label.text = "Lap Time: {laptime:.2f}, Ego Lap Count: {count:.0f}, FPS: {fps:.1f}".format(
+            laptime=self._lap_time,
+            count=self._lap_count,
+            fps=self._latest_fps,
+        )
+
         # Draw all batches
         self.batch.draw()
-        self.fps_display.draw()
 
     def update_obs(self, obs):
         """
@@ -410,6 +423,8 @@ class EnvRenderer(pyglet.window.Window):
             RENDER_SCALE * float(poses_x[self.ego_idx]),
             RENDER_SCALE * float(poses_y[self.ego_idx]),
         )
+        self.score_label.x = self.left + 20.0
+        self.score_label.y = self.top - 20.0
         for j in range(poses.shape[0]):
             vertices_np = RENDER_SCALE * get_vertices(
                 poses[j, :], CAR_LENGTH, CAR_WIDTH
@@ -417,9 +432,5 @@ class EnvRenderer(pyglet.window.Window):
             vertices = _flatten_vertices(vertices_np)
             self.cars[j].set_attribute_data("position", vertices)
         self.poses = poses
-
-        self.score_label.text = (
-            "Lap Time: {laptime:.2f}, Ego Lap Count: {count:.0f}".format(
-                laptime=obs["lap_times"][0], count=obs["lap_counts"][obs["ego_idx"]]
-            )
-        )
+        self._lap_time = float(obs["lap_times"][0])
+        self._lap_count = float(obs["lap_counts"][obs["ego_idx"]])
