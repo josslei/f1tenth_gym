@@ -26,3 +26,7 @@ The presets intentionally do not force a CMake generator.
 
 Run `scripts/build_native_backends_release.sh` or
 `scripts/build_native_backends_debug.sh` from the repo root.
+
+Those scripts build this self-play extension by default because it is the only
+native module loaded by MuZero training. Pass `--all` to also build the standalone
+`planner/tree_search` and `gym/f110_gym/rollout_kernel` bindings.

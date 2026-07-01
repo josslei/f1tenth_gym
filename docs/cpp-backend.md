@@ -1,17 +1,20 @@
 # Native C++ Backend
 
-This document covers the shared native backend used by planner training.
+This document covers the native backend used by planner training.
 Module-specific details stay in each module README.
 
 ## What It Is
 
-The backend is split into two native packages:
+The backend is split across native packages:
 
 - `planner/tree_search/`: generic MuZero/tree-search code
 - `planner/f110_self_play/`: F110 self-play orchestration around that search
+- `gym/f110_gym/rollout_kernel/`: standalone F110 rollout bindings used by
+  parity tests and native driving utilities
 
-The Python training entrypoint loads both modules and saves a TorchScript model
-that the native search adapter reads from disk.
+The Python training entrypoint loads `planner/f110_self_play` only. That native
+extension embeds the generic tree-search headers and the rollout-kernel sources
+it needs, then reads the TorchScript model from disk.
 
 ## Dependencies
 
@@ -25,7 +28,9 @@ The native build expects vendored third-party libraries under `thirdparty/`:
 
 ## Build
 
-Each package has its own CMake project and debug preset.
+Each package has its own CMake project and debug preset. The repo-level scripts
+build only the MuZero training backend by default to avoid compiling standalone
+modules that training does not load.
 
 ```bash
 # release build
@@ -33,6 +38,10 @@ scripts/build_native_backends_release.sh
 
 # debug build (symbols, assertions)
 scripts/build_native_backends_debug.sh
+
+# full standalone/debugging build, matching the old behavior
+scripts/build_native_backends_release.sh --all
+scripts/build_native_backends_debug.sh --all
 ```
 
 From `planner/tree_search/`:
@@ -55,7 +64,7 @@ Use the debug preset when you need symbols, assertions, or a crash trace.
 
 If the planner segfaults:
 
-1. Rebuild both native packages with the debug preset.
+1. Rebuild the self-play backend with the debug preset.
 2. Run the Python entrypoint again.
 3. If the crash is still opaque, run under `lldb`:
 
@@ -97,7 +106,7 @@ tensor before changing search or environment logic.
    `outputs/rl/muzero_f110_gym_10/current_model.pt`.
 1. `planner/f110_self_play.MuZeroSearchAdapter` loads that scripted model from
    disk.
-1. Native self-play calls into the search backend and the Gym backend.
+1. Native self-play calls the embedded tree-search and rollout-kernel code.
 
 ## Device Behavior
 
@@ -122,7 +131,7 @@ Native metrics are not printed by default.
 
 ## Troubleshooting Checklist
 
-- Rebuild in debug mode if the `.so` was built in release mode.
+- Rebuild `planner/f110_self_play` in debug mode if the `.so` was built in release mode.
 - Make sure `current_model.pt` exists before constructing the search adapter.
 - Confirm the TorchScript model device matches the tensor device used by the
   native search call.

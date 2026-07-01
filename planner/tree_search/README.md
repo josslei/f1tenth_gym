@@ -65,8 +65,11 @@ cmake --build planner/tree_search/build
 
 The default release build includes local CPU tuning.
 
-Run `scripts/build_native_backends_release.sh` or
-`scripts/build_native_backends_debug.sh` from the repo root.
+Run `scripts/build_native_backends_release.sh --all` or
+`scripts/build_native_backends_debug.sh --all` from the repo root to include this
+standalone binding in the repo-level build. Without `--all`, the scripts build
+only `planner/f110_self_play`, which embeds the tree-search headers needed by
+MuZero training.
 
 The build creates the pybind11 extension target `tree_search_native` and writes
 the extension into `planner/tree_search/` so `backend.py` can import it directly.
