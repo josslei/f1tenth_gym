@@ -13,3 +13,6 @@
 [submodule "thirdparty/pybind11"]
 	path = thirdparty/pybind11
 	url = git@github.com:pybind/pybind11
+[submodule "thirdparty/Racing-LMPC-ROS2"]
+	path = thirdparty/Racing-LMPC-ROS2
+	url = git@github.com:MPC-Berkeley/Racing-LMPC-ROS2
