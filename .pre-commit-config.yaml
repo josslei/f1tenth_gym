@@ -25,6 +25,7 @@ repos:
     rev: v1.1.363
     hooks:
       - id: pyright
+        exclude: ^thirdparty/Racing-LMPC-ROS2/
         additional_dependencies:
           - gymnasium>=1.0
           - numpy>=1.23

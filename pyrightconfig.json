@@ -6,5 +6,6 @@
   ],
   "exclude": [
     "gym/f110_gym/envs/f110_env_backup.py",
+    "thirdparty/Racing-LMPC-ROS2/**"
   ]
 }
