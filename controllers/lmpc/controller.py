@@ -192,7 +192,7 @@ class LMPCController(Controller):
         command = self.native_controller.control()
         return ControlCommand(
             steering=float(command.steering),
-            velocity=self._target_speed_at_current_s(float(command.velocity)),
+            velocity=float(command.velocity),
         )
 
     def _target_speed_at_current_s(self, fallback: float) -> float:

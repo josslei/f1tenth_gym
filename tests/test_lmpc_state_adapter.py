@@ -140,7 +140,7 @@ def test_lmpc_controller_loads_upstream_trajectory_table(monkeypatch, tmp_path) 
     assert native.reference.left_bound == pytest.approx(1.0)
     assert native.reference.right_bound == pytest.approx(1.0)
     assert command.steering == pytest.approx(0.1)
-    assert command.velocity == pytest.approx(4.0)
+    assert command.velocity == pytest.approx(2.0)
 
 
 def test_lmpc_controller_updates_from_full_gym_observation(monkeypatch) -> None:

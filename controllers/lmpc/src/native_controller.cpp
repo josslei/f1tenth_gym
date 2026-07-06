@@ -27,6 +27,7 @@ namespace kb = ::lmpc::vehicle_model::kinematic_bicycle_model;
 namespace rt = ::lmpc::vehicle_model::racing_trajectory;
 
 constexpr double kTerminalSlackPenalty = 1.0e4;
+constexpr double kVehicleMass = 3.47;
 
 double clamp(double value, double low, double high) {
   return std::min(std::max(value, low), high);
@@ -255,6 +256,12 @@ private:
       cost += 1.0e-3 * ui(kb::UIndex::FB) * ui(kb::UIndex::FB);
       cost += 0.1 * ui(kb::UIndex::STEER) * ui(kb::UIndex::STEER);
 
+      opti_.subject_to(
+          opti_.bounded(0.0, ui(kb::UIndex::FD), config_.max_drive_force));
+      opti_.subject_to(
+          opti_.bounded(config_.max_brake_force, ui(kb::UIndex::FB), 0.0));
+      opti_.subject_to(opti_.bounded(-config_.max_steer, ui(kb::UIndex::STEER),
+                                     config_.max_steer));
       opti_.subject_to(xi(kb::XIndex::PY) >= -right_bound_);
       opti_.subject_to(xi(kb::XIndex::PY) <= left_bound_);
       opti_.subject_to(opti_.bounded(
@@ -287,8 +294,11 @@ private:
                                            const casadi::DM &u) const {
     const double steer = clamp(static_cast<double>(u(kb::UIndex::STEER, 0)),
                                -config_.max_steer, config_.max_steer);
-    (void)x;
-    const double velocity = clamp(current_reference_.target_speed, 0.0,
+    const double fd = static_cast<double>(u(kb::UIndex::FD, 0));
+    const double fb = static_cast<double>(u(kb::UIndex::FB, 0));
+    const double v = static_cast<double>(x(kb::XIndex::V, 0));
+    const double acceleration = (fd + fb) / kVehicleMass;
+    const double velocity = clamp(v + config_.dt * acceleration, 0.0,
                                   std::max(config_.target_speed * 2.0, 5.0));
     return LmpcControlCommand{steer, velocity};
   }
