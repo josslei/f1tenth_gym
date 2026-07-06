@@ -46,6 +46,18 @@ def test_lmpc_controller_projects_centerline_before_native_update(monkeypatch) -
         def control(self) -> NativeCommand:
             return NativeCommand()
 
+        def sample_count(self) -> int:
+            return 12
+
+        def completed_laps(self) -> int:
+            return 1
+
+        def lap_sample_count(self) -> int:
+            return 5
+
+        def last_safe_set_points(self) -> int:
+            return 7
+
     monkeypatch.setattr(controller_module, "NativeLMPCController", NativeController)
     controller = LMPCController(
         np.array([0.0, 10.0]),
@@ -60,10 +72,15 @@ def test_lmpc_controller_projects_centerline_before_native_update(monkeypatch) -
     command = controller.control()
 
     assert native.state is not None
-    assert native.config.regression_horizon_stride == 4
+    assert native.config.regression_horizon_stride == 8
+    assert native.config.track_length == pytest.approx(10.0)
     assert native.state.to_array() == pytest.approx([3.0, 2.0, 0.1, 4.0, 0.5, 0.2])
     assert command.steering == pytest.approx(0.1)
     assert command.velocity == pytest.approx(2.0)
+    assert controller.sample_count() == 12
+    assert controller.completed_laps() == 1
+    assert controller.lap_sample_count() == 5
+    assert controller.last_safe_set_points() == 7
 
 
 def test_lmpc_controller_loads_upstream_trajectory_table(monkeypatch, tmp_path) -> None:
@@ -140,10 +157,13 @@ def test_lmpc_controller_loads_upstream_trajectory_table(monkeypatch, tmp_path) 
     command = controller.control()
 
     assert native.config.target_speed == pytest.approx(4.0)
-    assert native.config.regression_horizon_stride == 0
+    assert native.config.regression_horizon_stride == 8
+    assert native.config.track_length == pytest.approx(10.0)
     assert native.state.to_array() == pytest.approx([5.0, 0.0, 0.0, 4.0, 0.0, 0.0])
     assert native.reference.target_speed == pytest.approx(4.0)
     assert native.reference.curvature == pytest.approx(0.1)
+    assert len(native.reference.curvature_sequence) == native.config.horizon - 1
+    assert native.reference.curvature_sequence[0] == pytest.approx(0.1)
     assert native.reference.left_bound == pytest.approx(1.0)
     assert native.reference.right_bound == pytest.approx(1.0)
     assert command.steering == pytest.approx(0.1)

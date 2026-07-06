@@ -142,6 +142,7 @@ public:
     lap_sample_count_ = 0;
     total_sample_count_ = 0;
     completed_laps_ = 0;
+    last_safe_set_points_ = 0;
     elapsed_time_ = 0.0;
     last_recorded_s_ = 0.0;
     has_recorded_sample_ = false;
@@ -165,7 +166,7 @@ public:
 
     opti_.set_value(x0_, x0);
     opti_.set_value(dt_, config_.dt);
-    opti_.set_value(kappa_, DM::ones(1, N - 1) * current_reference_.curvature);
+    opti_.set_value(kappa_, curvature_horizon(N - 1));
     opti_.set_value(target_speed_, current_reference_.target_speed);
     opti_.set_value(left_bound_, current_reference_.left_bound);
     opti_.set_value(right_bound_, current_reference_.right_bound);
@@ -209,8 +210,32 @@ public:
 
   const SparseErrorModel &error_model() const { return error_model_; }
   std::size_t sample_count() const { return total_sample_count_; }
+  std::size_t completed_laps() const { return completed_laps_; }
+  std::size_t lap_sample_count() const { return lap_sample_count_; }
+  std::size_t last_safe_set_points() const { return last_safe_set_points_; }
 
 private:
+  casadi::DM curvature_horizon(casadi_int horizon_steps) const {
+    casadi::DM values =
+        casadi::DM::ones(1, horizon_steps) * current_reference_.curvature;
+    const auto sequence_size =
+        static_cast<casadi_int>(current_reference_.curvature_sequence.size());
+    const auto count = std::min(horizon_steps, sequence_size);
+    for (casadi_int i = 0; i < count; ++i) {
+      values(i) =
+          current_reference_.curvature_sequence[static_cast<std::size_t>(i)];
+    }
+    return values;
+  }
+
+  double curvature_at(casadi_int horizon_index) const {
+    const auto index = static_cast<std::size_t>(horizon_index);
+    if (index < current_reference_.curvature_sequence.size()) {
+      return current_reference_.curvature_sequence[index];
+    }
+    return current_reference_.curvature;
+  }
+
   void build_solver() {
     using casadi::DM;
     using casadi::MX;
@@ -248,10 +273,13 @@ private:
                                    casadi::MX::mtimes({B_params_[i], ui}) +
                                    C_params_[i]);
 
-      cost += 3.0 * xi(kb::XIndex::PY) * xi(kb::XIndex::PY);
-      cost += 1.5 * xi(kb::XIndex::YAW) * xi(kb::XIndex::YAW);
+      cost += config_.lateral_weight * xi(kb::XIndex::PY) * xi(kb::XIndex::PY);
+      cost +=
+          config_.heading_weight * xi(kb::XIndex::YAW) * xi(kb::XIndex::YAW);
       const auto dv = xi(kb::XIndex::V) - target_speed_;
-      cost += 0.5 * dv * dv;
+      cost += config_.speed_weight * dv * dv;
+      cost -=
+          config_.progress_weight * (xip1(kb::XIndex::PX) - xi(kb::XIndex::PX));
       cost += 1.0e-3 * ui(kb::UIndex::FD) * ui(kb::UIndex::FD);
       cost += 1.0e-3 * ui(kb::UIndex::FB) * ui(kb::UIndex::FB);
       cost += 0.1 * ui(kb::UIndex::STEER) * ui(kb::UIndex::STEER);
@@ -273,10 +301,13 @@ private:
     opti_.subject_to(casadi::MX::sum1(lambda_) == 1.0);
     opti_.subject_to(xN ==
                      casadi::MX::mtimes({ss_x_, lambda_}) + terminal_slack_);
-    cost += casadi::MX::mtimes({ss_costs_, lambda_});
+    cost +=
+        config_.safe_set_cost_weight * casadi::MX::mtimes({ss_costs_, lambda_});
     cost += kTerminalSlackPenalty * casadi::MX::sumsqr(terminal_slack_);
-    cost += 10.0 * xN(kb::XIndex::PY) * xN(kb::XIndex::PY);
-    cost += 5.0 * xN(kb::XIndex::YAW) * xN(kb::XIndex::YAW);
+    cost += config_.terminal_lateral_weight * xN(kb::XIndex::PY) *
+            xN(kb::XIndex::PY);
+    cost += config_.terminal_heading_weight * xN(kb::XIndex::YAW) *
+            xN(kb::XIndex::YAW);
     opti_.minimize(cost);
 
     const auto p_opts = casadi::Dict{{"expand", true}, {"print_time", false}};
@@ -371,18 +402,19 @@ private:
     A_values_.reserve(config_.horizon - 1);
     B_values_.reserve(config_.horizon - 1);
     C_values_.reserve(config_.horizon - 1);
-    casadi::DM dA = casadi::DM::zeros(model_.nx(), model_.nx());
-    casadi::DM dB = casadi::DM::zeros(model_.nx(), model_.nu());
-    casadi::DM dC = casadi::DM::zeros(model_.nx(), 1);
     for (casadi_int i = 0; i < static_cast<casadi_int>(config_.horizon - 1);
          ++i) {
+      casadi::DM dA = casadi::DM::zeros(model_.nx(), model_.nx());
+      casadi::DM dB = casadi::DM::zeros(model_.nx(), model_.nu());
+      casadi::DM dC = casadi::DM::zeros(model_.nx(), 1);
       const casadi::DM x_ref = x_init(Slice(), i);
       const casadi::DM u_ref =
           solved_ ? last_u_(Slice(), i) : previous_native_u_;
       casadi::DM A;
       casadi::DM B;
       casadi::DM C;
-      compute_nominal_affine_model(x_ref, u_ref, A, B, C);
+      const double curvature = curvature_at(i);
+      compute_nominal_affine_model(x_ref, u_ref, curvature, A, B, C);
       if (completed_laps_ > 0 && should_update_regression(i)) {
         compute_regression_residual(x_ref, u_ref, A, B, C, dA, dB, dC);
       }
@@ -407,12 +439,12 @@ private:
   }
 
   void compute_nominal_affine_model(const casadi::DM &x, const casadi::DM &u,
-                                    casadi::DM &reg_a, casadi::DM &reg_b,
-                                    casadi::DM &reg_c) {
+                                    double curvature, casadi::DM &reg_a,
+                                    casadi::DM &reg_b, casadi::DM &reg_c) {
     const auto jac = model_.discrete_dynamics_jacobian()(casadi::DMDict{
         {"x", x},
         {"u", u},
-        {"k", casadi::DM{current_reference_.curvature}},
+        {"k", casadi::DM{curvature}},
         {"dt", casadi::DM{config_.dt}},
     });
     reg_a = jac.at("A");
@@ -421,7 +453,7 @@ private:
                           .discrete_dynamics()(casadi::DMDict{
                               {"x", x},
                               {"u", u},
-                              {"k", casadi::DM{current_reference_.curvature}},
+                              {"k", casadi::DM{curvature}},
                               {"dt", casadi::DM{config_.dt}},
                           })
                           .at("xip1");
@@ -484,6 +516,7 @@ private:
           static_cast<casadi_int>(config_.reg_max_points_per_lap),
       };
       const auto result = safe_set_->query(query);
+      last_safe_set_points_ = static_cast<std::size_t>(result.x.size2());
       if (result.x.size2() > 0) {
         ss_x = result.x;
         ss_costs = result.J - result.J(0);
@@ -544,6 +577,7 @@ private:
   std::size_t lap_sample_count_ = 0;
   std::size_t total_sample_count_ = 0;
   std::size_t completed_laps_ = 0;
+  std::size_t last_safe_set_points_ = 0;
   double elapsed_time_ = 0.0;
   double last_recorded_s_ = 0.0;
   bool has_recorded_sample_ = false;
@@ -576,6 +610,18 @@ const SparseErrorModel &NativeLMPCController::error_model() const {
 
 std::size_t NativeLMPCController::sample_count() const {
   return impl_->sample_count();
+}
+
+std::size_t NativeLMPCController::completed_laps() const {
+  return impl_->completed_laps();
+}
+
+std::size_t NativeLMPCController::lap_sample_count() const {
+  return impl_->lap_sample_count();
+}
+
+std::size_t NativeLMPCController::last_safe_set_points() const {
+  return impl_->last_safe_set_points();
 }
 
 } // namespace f110_gym_lmpc

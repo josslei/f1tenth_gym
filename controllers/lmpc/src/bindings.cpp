@@ -55,7 +55,9 @@ PYBIND11_MODULE(lmpc_native, m) {
       .def_readwrite("curvature", &lmpc::LmpcReference::curvature)
       .def_readwrite("target_speed", &lmpc::LmpcReference::target_speed)
       .def_readwrite("left_bound", &lmpc::LmpcReference::left_bound)
-      .def_readwrite("right_bound", &lmpc::LmpcReference::right_bound);
+      .def_readwrite("right_bound", &lmpc::LmpcReference::right_bound)
+      .def_readwrite("curvature_sequence",
+                     &lmpc::LmpcReference::curvature_sequence);
 
   py::class_<lmpc::LmpcConfig>(m, "LmpcConfig")
       .def(py::init<>())
@@ -77,7 +79,17 @@ PYBIND11_MODULE(lmpc_native, m) {
       .def_readwrite("reg_max_points_per_lap",
                      &lmpc::LmpcConfig::reg_max_points_per_lap)
       .def_readwrite("regression_horizon_stride",
-                     &lmpc::LmpcConfig::regression_horizon_stride);
+                     &lmpc::LmpcConfig::regression_horizon_stride)
+      .def_readwrite("lateral_weight", &lmpc::LmpcConfig::lateral_weight)
+      .def_readwrite("heading_weight", &lmpc::LmpcConfig::heading_weight)
+      .def_readwrite("speed_weight", &lmpc::LmpcConfig::speed_weight)
+      .def_readwrite("terminal_lateral_weight",
+                     &lmpc::LmpcConfig::terminal_lateral_weight)
+      .def_readwrite("terminal_heading_weight",
+                     &lmpc::LmpcConfig::terminal_heading_weight)
+      .def_readwrite("progress_weight", &lmpc::LmpcConfig::progress_weight)
+      .def_readwrite("safe_set_cost_weight",
+                     &lmpc::LmpcConfig::safe_set_cost_weight);
 
   py::class_<lmpc::SparseErrorModel>(m, "SparseErrorModel")
       .def_readonly("A", &lmpc::SparseErrorModel::A)
@@ -115,5 +127,9 @@ PYBIND11_MODULE(lmpc_native, m) {
       .def("control", &lmpc::NativeLMPCController::control)
       .def("error_model", &lmpc::NativeLMPCController::error_model,
            py::return_value_policy::reference_internal)
-      .def("sample_count", &lmpc::NativeLMPCController::sample_count);
+      .def("sample_count", &lmpc::NativeLMPCController::sample_count)
+      .def("completed_laps", &lmpc::NativeLMPCController::completed_laps)
+      .def("lap_sample_count", &lmpc::NativeLMPCController::lap_sample_count)
+      .def("last_safe_set_points",
+           &lmpc::NativeLMPCController::last_safe_set_points);
 }

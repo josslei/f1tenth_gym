@@ -46,6 +46,7 @@ class LmpcReference:
     target_speed: float
     left_bound: float
     right_bound: float
+    curvature_sequence: list[float]
     def __init__(self) -> None: ...
 
 class LmpcConfig:
@@ -66,6 +67,13 @@ class LmpcConfig:
     reg_max_points: int
     reg_max_points_per_lap: int
     regression_horizon_stride: int
+    lateral_weight: float
+    heading_weight: float
+    speed_weight: float
+    terminal_lateral_weight: float
+    terminal_heading_weight: float
+    progress_weight: float
+    safe_set_cost_weight: float
     def __init__(self) -> None: ...
 
 class SparseErrorModel:
@@ -100,3 +108,6 @@ class NativeLMPCController:
     def control(self) -> LmpcControlCommand: ...
     def error_model(self) -> SparseErrorModel: ...
     def sample_count(self) -> int: ...
+    def completed_laps(self) -> int: ...
+    def lap_sample_count(self) -> int: ...
+    def last_safe_set_points(self) -> int: ...

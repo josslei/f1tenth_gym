@@ -48,6 +48,7 @@ struct LmpcReference {
   double target_speed = 3.0;
   double left_bound = 1.0;
   double right_bound = 1.0;
+  std::vector<double> curvature_sequence;
 };
 
 struct LmpcConfig {
@@ -67,7 +68,14 @@ struct LmpcConfig {
   double reg_dist_max = 1.0;
   std::size_t reg_max_points = 96;
   std::size_t reg_max_points_per_lap = 32;
-  std::size_t regression_horizon_stride = 0;
+  std::size_t regression_horizon_stride = 8;
+  double lateral_weight = 0.2;
+  double heading_weight = 0.1;
+  double speed_weight = 0.1;
+  double terminal_lateral_weight = 0.0;
+  double terminal_heading_weight = 0.0;
+  double progress_weight = 1.0;
+  double safe_set_cost_weight = 2.0;
 };
 
 struct SparseErrorModel {
@@ -125,6 +133,9 @@ public:
 
   const SparseErrorModel &error_model() const;
   std::size_t sample_count() const;
+  std::size_t completed_laps() const;
+  std::size_t lap_sample_count() const;
+  std::size_t last_safe_set_points() const;
 
 private:
   class Impl;

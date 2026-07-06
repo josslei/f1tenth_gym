@@ -37,7 +37,7 @@ class LMPCController(Controller):
         curvature_profile: Sequence[float] | np.ndarray | None = None,
         left_bound_profile: Sequence[float] | np.ndarray | None = None,
         right_bound_profile: Sequence[float] | np.ndarray | None = None,
-        regression_horizon_stride: int = 0,
+        regression_horizon_stride: int = 8,
     ) -> None:
         if NativeLMPCController is None:
             raise RuntimeError(
@@ -95,6 +95,8 @@ class LMPCController(Controller):
             if speed_total_length is not None
             else float(self.track.total_length())
         )
+        self.native_horizon = int(native_config.horizon)
+        self.native_dt = float(native_config.dt)
         self.native_controller = NativeLMPCController(native_config)
         self.vehicle_state = VehicleState(0.0, 0.0, 0.0, 0.0)
         self.racing_state = self.track.to_racing_state(
@@ -114,7 +116,7 @@ class LMPCController(Controller):
         target_speed: float | None = None,
         dt: float = 0.01,
         wheelbase: float = 0.33,
-        regression_horizon_stride: int = 0,
+        regression_horizon_stride: int = 8,
     ) -> LMPCController:
         centerline = np.loadtxt(
             csv_path, delimiter=delimiter, skiprows=skiprows, dtype=np.float64
@@ -138,7 +140,7 @@ class LMPCController(Controller):
         target_speed: float | None = None,
         dt: float = 0.01,
         wheelbase: float = 0.33,
-        regression_horizon_stride: int = 0,
+        regression_horizon_stride: int = 8,
     ) -> LMPCController:
         table = np.loadtxt(table_path, dtype=np.float64)
         table = np.atleast_2d(table)
@@ -201,6 +203,18 @@ class LMPCController(Controller):
             velocity=float(command.velocity),
         )
 
+    def sample_count(self) -> int:
+        return int(self.native_controller.sample_count())
+
+    def completed_laps(self) -> int:
+        return int(self.native_controller.completed_laps())
+
+    def lap_sample_count(self) -> int:
+        return int(self.native_controller.lap_sample_count())
+
+    def last_safe_set_points(self) -> int:
+        return int(self.native_controller.last_safe_set_points())
+
     def _target_speed_at_current_s(self, fallback: float) -> float:
         if self.speed_s is None or self.speed_profile is None:
             return fallback
@@ -213,6 +227,11 @@ class LMPCController(Controller):
         reference.target_speed = self._target_speed_at_current_s(reference.target_speed)
         if self.curvature_profile is not None:
             reference.curvature = self._interp_closed_profile(self.curvature_profile)
+            reference.curvature_sequence = self._interp_closed_horizon(
+                self.curvature_profile,
+                max(self.native_horizon - 1, 0),
+                reference.target_speed,
+            )
         if self.left_bound_profile is not None:
             reference.left_bound = self._interp_closed_profile(self.left_bound_profile)
         if self.right_bound_profile is not None:
@@ -220,6 +239,24 @@ class LMPCController(Controller):
                 self.right_bound_profile
             )
         self.native_controller.set_reference(reference)
+
+    def _interp_closed_horizon(
+        self, profile: np.ndarray, horizon_steps: int, speed: float
+    ) -> list[float]:
+        assert self.speed_s is not None
+        if horizon_steps == 0:
+            return []
+        s_offsets = self.native_dt * max(float(speed), 0.0) * np.arange(horizon_steps)
+        query_s = self.racing_state.s + s_offsets
+        if self.speed_total_length is None:
+            return np.interp(query_s, self.speed_s, profile).astype(float).tolist()
+        speed_s = np.r_[self.speed_s, self.speed_total_length]
+        closed_profile = np.r_[profile, profile[0]]
+        return (
+            np.interp(np.mod(query_s, self.speed_total_length), speed_s, closed_profile)
+            .astype(float)
+            .tolist()
+        )
 
     def _interp_closed_profile(self, profile: np.ndarray) -> float:
         assert self.speed_s is not None

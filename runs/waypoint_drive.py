@@ -29,6 +29,7 @@ WINDOW_WIDTH = 1000
 WINDOW_HEIGHT = 800
 CONTROLLER_NAME: Final[str] = "lmpc"
 LAPS_TO_COMPLETE = 5
+LMPC_DIAGNOSTIC_INTERVAL_STEPS = 100
 
 # Pure Pursuit hyperparameters
 MIN_LOOKAHEAD = 1.0
@@ -89,6 +90,17 @@ def controller_display_points(controller: Any) -> np.ndarray:
     return controller.waypoints[:, :2]
 
 
+def lmpc_diagnostics(controller: Any) -> str:
+    if not isinstance(controller, LMPCController):
+        return ""
+    return (
+        f" | lmpc completed_laps={controller.completed_laps()}"
+        f" samples={controller.sample_count()}"
+        f" lap_samples={controller.lap_sample_count()}"
+        f" ss_points={controller.last_safe_set_points()}"
+    )
+
+
 def main() -> None:
     env = gym.make("f110-v0", map=MAP, num_agents=1, laps_to_complete=LAPS_TO_COMPLETE)
     f110_env: Any = env.unwrapped
@@ -109,6 +121,8 @@ def main() -> None:
     obs, _info = env.reset(options={"poses": initial_pose})
     previous_lap_count = int(obs["lap_counts"][0])
     previous_lap_time = 0.0
+    pending_lap_logs: list[str] = []
+    step_count = 0
 
     viewer.update(obs)
     viewer.render()
@@ -120,6 +134,15 @@ def main() -> None:
             state = obs_to_vehicle_state(obs)
             controller.update(state)
         cmd = controller.control()
+        step_count += 1
+        for message in pending_lap_logs:
+            print(f"{message}{lmpc_diagnostics(controller)}")
+        pending_lap_logs.clear()
+        if (
+            isinstance(controller, LMPCController)
+            and step_count % LMPC_DIAGNOSTIC_INTERVAL_STEPS == 0
+        ):
+            print(f"LMPC step {step_count}{lmpc_diagnostics(controller)}")
         action = np.array([[cmd.steering, cmd.velocity]], dtype=np.float64)
 
         obs, _reward, terminated, truncated, _info = env.step(action)
@@ -128,7 +151,7 @@ def main() -> None:
         if lap_count > previous_lap_count:
             for lap_number in range(previous_lap_count + 1, lap_count + 1):
                 split_time = lap_time - previous_lap_time
-                print(
+                pending_lap_logs.append(
                     f"Lap {lap_number}/{LAPS_TO_COMPLETE}: "
                     f"{split_time:.3f}s (total {lap_time:.3f}s)"
                 )
@@ -139,6 +162,9 @@ def main() -> None:
 
         if terminated or truncated:
             break
+
+    for message in pending_lap_logs:
+        print(f"{message}{lmpc_diagnostics(controller)}")
 
     while not viewer.closed:
         viewer.render()
