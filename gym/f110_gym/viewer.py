@@ -9,7 +9,7 @@ from typing import Any, Callable, Protocol
 
 
 Observation = dict[str, Any]
-RenderCallback = Callable[[Any], None]
+RenderCallback = Callable[..., None]
 
 
 class Viewer(Protocol):
@@ -135,7 +135,7 @@ class F110Viewer:
         renderer.update_obs(self._latest_obs)
 
         for callback in self.callbacks:
-            callback(renderer)
+            callback(renderer, self._latest_obs)
 
         renderer.dispatch_events()
         if renderer.window_closed:

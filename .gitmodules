@@ -19,3 +19,14 @@
 [submodule "thirdparty/casadi"]
 	path = thirdparty/casadi
 	url = git@github.com:casadi/casadi
+[submodule "thirdparty/cgal"]
+	path = thirdparty/cgal
+	url = git@github.com:cgal/cgal
+	ignore = all
+[submodule "thirdparty/eigen"]
+	path = thirdparty/eigen
+	url = https://gitlab.com/libeigen/eigen.git
+[submodule "thirdparty/boost"]
+	path = thirdparty/boost
+	url = https://github.com/boostorg/boost.git
+	ignore = all

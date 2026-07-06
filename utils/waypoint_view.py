@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -48,7 +48,8 @@ class WaypointOverlay:
     render_scale: float = WAYPOINT_RENDER_SCALE
     _vertex_list: Any | None = None
 
-    def __call__(self, renderer: Any) -> None:
+    def __call__(self, renderer: Any, obs: dict[str, Any] | None = None) -> None:
+        del obs
         if self._vertex_list is not None:
             return
 
@@ -62,4 +63,81 @@ class WaypointOverlay:
             batch=renderer.batch,
             position=("f", positions),
             colors=("Bn", colors),
+        )
+
+
+@dataclass
+class DrivenLineOverlay:
+    """Draw the current lap trace and the previous completed lap trace."""
+
+    current_color: tuple[int, int, int, int] = (0, 220, 255, 255)
+    previous_color: tuple[int, int, int, int] = (255, 90, 90, 190)
+    render_scale: float = WAYPOINT_RENDER_SCALE
+    min_point_distance: float = 0.05
+    current_points: list[tuple[float, float]] = field(default_factory=list)
+    previous_points: list[tuple[float, float]] = field(default_factory=list)
+    _last_lap_count: int = 0
+    _current_vertex_list: Any | None = None
+    _previous_vertex_list: Any | None = None
+
+    def __call__(self, renderer: Any, obs: dict[str, Any] | None = None) -> None:
+        if obs is None:
+            return
+
+        ego = int(obs["ego_idx"])
+        lap_count = int(obs["lap_counts"][ego])
+        point = (float(obs["poses_x"][ego]), float(obs["poses_y"][ego]))
+
+        if lap_count > self._last_lap_count:
+            self.previous_points = self.current_points
+            self.current_points = []
+            self._last_lap_count = lap_count
+            self._replace_vertex_list(
+                "previous", renderer, self.previous_points, self.previous_color
+            )
+
+        if self._should_append(point):
+            self.current_points.append(point)
+            self._replace_vertex_list(
+                "current", renderer, self.current_points, self.current_color
+            )
+
+    def _should_append(self, point: tuple[float, float]) -> bool:
+        if not self.current_points:
+            return True
+        last_x, last_y = self.current_points[-1]
+        dx = point[0] - last_x
+        dy = point[1] - last_y
+        return dx * dx + dy * dy >= self.min_point_distance * self.min_point_distance
+
+    def _replace_vertex_list(
+        self,
+        which: str,
+        renderer: Any,
+        points: list[tuple[float, float]],
+        color: tuple[int, int, int, int],
+    ) -> None:
+        vertex_attr = f"_{which}_vertex_list"
+        vertex_list = getattr(self, vertex_attr)
+        if vertex_list is not None:
+            vertex_list.delete()
+            setattr(self, vertex_attr, None)
+        if len(points) < 2:
+            return
+
+        from pyglet.gl.gl import GL_LINE_STRIP
+
+        points_xy = np.asarray(points, dtype=np.float64)
+        positions = _to_xyz_flat(points_xy, self.render_scale)
+        colors = list(color) * points_xy.shape[0]
+        setattr(
+            self,
+            vertex_attr,
+            renderer.program.vertex_list(
+                points_xy.shape[0],
+                GL_LINE_STRIP,
+                batch=renderer.batch,
+                position=("f", positions),
+                colors=("Bn", colors),
+            ),
         )

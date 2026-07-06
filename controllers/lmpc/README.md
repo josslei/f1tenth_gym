@@ -84,14 +84,26 @@ cmake --build controllers/lmpc/build --config Release
 
 The build writes `lmpc_native` into `controllers/lmpc/` so `binding.py` can import it directly.
 
-## Later Paper Target
+## Learning Status
 
-After normal MPC runs in Gym, add the sparse affine error-dynamics update from `ref/lmpc.tex`:
+The native controller records samples, adds completed laps to the upstream
+`SafeSetManager`, queries `RegQuery`, and feeds the latest affine regression into
+the MPC prediction model:
 
-- update `A^e`
-- update `B^e`
-- update `C^e`
-- reuse/fix the regression logic in `thirdparty/Racing-LMPC-ROS2/src/vehicle_dynamics_models/racing_trajectory/src/safe_set.cpp`
+- `A`: kinematic-model state matrix, shape `4 x 4`
+- `B`: kinematic-model input matrix, shape `4 x 3`
+- `C`: affine offset, shape `4`
+
+Before a completed lap is available, those matrices are nominal linearizations
+of the kinematic bicycle model. After a lap is available, they are corrected by
+safe-set regression. The terminal state is constrained to a convex combination
+of safe-set states, with slack for feasibility, and the safe-set cost-to-go is
+added as a terminal cost.
+
+TODO(performance): the Gym native build currently uses standard-library safe-set
+lookup/sorting to avoid bringing in upstream Eigen/CGAL/Boost dependencies during
+early integration. Restore Eigen-backed sorting and CGAL KD-tree lookup once the
+LMPC behavior is stable and dependency setup is documented.
 
 ## Licensing
 

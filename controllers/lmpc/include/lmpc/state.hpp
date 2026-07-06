@@ -62,12 +62,17 @@ struct LmpcConfig {
   double max_brake_force = -10.0;
   double max_steer = 0.42;
   double wheelbase = 0.33;
+  double track_length = 1.0e6;
+  std::size_t max_lap_stored = 3;
+  double reg_dist_max = 1.0;
+  std::size_t reg_max_points = 96;
+  std::size_t reg_max_points_per_lap = 32;
 };
 
 struct SparseErrorModel {
-  std::array<std::array<double, 6>, 6> A{};
-  std::array<std::array<double, 2>, 6> B{};
-  std::array<double, 6> C{};
+  std::array<std::array<double, 4>, 4> A{};
+  std::array<std::array<double, 3>, 4> B{};
+  std::array<double, 4> C{};
 };
 
 struct LmpcSample {

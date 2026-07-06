@@ -69,7 +69,13 @@ PYBIND11_MODULE(lmpc_native, m) {
       .def_readwrite("max_drive_force", &lmpc::LmpcConfig::max_drive_force)
       .def_readwrite("max_brake_force", &lmpc::LmpcConfig::max_brake_force)
       .def_readwrite("max_steer", &lmpc::LmpcConfig::max_steer)
-      .def_readwrite("wheelbase", &lmpc::LmpcConfig::wheelbase);
+      .def_readwrite("wheelbase", &lmpc::LmpcConfig::wheelbase)
+      .def_readwrite("track_length", &lmpc::LmpcConfig::track_length)
+      .def_readwrite("max_lap_stored", &lmpc::LmpcConfig::max_lap_stored)
+      .def_readwrite("reg_dist_max", &lmpc::LmpcConfig::reg_dist_max)
+      .def_readwrite("reg_max_points", &lmpc::LmpcConfig::reg_max_points)
+      .def_readwrite("reg_max_points_per_lap",
+                     &lmpc::LmpcConfig::reg_max_points_per_lap);
 
   py::class_<lmpc::SparseErrorModel>(m, "SparseErrorModel")
       .def_readonly("A", &lmpc::SparseErrorModel::A)

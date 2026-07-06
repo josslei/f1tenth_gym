@@ -9,6 +9,7 @@ __pycache__/
 
 # C extensions
 *.so
+*.dylib
 
 # CMake build directories
 build-debug/

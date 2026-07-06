@@ -5,6 +5,9 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
 
 set(LMPC_THIRDPARTY_DIR
   "${CMAKE_CURRENT_LIST_DIR}/../../thirdparty"
@@ -17,6 +20,24 @@ set(LMPC_RACING_SOURCE_DIR
 set(LMPC_CASADI_SOURCE_DIR
   "${LMPC_THIRDPARTY_DIR}/casadi"
   CACHE PATH "Path to the CasADi source checkout"
+)
+set(LMPC_EIGEN_SOURCE_DIR
+  "${LMPC_THIRDPARTY_DIR}/eigen"
+  CACHE PATH "Path to the Eigen source checkout"
+)
+set(LMPC_CGAL_SOURCE_DIR
+  "${LMPC_THIRDPARTY_DIR}/cgal"
+  CACHE PATH "Path to the CGAL source checkout"
+)
+set(LMPC_BOOST_SOURCE_DIR
+  "${LMPC_THIRDPARTY_DIR}/boost"
+  CACHE PATH "Path to the Boost source checkout"
+)
+file(GLOB LMPC_CGAL_INCLUDE_DIRS CONFIGURE_DEPENDS
+  "${LMPC_CGAL_SOURCE_DIR}/*/include"
+)
+file(GLOB LMPC_BOOST_INCLUDE_DIRS CONFIGURE_DEPENDS
+  "${LMPC_BOOST_SOURCE_DIR}/libs/*/include"
 )
 
 find_package(Python REQUIRED COMPONENTS Interpreter Development)
@@ -61,14 +82,25 @@ add_library(lmpc_state_core STATIC
   "${LMPC_RACING_SOURCE_DIR}/tools/lmpc_utils/src/utils.cpp"
   "${LMPC_RACING_SOURCE_DIR}/vehicle_dynamics_models/base_vehicle_model/src/base_vehicle_model.cpp"
   "${LMPC_RACING_SOURCE_DIR}/vehicle_dynamics_models/kinematic_bicycle_model/src/kinematic_bicycle_model.cpp"
+  "${LMPC_RACING_SOURCE_DIR}/vehicle_dynamics_models/racing_trajectory/src/safe_set.cpp"
+  "${LMPC_RACING_SOURCE_DIR}/vehicle_dynamics_models/racing_trajectory/src/trajectory_kd_tree.cpp"
 )
 target_include_directories(lmpc_state_core PUBLIC
   include
+  "${LMPC_EIGEN_SOURCE_DIR}"
+  "${LMPC_CGAL_SOURCE_DIR}"
+  "${LMPC_BOOST_SOURCE_DIR}"
+  ${LMPC_CGAL_INCLUDE_DIRS}
+  ${LMPC_BOOST_INCLUDE_DIRS}
   "${LMPC_RACING_SOURCE_DIR}/tools/lmpc_utils/include"
   "${LMPC_RACING_SOURCE_DIR}/vehicle_dynamics_models/base_vehicle_model/include"
   "${LMPC_RACING_SOURCE_DIR}/vehicle_dynamics_models/kinematic_bicycle_model/include"
+  "${LMPC_RACING_SOURCE_DIR}/vehicle_dynamics_models/racing_trajectory/include"
 )
 target_compile_features(lmpc_state_core PUBLIC cxx_std_17)
+target_compile_options(lmpc_state_core PRIVATE
+  $<$<CXX_COMPILER_ID:AppleClang,Clang,GNU>:-O3>
+)
 target_link_libraries(lmpc_state_core PUBLIC ${LMPC_CASADI_TARGET})
 
 pybind11_add_module(lmpc_native MODULE

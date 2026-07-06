@@ -11,19 +11,24 @@ from controllers.lmpc import LMPCController
 from controllers.pure_pursuit import DynamicLookaheadDistance, PurePursuit
 from controllers.stanley import Stanley
 from f110_gym.viewer import F110Viewer
-from utils.waypoint_view import WaypointOverlay, initial_pose_from_waypoints
+from utils.waypoint_view import (
+    DrivenLineOverlay,
+    WaypointOverlay,
+    initial_pose_from_waypoints,
+)
 
-MAP = "maps/f1tenth_racetracks/Spielberg/Spielberg_map"
+MAP = "maps/custom/f110_gym_10/f110_gym_map.yaml"
 # Generate with scripts/generate_lmpc_trajectory.py before running LMPC.
-LMPC_TRAJECTORY = "outputs/lmpc_trajectories/Spielberg_centerline.txt"
+LMPC_TRAJECTORY = "outputs/lmpc_trajectories/f110_gym_centerline.txt"
 # Centerline remains useful for display/fallback tooling.
-CENTERLINE_CSV = "maps/f1tenth_racetracks/Spielberg/Spielberg_centerline.csv"
+CENTERLINE_CSV = "maps/custom/f110_gym_10/f110_gym_centerline.csv"
 # Pure pursuit / Stanley can still use the optimized raceline waypoints.
-RACELINE_CSV = "outputs/waypoints/Spielberg_mintime.csv"
-ZOOM = 1.0  # > 1 -> Zoom out; < 1 -> Zoom in
+RACELINE_CSV = "maps/custom/f110_gym_10/example_waypoints.csv"
+ZOOM = 2.0  # > 1 -> Zoom out; < 1 -> Zoom in
 WINDOW_WIDTH = 1000
 WINDOW_HEIGHT = 800
 CONTROLLER_NAME: Final[str] = "lmpc"
+LAPS_TO_COMPLETE = 5
 
 # Pure Pursuit hyperparameters
 MIN_LOOKAHEAD = 1.0
@@ -85,22 +90,25 @@ def controller_display_points(controller: Any) -> np.ndarray:
 
 
 def main() -> None:
-    env = gym.make("f110-v0", map=MAP, num_agents=1)
+    env = gym.make("f110-v0", map=MAP, num_agents=1, laps_to_complete=LAPS_TO_COMPLETE)
     f110_env: Any = env.unwrapped
     controller = build_controller(f110_env)
     display_points = controller_display_points(controller)
     initial_pose = initial_pose_from_waypoints(display_points)
     waypoint_overlay = WaypointOverlay(display_points)
+    driven_line_overlay = DrivenLineOverlay()
     viewer = F110Viewer.from_env(
         env.unwrapped,
         width=WINDOW_WIDTH,
         height=WINDOW_HEIGHT,
         target_fps=60.0,
         initial_zoom=ZOOM,
-        callbacks=[waypoint_overlay],
+        callbacks=[waypoint_overlay, driven_line_overlay],
     )
 
     obs, _info = env.reset(options={"poses": initial_pose})
+    previous_lap_count = int(obs["lap_counts"][0])
+    previous_lap_time = 0.0
 
     viewer.update(obs)
     viewer.render()
@@ -115,6 +123,17 @@ def main() -> None:
         action = np.array([[cmd.steering, cmd.velocity]], dtype=np.float64)
 
         obs, _reward, terminated, truncated, _info = env.step(action)
+        lap_count = int(obs["lap_counts"][0])
+        lap_time = float(obs["lap_times"][0])
+        if lap_count > previous_lap_count:
+            for lap_number in range(previous_lap_count + 1, lap_count + 1):
+                split_time = lap_time - previous_lap_time
+                print(
+                    f"Lap {lap_number}/{LAPS_TO_COMPLETE}: "
+                    f"{split_time:.3f}s (total {lap_time:.3f}s)"
+                )
+                previous_lap_time = lap_time
+            previous_lap_count = lap_count
         viewer.update(obs)
         viewer.render()
 

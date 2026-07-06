@@ -11,19 +11,22 @@
 #include <cmath>
 #include <memory>
 #include <stdexcept>
+#include <vector>
 
 #include <casadi/casadi.hpp>
 
 #include "base_vehicle_model/base_vehicle_model_config.hpp"
 #include "kinematic_bicycle_model/kinematic_bicycle_model.hpp"
+#include "racing_trajectory/safe_set.hpp"
 
 namespace f110_gym_lmpc {
 namespace {
 
 namespace base = ::lmpc::vehicle_model::base_vehicle_model;
 namespace kb = ::lmpc::vehicle_model::kinematic_bicycle_model;
+namespace rt = ::lmpc::vehicle_model::racing_trajectory;
 
-constexpr double kLargeBound = 1.0e6;
+constexpr double kTerminalSlackPenalty = 1.0e4;
 
 double clamp(double value, double low, double high) {
   return std::min(std::max(value, low), high);
@@ -110,19 +113,38 @@ class NativeLMPCController::Impl {
 public:
   explicit Impl(const LmpcConfig &config)
       : config_(config),
-        model_(make_base_config(config), make_kinematic_config(config)) {
+        model_(make_base_config(config), make_kinematic_config(config)),
+        safe_set_(std::make_unique<rt::SafeSetManager>(config.max_lap_stored)) {
     build_solver();
     reset();
   }
 
   void reset() {
+    safe_set_ = std::make_unique<rt::SafeSetManager>(config_.max_lap_stored);
     current_state_ = RacingLmpcState{};
     current_reference_ =
         LmpcReference{0.0, config_.target_speed, config_.track_half_width,
                       config_.track_half_width};
     previous_command_ = LmpcControlCommand{};
+    previous_native_u_ = casadi::DM::zeros(model_.nu(), 1);
     last_u_ = casadi::DM::zeros(model_.nu(),
                                 static_cast<casadi_int>(config_.horizon - 1));
+    A_values_.clear();
+    B_values_.clear();
+    C_values_.clear();
+    ss_x_value_ = casadi::DM();
+    ss_costs_value_ = casadi::DM();
+    lap_x_ = casadi::DM();
+    lap_u_ = casadi::DM();
+    lap_k_ = casadi::DM();
+    lap_t_ = casadi::DM();
+    lap_sample_count_ = 0;
+    total_sample_count_ = 0;
+    completed_laps_ = 0;
+    elapsed_time_ = 0.0;
+    last_recorded_s_ = 0.0;
+    has_recorded_sample_ = false;
+    error_model_ = SparseErrorModel{};
     solved_ = false;
   }
 
@@ -156,6 +178,15 @@ public:
       x_init(kb::XIndex::YAW, i) = x0(kb::XIndex::YAW);
       x_init(kb::XIndex::V, i) = x0(kb::XIndex::V);
     }
+    set_dynamics_parameters(x_init);
+    set_safe_set_terminal(x_init(Slice(), N - 1));
+    for (casadi_int i = 0; i < N - 1; ++i) {
+      opti_.set_value(A_params_[i], A_values_[i]);
+      opti_.set_value(B_params_[i], B_values_[i]);
+      opti_.set_value(C_params_[i], C_values_[i]);
+    }
+    opti_.set_value(ss_x_, ss_x_value_);
+    opti_.set_value(ss_costs_, ss_costs_value_);
     opti_.set_initial(X_, solved_ ? last_x_ : x_init);
     opti_.set_initial(U_, solved_ ? last_u_ : DM::zeros(model_.nu(), N - 1));
 
@@ -164,16 +195,19 @@ public:
       last_x_ = sol_->value(X_);
       last_u_ = sol_->value(U_);
       solved_ = true;
+      previous_native_u_ = last_u_(Slice(), 0);
       previous_command_ = command_from_solution(last_x_, last_u_);
     } catch (const std::exception &) {
       solved_ = false;
       previous_command_ = fallback_command();
+      previous_native_u_ = fallback_native_u(previous_command_);
     }
+    record_current_sample();
     return previous_command_;
   }
 
   const SparseErrorModel &error_model() const { return error_model_; }
-  std::size_t sample_count() const { return 0; }
+  std::size_t sample_count() const { return total_sample_count_; }
 
 private:
   void build_solver() {
@@ -191,24 +225,27 @@ private:
     target_speed_ = opti_.parameter(1, 1);
     left_bound_ = opti_.parameter(1, 1);
     right_bound_ = opti_.parameter(1, 1);
+    ss_x_ = opti_.parameter(model_.nx(), config_.reg_max_points);
+    ss_costs_ = opti_.parameter(1, config_.reg_max_points);
+    lambda_ = opti_.variable(config_.reg_max_points, 1);
+    terminal_slack_ = opti_.variable(model_.nx(), 1);
 
     MX cost = MX::zeros(1);
     opti_.subject_to(X_(Slice(), 0) == x0_);
 
     for (casadi_int i = 0; i < N - 1; ++i) {
+      A_params_.push_back(opti_.parameter(model_.nx(), model_.nx()));
+      B_params_.push_back(opti_.parameter(model_.nx(), model_.nu()));
+      C_params_.push_back(opti_.parameter(model_.nx(), 1));
       const auto xi = X_(Slice(), i);
       const auto xip1 = X_(Slice(), i + 1);
       const auto ui = U_(Slice(), i);
-      const auto kappa_i = kappa_(i);
-
-      casadi::MXDict constraint_in = {
-          {"x", xi},  {"u", ui},      {"xip1", xip1},
-          {"t", dt_}, {"k", kappa_i}, {"track_length", kLargeBound},
-      };
       // TODO(dynamics-model): kinematic_bicycle_model is the first Gym target.
       // Replace model_ construction plus bounds/config here when switching to
       // single_track_planar_model or another Racing-LMPC vehicle model.
-      model_.add_nlp_constraints(opti_, constraint_in);
+      opti_.subject_to(xip1 == casadi::MX::mtimes({A_params_[i], xi}) +
+                                   casadi::MX::mtimes({B_params_[i], ui}) +
+                                   C_params_[i]);
 
       cost += 3.0 * xi(kb::XIndex::PY) * xi(kb::XIndex::PY);
       cost += 1.5 * xi(kb::XIndex::YAW) * xi(kb::XIndex::YAW);
@@ -225,6 +262,12 @@ private:
     }
 
     const auto xN = X_(Slice(), N - 1);
+    opti_.subject_to(lambda_ >= 0.0);
+    opti_.subject_to(casadi::MX::sum1(lambda_) == 1.0);
+    opti_.subject_to(xN ==
+                     casadi::MX::mtimes({ss_x_, lambda_}) + terminal_slack_);
+    cost += casadi::MX::mtimes({ss_costs_, lambda_});
+    cost += kTerminalSlackPenalty * casadi::MX::sumsqr(terminal_slack_);
     cost += 10.0 * xN(kb::XIndex::PY) * xN(kb::XIndex::PY);
     cost += 5.0 * xN(kb::XIndex::YAW) * xN(kb::XIndex::YAW);
     opti_.minimize(cost);
@@ -261,8 +304,187 @@ private:
     return LmpcControlCommand{steer, velocity};
   }
 
+  casadi::DM fallback_native_u(const LmpcControlCommand &command) const {
+    casadi::DM u = casadi::DM::zeros(model_.nu(), 1);
+    u(kb::UIndex::STEER) = command.steering;
+    return u;
+  }
+
+  casadi::DM current_state_dm() const {
+    return casadi::DM{current_state_.s, current_state_.e_y,
+                      current_state_.e_psi, std::max(current_state_.v_x, 0.05)};
+  }
+
+  void record_current_sample() {
+    const casadi::DM x = current_state_dm();
+    const casadi::DM u = previous_native_u_;
+    const casadi::DM k = casadi::DM{current_reference_.curvature};
+    const casadi::DM t = casadi::DM{elapsed_time_};
+    const bool wrapped =
+        has_recorded_sample_ &&
+        last_recorded_s_ - current_state_.s > 0.5 * config_.track_length;
+
+    if (wrapped && lap_sample_count_ > 1) {
+      safe_set_->add_lap(lap_x_, lap_u_, lap_k_, lap_t_, config_.track_length);
+      completed_laps_++;
+      lap_x_ = x;
+      lap_u_ = u;
+      lap_k_ = k;
+      lap_t_ = t;
+      lap_sample_count_ = 1;
+    } else if (lap_sample_count_ == 0) {
+      lap_x_ = x;
+      lap_u_ = u;
+      lap_k_ = k;
+      lap_t_ = t;
+      lap_sample_count_ = 1;
+    } else {
+      lap_x_ = casadi::DM::horzcat({lap_x_, x});
+      lap_u_ = casadi::DM::horzcat({lap_u_, u});
+      lap_k_ = casadi::DM::horzcat({lap_k_, k});
+      lap_t_ = casadi::DM::horzcat({lap_t_, t});
+      lap_sample_count_++;
+    }
+
+    total_sample_count_++;
+    elapsed_time_ += config_.dt;
+    last_recorded_s_ = current_state_.s;
+    has_recorded_sample_ = true;
+  }
+
+  void set_dynamics_parameters(const casadi::DM &x_init) {
+    using casadi::Slice;
+
+    A_values_.clear();
+    B_values_.clear();
+    C_values_.clear();
+    A_values_.reserve(config_.horizon - 1);
+    B_values_.reserve(config_.horizon - 1);
+    C_values_.reserve(config_.horizon - 1);
+    for (casadi_int i = 0; i < static_cast<casadi_int>(config_.horizon - 1);
+         ++i) {
+      const casadi::DM x_ref = x_init(Slice(), i);
+      const casadi::DM u_ref =
+          solved_ ? last_u_(Slice(), i) : previous_native_u_;
+      casadi::DM A;
+      casadi::DM B;
+      casadi::DM C;
+      compute_affine_model(x_ref, u_ref, A, B, C);
+      A_values_.push_back(A);
+      B_values_.push_back(B);
+      C_values_.push_back(C);
+      if (i == 0) {
+        store_error_model(A, B, C);
+      }
+    }
+  }
+
+  void compute_affine_model(const casadi::DM &x, const casadi::DM &u,
+                            casadi::DM &reg_a, casadi::DM &reg_b,
+                            casadi::DM &reg_c) {
+    const auto jac = model_.discrete_dynamics_jacobian()(casadi::DMDict{
+        {"x", x},
+        {"u", u},
+        {"k", casadi::DM{current_reference_.curvature}},
+        {"dt", casadi::DM{config_.dt}},
+    });
+    reg_a = jac.at("A");
+    reg_b = jac.at("B");
+    const auto xip1 = model_
+                          .discrete_dynamics()(casadi::DMDict{
+                              {"x", x},
+                              {"u", u},
+                              {"k", casadi::DM{current_reference_.curvature}},
+                              {"dt", casadi::DM{config_.dt}},
+                          })
+                          .at("xip1");
+    reg_c = xip1 - casadi::DM::mtimes(reg_a, x) - casadi::DM::mtimes(reg_b, u);
+
+    if (completed_laps_ == 0) {
+      return;
+    }
+
+    const rt::RegQuery query{
+        casadi::DM::vertcat({x(kb::XIndex::V), u}),
+        reg_a,
+        reg_b,
+        reg_c,
+        model_.discrete_dynamics(),
+        config_.reg_dist_max,
+        static_cast<casadi_int>(config_.reg_max_points),
+        static_cast<casadi_int>(config_.reg_max_points_per_lap),
+        rt::RegQuery::Indices{{kb::XIndex::V}},
+        rt::RegQuery::Indices{
+            {kb::UIndex::FD, kb::UIndex::FB, kb::UIndex::STEER}},
+        rt::RegQuery::Indices{{kb::XIndex::V}},
+    };
+    const auto result = safe_set_->query(query);
+    reg_a(kb::XIndex::V, kb::XIndex::V) =
+        result.A(kb::XIndex::V, kb::XIndex::V);
+    reg_b(kb::XIndex::V, kb::UIndex::FD) =
+        result.B(kb::XIndex::V, kb::UIndex::FD);
+    reg_b(kb::XIndex::V, kb::UIndex::FB) =
+        result.B(kb::XIndex::V, kb::UIndex::FB);
+    reg_b(kb::XIndex::V, kb::UIndex::STEER) =
+        result.B(kb::XIndex::V, kb::UIndex::STEER);
+    reg_c(kb::XIndex::V) = result.C(kb::XIndex::V);
+  }
+
+  void store_error_model(const casadi::DM &reg_a, const casadi::DM &reg_b,
+                         const casadi::DM &reg_c) {
+    for (casadi_int row = 0; row < static_cast<casadi_int>(model_.nx());
+         ++row) {
+      for (casadi_int col = 0; col < static_cast<casadi_int>(model_.nx());
+           ++col) {
+        error_model_.A[row][col] = static_cast<double>(reg_a(row, col));
+      }
+      for (casadi_int col = 0; col < static_cast<casadi_int>(model_.nu());
+           ++col) {
+        error_model_.B[row][col] = static_cast<double>(reg_b(row, col));
+      }
+      error_model_.C[row] = static_cast<double>(reg_c(row));
+    }
+  }
+
+  void set_safe_set_terminal(const casadi::DM &terminal_state) {
+    using casadi::Slice;
+
+    const auto num_points = static_cast<casadi_int>(config_.reg_max_points);
+    casadi::DM ss_x = casadi::DM::repmat(terminal_state, 1, num_points);
+    casadi::DM ss_costs = casadi::DM::zeros(1, num_points);
+
+    if (completed_laps_ > 0) {
+      const rt::SSQuery query{
+          terminal_state,
+          config_.reg_dist_max,
+          static_cast<casadi_int>(config_.reg_max_points),
+          static_cast<casadi_int>(config_.reg_max_points_per_lap),
+      };
+      const auto result = safe_set_->query(query);
+      if (result.x.size2() > 0) {
+        ss_x = result.x;
+        ss_costs = result.J - result.J(0);
+        if (ss_x.size2() < num_points) {
+          const auto pad_count = num_points - ss_x.size2();
+          ss_x = casadi::DM::horzcat(
+              {ss_x, casadi::DM::repmat(ss_x(Slice(), -1), 1, pad_count)});
+          ss_costs = casadi::DM::horzcat(
+              {ss_costs,
+               casadi::DM::repmat(ss_costs(Slice(), -1), 1, pad_count)});
+        } else if (ss_x.size2() > num_points) {
+          ss_x = ss_x(Slice(), Slice(0, num_points));
+          ss_costs = ss_costs(Slice(), Slice(0, num_points));
+        }
+      }
+    }
+
+    ss_x_value_ = ss_x;
+    ss_costs_value_ = ss_costs;
+  }
+
   LmpcConfig config_;
   kb::KinematicBicycleModel model_;
+  std::unique_ptr<rt::SafeSetManager> safe_set_;
   casadi::Opti opti_;
   casadi::MX X_;
   casadi::MX U_;
@@ -272,13 +494,36 @@ private:
   casadi::MX target_speed_;
   casadi::MX left_bound_;
   casadi::MX right_bound_;
+  std::vector<casadi::MX> A_params_;
+  std::vector<casadi::MX> B_params_;
+  std::vector<casadi::MX> C_params_;
+  casadi::MX ss_x_;
+  casadi::MX ss_costs_;
+  casadi::MX lambda_;
+  casadi::MX terminal_slack_;
   casadi::DM last_x_;
   casadi::DM last_u_;
+  casadi::DM previous_native_u_;
+  std::vector<casadi::DM> A_values_;
+  std::vector<casadi::DM> B_values_;
+  std::vector<casadi::DM> C_values_;
+  casadi::DM ss_x_value_;
+  casadi::DM ss_costs_value_;
+  casadi::DM lap_x_;
+  casadi::DM lap_u_;
+  casadi::DM lap_k_;
+  casadi::DM lap_t_;
   std::shared_ptr<casadi::OptiSol> sol_;
   RacingLmpcState current_state_;
   LmpcReference current_reference_;
   LmpcControlCommand previous_command_;
   SparseErrorModel error_model_;
+  std::size_t lap_sample_count_ = 0;
+  std::size_t total_sample_count_ = 0;
+  std::size_t completed_laps_ = 0;
+  double elapsed_time_ = 0.0;
+  double last_recorded_s_ = 0.0;
+  bool has_recorded_sample_ = false;
   bool solved_ = false;
 };
 

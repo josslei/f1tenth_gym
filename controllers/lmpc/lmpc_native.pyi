@@ -60,6 +60,11 @@ class LmpcConfig:
     max_brake_force: float
     max_steer: float
     wheelbase: float
+    track_length: float
+    max_lap_stored: int
+    reg_dist_max: float
+    reg_max_points: int
+    reg_max_points_per_lap: int
     def __init__(self) -> None: ...
 
 class SparseErrorModel:

@@ -70,6 +70,13 @@ class LMPCController(Controller):
             if right_bound_profile is None
             else np.asarray(right_bound_profile, dtype=np.float64)
         )
+        centerline_x_array = np.asarray(centerline_x, dtype=np.float64)
+        centerline_y_array = np.asarray(centerline_y, dtype=np.float64)
+        self.track = CenterlineTrack(
+            centerline_x_array.tolist(),
+            centerline_y_array.tolist(),
+            closed,
+        )
         native_config = LmpcConfig()
         if target_speed is None:
             if self.speed_profile is not None:
@@ -81,12 +88,12 @@ class LMPCController(Controller):
             native_config.target_speed = target_speed
         native_config.dt = dt
         native_config.wheelbase = wheelbase
-        self.native_controller = NativeLMPCController(native_config)
-        self.track = CenterlineTrack(
-            np.asarray(centerline_x, dtype=np.float64).tolist(),
-            np.asarray(centerline_y, dtype=np.float64).tolist(),
-            closed,
+        native_config.track_length = (
+            float(speed_total_length)
+            if speed_total_length is not None
+            else float(self.track.total_length())
         )
+        self.native_controller = NativeLMPCController(native_config)
         self.vehicle_state = VehicleState(0.0, 0.0, 0.0, 0.0)
         self.racing_state = self.track.to_racing_state(
             self._to_native_gym_state(self.vehicle_state, 0.0, 0.0)
