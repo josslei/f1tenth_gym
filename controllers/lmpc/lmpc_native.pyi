@@ -65,6 +65,7 @@ class LmpcConfig:
     reg_dist_max: float
     reg_max_points: int
     reg_max_points_per_lap: int
+    regression_horizon_stride: int
     def __init__(self) -> None: ...
 
 class SparseErrorModel:

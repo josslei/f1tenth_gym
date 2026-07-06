@@ -47,7 +47,12 @@ def test_lmpc_controller_projects_centerline_before_native_update(monkeypatch) -
             return NativeCommand()
 
     monkeypatch.setattr(controller_module, "NativeLMPCController", NativeController)
-    controller = LMPCController(np.array([0.0, 10.0]), np.array([0.0, 0.0]), False)
+    controller = LMPCController(
+        np.array([0.0, 10.0]),
+        np.array([0.0, 0.0]),
+        False,
+        regression_horizon_stride=4,
+    )
     native = controller.native_controller
     controller.update(
         VehicleState(3.0, 2.0, 0.1, 4.0), lateral_velocity=0.5, yaw_rate=0.2
@@ -55,6 +60,7 @@ def test_lmpc_controller_projects_centerline_before_native_update(monkeypatch) -
     command = controller.control()
 
     assert native.state is not None
+    assert native.config.regression_horizon_stride == 4
     assert native.state.to_array() == pytest.approx([3.0, 2.0, 0.1, 4.0, 0.5, 0.2])
     assert command.steering == pytest.approx(0.1)
     assert command.velocity == pytest.approx(2.0)
@@ -134,6 +140,7 @@ def test_lmpc_controller_loads_upstream_trajectory_table(monkeypatch, tmp_path) 
     command = controller.control()
 
     assert native.config.target_speed == pytest.approx(4.0)
+    assert native.config.regression_horizon_stride == 0
     assert native.state.to_array() == pytest.approx([5.0, 0.0, 0.0, 4.0, 0.0, 0.0])
     assert native.reference.target_speed == pytest.approx(4.0)
     assert native.reference.curvature == pytest.approx(0.1)

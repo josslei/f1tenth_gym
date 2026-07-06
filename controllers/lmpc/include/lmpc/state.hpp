@@ -67,6 +67,7 @@ struct LmpcConfig {
   double reg_dist_max = 1.0;
   std::size_t reg_max_points = 96;
   std::size_t reg_max_points_per_lap = 32;
+  std::size_t regression_horizon_stride = 0;
 };
 
 struct SparseErrorModel {

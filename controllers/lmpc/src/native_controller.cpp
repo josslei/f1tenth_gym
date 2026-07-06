@@ -371,6 +371,9 @@ private:
     A_values_.reserve(config_.horizon - 1);
     B_values_.reserve(config_.horizon - 1);
     C_values_.reserve(config_.horizon - 1);
+    casadi::DM dA = casadi::DM::zeros(model_.nx(), model_.nx());
+    casadi::DM dB = casadi::DM::zeros(model_.nx(), model_.nu());
+    casadi::DM dC = casadi::DM::zeros(model_.nx(), 1);
     for (casadi_int i = 0; i < static_cast<casadi_int>(config_.horizon - 1);
          ++i) {
       const casadi::DM x_ref = x_init(Slice(), i);
@@ -379,7 +382,13 @@ private:
       casadi::DM A;
       casadi::DM B;
       casadi::DM C;
-      compute_affine_model(x_ref, u_ref, A, B, C);
+      compute_nominal_affine_model(x_ref, u_ref, A, B, C);
+      if (completed_laps_ > 0 && should_update_regression(i)) {
+        compute_regression_residual(x_ref, u_ref, A, B, C, dA, dB, dC);
+      }
+      A += dA;
+      B += dB;
+      C += dC;
       A_values_.push_back(A);
       B_values_.push_back(B);
       C_values_.push_back(C);
@@ -389,9 +398,17 @@ private:
     }
   }
 
-  void compute_affine_model(const casadi::DM &x, const casadi::DM &u,
-                            casadi::DM &reg_a, casadi::DM &reg_b,
-                            casadi::DM &reg_c) {
+  bool should_update_regression(casadi_int horizon_index) const {
+    return horizon_index == 0 ||
+           (config_.regression_horizon_stride > 0 &&
+            horizon_index % static_cast<casadi_int>(
+                                config_.regression_horizon_stride) ==
+                0);
+  }
+
+  void compute_nominal_affine_model(const casadi::DM &x, const casadi::DM &u,
+                                    casadi::DM &reg_a, casadi::DM &reg_b,
+                                    casadi::DM &reg_c) {
     const auto jac = model_.discrete_dynamics_jacobian()(casadi::DMDict{
         {"x", x},
         {"u", u},
@@ -409,16 +426,18 @@ private:
                           })
                           .at("xip1");
     reg_c = xip1 - casadi::DM::mtimes(reg_a, x) - casadi::DM::mtimes(reg_b, u);
+  }
 
-    if (completed_laps_ == 0) {
-      return;
-    }
-
+  void compute_regression_residual(const casadi::DM &x, const casadi::DM &u,
+                                   const casadi::DM &nominal_a,
+                                   const casadi::DM &nominal_b,
+                                   const casadi::DM &nominal_c, casadi::DM &dA,
+                                   casadi::DM &dB, casadi::DM &dC) {
     const rt::RegQuery query{
         casadi::DM::vertcat({x(kb::XIndex::V), u}),
-        reg_a,
-        reg_b,
-        reg_c,
+        nominal_a,
+        nominal_b,
+        nominal_c,
         model_.discrete_dynamics(),
         config_.reg_dist_max,
         static_cast<casadi_int>(config_.reg_max_points),
@@ -429,15 +448,9 @@ private:
         rt::RegQuery::Indices{{kb::XIndex::V}},
     };
     const auto result = safe_set_->query(query);
-    reg_a(kb::XIndex::V, kb::XIndex::V) =
-        result.A(kb::XIndex::V, kb::XIndex::V);
-    reg_b(kb::XIndex::V, kb::UIndex::FD) =
-        result.B(kb::XIndex::V, kb::UIndex::FD);
-    reg_b(kb::XIndex::V, kb::UIndex::FB) =
-        result.B(kb::XIndex::V, kb::UIndex::FB);
-    reg_b(kb::XIndex::V, kb::UIndex::STEER) =
-        result.B(kb::XIndex::V, kb::UIndex::STEER);
-    reg_c(kb::XIndex::V) = result.C(kb::XIndex::V);
+    dA = result.A - nominal_a;
+    dB = result.B - nominal_b;
+    dC = result.C - nominal_c;
   }
 
   void store_error_model(const casadi::DM &reg_a, const casadi::DM &reg_b,

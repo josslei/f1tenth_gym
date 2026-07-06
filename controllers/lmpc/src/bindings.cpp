@@ -75,7 +75,9 @@ PYBIND11_MODULE(lmpc_native, m) {
       .def_readwrite("reg_dist_max", &lmpc::LmpcConfig::reg_dist_max)
       .def_readwrite("reg_max_points", &lmpc::LmpcConfig::reg_max_points)
       .def_readwrite("reg_max_points_per_lap",
-                     &lmpc::LmpcConfig::reg_max_points_per_lap);
+                     &lmpc::LmpcConfig::reg_max_points_per_lap)
+      .def_readwrite("regression_horizon_stride",
+                     &lmpc::LmpcConfig::regression_horizon_stride);
 
   py::class_<lmpc::SparseErrorModel>(m, "SparseErrorModel")
       .def_readonly("A", &lmpc::SparseErrorModel::A)
