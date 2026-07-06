@@ -72,7 +72,7 @@ def test_lmpc_controller_projects_centerline_before_native_update(monkeypatch) -
     command = controller.control()
 
     assert native.state is not None
-    assert native.config.regression_horizon_stride == 8
+    assert native.config.regression_horizon_stride == 4
     assert native.config.track_length == pytest.approx(10.0)
     assert native.state.to_array() == pytest.approx([3.0, 2.0, 0.1, 4.0, 0.5, 0.2])
     assert command.steering == pytest.approx(0.1)
@@ -157,7 +157,7 @@ def test_lmpc_controller_loads_upstream_trajectory_table(monkeypatch, tmp_path) 
     command = controller.control()
 
     assert native.config.target_speed == pytest.approx(4.0)
-    assert native.config.regression_horizon_stride == 8
+    assert native.config.regression_horizon_stride == 0
     assert native.config.track_length == pytest.approx(10.0)
     assert native.state.to_array() == pytest.approx([5.0, 0.0, 0.0, 4.0, 0.0, 0.0])
     assert native.reference.target_speed == pytest.approx(4.0)

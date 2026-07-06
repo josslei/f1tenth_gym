@@ -90,14 +90,19 @@ def controller_display_points(controller: Any) -> np.ndarray:
     return controller.waypoints[:, :2]
 
 
-def lmpc_diagnostics(controller: Any) -> str:
+def lmpc_diagnostics(controller: Any, lateral_errors: list[float]) -> str:
     if not isinstance(controller, LMPCController):
         return ""
+    mean_abs_e_y = float(np.mean(lateral_errors)) if lateral_errors else 0.0
+    max_abs_e_y = float(np.max(lateral_errors)) if lateral_errors else 0.0
     return (
         f" | lmpc completed_laps={controller.completed_laps()}"
         f" samples={controller.sample_count()}"
         f" lap_samples={controller.lap_sample_count()}"
         f" ss_points={controller.last_safe_set_points()}"
+        f" mean_abs_e_y={mean_abs_e_y:.3f}"
+        f" max_abs_e_y={max_abs_e_y:.3f}"
+        f" solver_success={controller.solver_success_rate():.1%}"
     )
 
 
@@ -122,6 +127,7 @@ def main() -> None:
     previous_lap_count = int(obs["lap_counts"][0])
     previous_lap_time = 0.0
     pending_lap_logs: list[str] = []
+    lateral_errors: list[float] = []
     step_count = 0
 
     viewer.update(obs)
@@ -130,19 +136,22 @@ def main() -> None:
     while True:
         if isinstance(controller, LMPCController):
             controller.update_from_observation(obs)
+            lateral_errors.append(abs(float(controller.racing_state.e_y)))
         else:
             state = obs_to_vehicle_state(obs)
             controller.update(state)
         cmd = controller.control()
         step_count += 1
         for message in pending_lap_logs:
-            print(f"{message}{lmpc_diagnostics(controller)}")
+            print(f"{message}{lmpc_diagnostics(controller, lateral_errors)}")
         pending_lap_logs.clear()
         if (
             isinstance(controller, LMPCController)
             and step_count % LMPC_DIAGNOSTIC_INTERVAL_STEPS == 0
         ):
-            print(f"LMPC step {step_count}{lmpc_diagnostics(controller)}")
+            print(
+                f"LMPC step {step_count}{lmpc_diagnostics(controller, lateral_errors)}"
+            )
         action = np.array([[cmd.steering, cmd.velocity]], dtype=np.float64)
 
         obs, _reward, terminated, truncated, _info = env.step(action)
@@ -164,7 +173,7 @@ def main() -> None:
             break
 
     for message in pending_lap_logs:
-        print(f"{message}{lmpc_diagnostics(controller)}")
+        print(f"{message}{lmpc_diagnostics(controller, lateral_errors)}")
 
     while not viewer.closed:
         viewer.render()

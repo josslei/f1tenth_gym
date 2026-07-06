@@ -65,17 +65,17 @@ struct LmpcConfig {
   double wheelbase = 0.33;
   double track_length = 1.0e6;
   std::size_t max_lap_stored = 3;
-  double reg_dist_max = 1.0;
+  double reg_dist_max = 2.0;
   std::size_t reg_max_points = 96;
   std::size_t reg_max_points_per_lap = 32;
-  std::size_t regression_horizon_stride = 8;
-  double lateral_weight = 0.2;
-  double heading_weight = 0.1;
-  double speed_weight = 0.1;
+  std::size_t regression_horizon_stride = 0;
+  double lateral_weight = 0.0;
+  double heading_weight = 0.0;
+  double speed_weight = 0.05;
   double terminal_lateral_weight = 0.0;
   double terminal_heading_weight = 0.0;
-  double progress_weight = 1.0;
-  double safe_set_cost_weight = 2.0;
+  double progress_weight = 2.0;
+  double safe_set_cost_weight = 5.0;
 };
 
 struct SparseErrorModel {
@@ -86,7 +86,7 @@ struct SparseErrorModel {
 
 struct LmpcSample {
   PaperLmpcState x;
-  std::array<double, 2> u{};
+  std::array<double, 3> u{};
   PaperLmpcState x_next;
 };
 
@@ -136,6 +136,7 @@ public:
   std::size_t completed_laps() const;
   std::size_t lap_sample_count() const;
   std::size_t last_safe_set_points() const;
+  double solver_success_rate() const;
 
 private:
   class Impl;

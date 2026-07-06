@@ -37,7 +37,7 @@ class LMPCController(Controller):
         curvature_profile: Sequence[float] | np.ndarray | None = None,
         left_bound_profile: Sequence[float] | np.ndarray | None = None,
         right_bound_profile: Sequence[float] | np.ndarray | None = None,
-        regression_horizon_stride: int = 8,
+        regression_horizon_stride: int = 0,
     ) -> None:
         if NativeLMPCController is None:
             raise RuntimeError(
@@ -116,7 +116,7 @@ class LMPCController(Controller):
         target_speed: float | None = None,
         dt: float = 0.01,
         wheelbase: float = 0.33,
-        regression_horizon_stride: int = 8,
+        regression_horizon_stride: int = 0,
     ) -> LMPCController:
         centerline = np.loadtxt(
             csv_path, delimiter=delimiter, skiprows=skiprows, dtype=np.float64
@@ -140,7 +140,7 @@ class LMPCController(Controller):
         target_speed: float | None = None,
         dt: float = 0.01,
         wheelbase: float = 0.33,
-        regression_horizon_stride: int = 8,
+        regression_horizon_stride: int = 0,
     ) -> LMPCController:
         table = np.loadtxt(table_path, dtype=np.float64)
         table = np.atleast_2d(table)
@@ -214,6 +214,9 @@ class LMPCController(Controller):
 
     def last_safe_set_points(self) -> int:
         return int(self.native_controller.last_safe_set_points())
+
+    def solver_success_rate(self) -> float:
+        return float(self.native_controller.solver_success_rate())
 
     def _target_speed_at_current_s(self, fallback: float) -> float:
         if self.speed_s is None or self.speed_profile is None:

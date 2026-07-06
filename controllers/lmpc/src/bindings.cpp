@@ -131,5 +131,7 @@ PYBIND11_MODULE(lmpc_native, m) {
       .def("completed_laps", &lmpc::NativeLMPCController::completed_laps)
       .def("lap_sample_count", &lmpc::NativeLMPCController::lap_sample_count)
       .def("last_safe_set_points",
-           &lmpc::NativeLMPCController::last_safe_set_points);
+           &lmpc::NativeLMPCController::last_safe_set_points)
+      .def("solver_success_rate",
+           &lmpc::NativeLMPCController::solver_success_rate);
 }

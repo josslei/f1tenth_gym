@@ -143,6 +143,8 @@ public:
     total_sample_count_ = 0;
     completed_laps_ = 0;
     last_safe_set_points_ = 0;
+    solver_attempt_count_ = 0;
+    solver_success_count_ = 0;
     elapsed_time_ = 0.0;
     last_recorded_s_ = 0.0;
     has_recorded_sample_ = false;
@@ -197,13 +199,15 @@ public:
       last_x_ = sol_->value(X_);
       last_u_ = sol_->value(U_);
       solved_ = true;
-      previous_native_u_ = last_u_(Slice(), 0);
       previous_command_ = command_from_solution(last_x_, last_u_);
+      previous_native_u_ = command_native_u(previous_command_);
+      solver_success_count_++;
     } catch (const std::exception &) {
       solved_ = false;
       previous_command_ = fallback_command();
-      previous_native_u_ = fallback_native_u(previous_command_);
+      previous_native_u_ = command_native_u(previous_command_);
     }
+    solver_attempt_count_++;
     record_current_sample();
     return previous_command_;
   }
@@ -213,6 +217,13 @@ public:
   std::size_t completed_laps() const { return completed_laps_; }
   std::size_t lap_sample_count() const { return lap_sample_count_; }
   std::size_t last_safe_set_points() const { return last_safe_set_points_; }
+  double solver_success_rate() const {
+    if (solver_attempt_count_ == 0) {
+      return 0.0;
+    }
+    return static_cast<double>(solver_success_count_) /
+           static_cast<double>(solver_attempt_count_);
+  }
 
 private:
   casadi::DM curvature_horizon(casadi_int horizon_steps) const {
@@ -345,8 +356,16 @@ private:
     return LmpcControlCommand{steer, velocity};
   }
 
-  casadi::DM fallback_native_u(const LmpcControlCommand &command) const {
+  casadi::DM command_native_u(const LmpcControlCommand &command) const {
     casadi::DM u = casadi::DM::zeros(model_.nu(), 1);
+    const double acceleration =
+        (command.velocity - std::max(current_state_.v_x, 0.0)) / config_.dt;
+    const double force = kVehicleMass * acceleration;
+    if (force >= 0.0) {
+      u(kb::UIndex::FD) = clamp(force, 0.0, config_.max_drive_force);
+    } else {
+      u(kb::UIndex::FB) = clamp(force, config_.max_brake_force, 0.0);
+    }
     u(kb::UIndex::STEER) = command.steering;
     return u;
   }
@@ -466,7 +485,8 @@ private:
                                    const casadi::DM &nominal_c, casadi::DM &dA,
                                    casadi::DM &dB, casadi::DM &dC) {
     const rt::RegQuery query{
-        casadi::DM::vertcat({x(kb::XIndex::V), u}),
+        casadi::DM::vertcat(
+            {x(kb::XIndex::PY), x(kb::XIndex::YAW), x(kb::XIndex::V), u}),
         nominal_a,
         nominal_b,
         nominal_c,
@@ -474,10 +494,15 @@ private:
         config_.reg_dist_max,
         static_cast<casadi_int>(config_.reg_max_points),
         static_cast<casadi_int>(config_.reg_max_points_per_lap),
-        rt::RegQuery::Indices{{kb::XIndex::V}},
+        rt::RegQuery::Indices{{kb::XIndex::PY, kb::XIndex::YAW, kb::XIndex::V},
+                              {kb::XIndex::PY, kb::XIndex::YAW, kb::XIndex::V},
+                              {kb::XIndex::PY, kb::XIndex::YAW, kb::XIndex::V}},
         rt::RegQuery::Indices{
+            {kb::UIndex::FD, kb::UIndex::FB, kb::UIndex::STEER},
+            {kb::UIndex::FD, kb::UIndex::FB, kb::UIndex::STEER},
             {kb::UIndex::FD, kb::UIndex::FB, kb::UIndex::STEER}},
-        rt::RegQuery::Indices{{kb::XIndex::V}},
+        rt::RegQuery::Indices{
+            {kb::XIndex::PY}, {kb::XIndex::YAW}, {kb::XIndex::V}},
     };
     const auto result = safe_set_->query(query);
     dA = result.A - nominal_a;
@@ -578,6 +603,8 @@ private:
   std::size_t total_sample_count_ = 0;
   std::size_t completed_laps_ = 0;
   std::size_t last_safe_set_points_ = 0;
+  std::size_t solver_attempt_count_ = 0;
+  std::size_t solver_success_count_ = 0;
   double elapsed_time_ = 0.0;
   double last_recorded_s_ = 0.0;
   bool has_recorded_sample_ = false;
@@ -622,6 +649,10 @@ std::size_t NativeLMPCController::lap_sample_count() const {
 
 std::size_t NativeLMPCController::last_safe_set_points() const {
   return impl_->last_safe_set_points();
+}
+
+double NativeLMPCController::solver_success_rate() const {
+  return impl_->solver_success_rate();
 }
 
 } // namespace f110_gym_lmpc
