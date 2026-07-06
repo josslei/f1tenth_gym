@@ -16,3 +16,6 @@
 [submodule "thirdparty/Racing-LMPC-ROS2"]
 	path = thirdparty/Racing-LMPC-ROS2
 	url = git@github.com:MPC-Berkeley/Racing-LMPC-ROS2
+[submodule "thirdparty/casadi"]
+	path = thirdparty/casadi
+	url = git@github.com:casadi/casadi

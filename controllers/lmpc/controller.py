@@ -1,0 +1,238 @@
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, Sequence
+
+import numpy as np
+
+from controllers.controller_base import ControlCommand, Controller, VehicleState
+from .adapter import obs_to_gym_vehicle_state
+from .binding import (
+    CenterlineTrack,
+    GymVehicleState,
+    LmpcConfig,
+    LmpcReference,
+    NativeLMPCController,
+)
+
+
+class LMPCController(Controller):
+    """Gym-facing wrapper around the native C++ LMPC implementation.
+
+    The wrapper owns the centerline projection used to convert the generic Gym
+    vehicle state into the Frenet state order consumed by Racing-LMPC.
+    """
+
+    def __init__(
+        self,
+        centerline_x: Sequence[float] | np.ndarray,
+        centerline_y: Sequence[float] | np.ndarray,
+        closed: bool = True,
+        target_speed: float | None = None,
+        dt: float = 0.01,
+        wheelbase: float = 0.33,
+        speed_s: Sequence[float] | np.ndarray | None = None,
+        speed_profile: Sequence[float] | np.ndarray | None = None,
+        speed_total_length: float | None = None,
+        curvature_profile: Sequence[float] | np.ndarray | None = None,
+        left_bound_profile: Sequence[float] | np.ndarray | None = None,
+        right_bound_profile: Sequence[float] | np.ndarray | None = None,
+    ) -> None:
+        if NativeLMPCController is None:
+            raise RuntimeError(
+                "NativeLMPCController is not exposed by lmpc_native yet."
+            )
+        if LmpcConfig is None:
+            raise RuntimeError("LmpcConfig is not exposed by lmpc_native yet.")
+        if LmpcReference is None:
+            raise RuntimeError("LmpcReference is not exposed by lmpc_native yet.")
+        self.speed_s = (
+            None if speed_s is None else np.asarray(speed_s, dtype=np.float64)
+        )
+        self.speed_profile = (
+            None
+            if speed_profile is None
+            else np.asarray(speed_profile, dtype=np.float64)
+        )
+        self.speed_total_length = speed_total_length
+        self.curvature_profile = (
+            None
+            if curvature_profile is None
+            else np.asarray(curvature_profile, dtype=np.float64)
+        )
+        self.left_bound_profile = (
+            None
+            if left_bound_profile is None
+            else np.asarray(left_bound_profile, dtype=np.float64)
+        )
+        self.right_bound_profile = (
+            None
+            if right_bound_profile is None
+            else np.asarray(right_bound_profile, dtype=np.float64)
+        )
+        native_config = LmpcConfig()
+        if target_speed is None:
+            if self.speed_profile is not None:
+                native_config.target_speed = max(
+                    float(np.mean(self.speed_profile)),
+                    0.5 * float(np.max(self.speed_profile)),
+                )
+        else:
+            native_config.target_speed = target_speed
+        native_config.dt = dt
+        native_config.wheelbase = wheelbase
+        self.native_controller = NativeLMPCController(native_config)
+        self.track = CenterlineTrack(
+            np.asarray(centerline_x, dtype=np.float64).tolist(),
+            np.asarray(centerline_y, dtype=np.float64).tolist(),
+            closed,
+        )
+        self.vehicle_state = VehicleState(0.0, 0.0, 0.0, 0.0)
+        self.racing_state = self.track.to_racing_state(
+            self._to_native_gym_state(self.vehicle_state, 0.0, 0.0)
+        )
+        self._update_native_reference()
+
+    @classmethod
+    def from_centerline_csv(
+        cls,
+        csv_path: str | Path,
+        delimiter: str = ";",
+        skiprows: int = 1,
+        x_col: int = 1,
+        y_col: int = 2,
+        closed: bool = True,
+        target_speed: float | None = None,
+        dt: float = 0.01,
+        wheelbase: float = 0.33,
+    ) -> LMPCController:
+        centerline = np.loadtxt(
+            csv_path, delimiter=delimiter, skiprows=skiprows, dtype=np.float64
+        )
+        centerline = np.atleast_2d(centerline)
+        return cls(
+            centerline[:, x_col],
+            centerline[:, y_col],
+            closed,
+            target_speed=target_speed,
+            dt=dt,
+            wheelbase=wheelbase,
+        )
+
+    @classmethod
+    def from_trajectory_table(
+        cls,
+        table_path: str | Path,
+        closed: bool = True,
+        target_speed: float | None = None,
+        dt: float = 0.01,
+        wheelbase: float = 0.33,
+    ) -> LMPCController:
+        table = np.loadtxt(table_path, dtype=np.float64)
+        table = np.atleast_2d(table)
+        normals = np.column_stack((-np.sin(table[:, 3]), np.cos(table[:, 3])))
+        signed_left = np.sum((table[:, 9:11] - table[:, 0:2]) * normals, axis=1)
+        signed_right = np.sum((table[:, 11:13] - table[:, 0:2]) * normals, axis=1)
+        return cls(
+            table[:, 0],
+            table[:, 1],
+            closed,
+            target_speed=target_speed,
+            dt=dt,
+            wheelbase=wheelbase,
+            speed_s=table[:, 6],
+            speed_profile=table[:, 4],
+            speed_total_length=float(table[0, 7]),
+            curvature_profile=table[:, 5],
+            left_bound_profile=np.maximum(signed_left, signed_right),
+            right_bound_profile=np.maximum(-signed_left, -signed_right),
+        )
+
+    def reset(self) -> None:
+        self.vehicle_state = VehicleState(0.0, 0.0, 0.0, 0.0)
+        self.racing_state = self.track.to_racing_state(
+            self._to_native_gym_state(self.vehicle_state, 0.0, 0.0)
+        )
+        self.native_controller.reset()
+        self._update_native_reference()
+
+    def update(
+        self,
+        vehicle_state: VehicleState,
+        lateral_velocity: float = 0.0,
+        yaw_rate: float = 0.0,
+    ) -> None:
+        self.vehicle_state = vehicle_state
+        self.racing_state = self.track.to_racing_state(
+            self._to_native_gym_state(vehicle_state, lateral_velocity, yaw_rate)
+        )
+        self._update_native_reference()
+        self.native_controller.update(self.racing_state)
+
+    def update_from_observation(self, obs: dict[str, Any]) -> None:
+        gym_state = obs_to_gym_vehicle_state(obs)
+        self.vehicle_state = VehicleState(
+            gym_state.x,
+            gym_state.y,
+            gym_state.yaw,
+            gym_state.v_x,
+        )
+        self.racing_state = self.track.to_racing_state(gym_state)
+        self._update_native_reference()
+        self.native_controller.update(self.racing_state)
+
+    def control(self) -> ControlCommand:
+        command = self.native_controller.control()
+        return ControlCommand(
+            steering=float(command.steering),
+            velocity=self._target_speed_at_current_s(float(command.velocity)),
+        )
+
+    def _target_speed_at_current_s(self, fallback: float) -> float:
+        if self.speed_s is None or self.speed_profile is None:
+            return fallback
+        return self._interp_closed_profile(self.speed_profile)
+
+    def _update_native_reference(self) -> None:
+        if LmpcReference is None:
+            raise RuntimeError("LmpcReference is not exposed by lmpc_native yet.")
+        reference = LmpcReference()
+        reference.target_speed = self._target_speed_at_current_s(reference.target_speed)
+        if self.curvature_profile is not None:
+            reference.curvature = self._interp_closed_profile(self.curvature_profile)
+        if self.left_bound_profile is not None:
+            reference.left_bound = self._interp_closed_profile(self.left_bound_profile)
+        if self.right_bound_profile is not None:
+            reference.right_bound = self._interp_closed_profile(
+                self.right_bound_profile
+            )
+        self.native_controller.set_reference(reference)
+
+    def _interp_closed_profile(self, profile: np.ndarray) -> float:
+        assert self.speed_s is not None
+        if self.speed_total_length is None:
+            return float(np.interp(self.racing_state.s, self.speed_s, profile))
+        speed_s = np.r_[self.speed_s, self.speed_total_length]
+        closed_profile = np.r_[profile, profile[0]]
+        return float(
+            np.interp(
+                np.mod(self.racing_state.s, self.speed_total_length),
+                speed_s,
+                closed_profile,
+            )
+        )
+
+    def _to_native_gym_state(
+        self,
+        vehicle_state: VehicleState,
+        lateral_velocity: float,
+        yaw_rate: float,
+    ) -> GymVehicleState:
+        return GymVehicleState(
+            vehicle_state.x,
+            vehicle_state.y,
+            vehicle_state.yaw,
+            vehicle_state.speed,
+            lateral_velocity,
+            yaw_rate,
+        )
