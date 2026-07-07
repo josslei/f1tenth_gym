@@ -141,3 +141,46 @@ class DrivenLineOverlay:
                 colors=("Bn", colors),
             ),
         )
+
+
+@dataclass
+class RecedingHorizonOverlay:
+    """Draw an LMPC predicted horizon as a viewer callback."""
+
+    controller: Any
+    color: tuple[int, int, int, int] = (255, 0, 255, 255)
+    point_color: tuple[int, int, int, int] = (255, 255, 255, 255)
+    render_scale: float = WAYPOINT_RENDER_SCALE
+    _vertex_list: Any | None = None
+    _point_vertex_list: Any | None = None
+
+    def __call__(self, renderer: Any, obs: dict[str, Any] | None = None) -> None:
+        del obs
+        points_xy = self.controller.predicted_horizon_xy()
+        if self._vertex_list is not None:
+            self._vertex_list.delete()
+            self._vertex_list = None
+        if self._point_vertex_list is not None:
+            self._point_vertex_list.delete()
+            self._point_vertex_list = None
+        if points_xy.shape[0] < 2:
+            return
+
+        from pyglet.gl.gl import GL_LINE_STRIP, GL_POINTS
+
+        positions = _to_xyz_flat(points_xy, self.render_scale)
+        colors = list(self.color) * points_xy.shape[0]
+        self._vertex_list = renderer.program.vertex_list(
+            points_xy.shape[0],
+            GL_LINE_STRIP,
+            batch=renderer.batch,
+            position=("f", positions),
+            colors=("Bn", colors),
+        )
+        self._point_vertex_list = renderer.program.vertex_list(
+            points_xy.shape[0],
+            GL_POINTS,
+            batch=renderer.batch,
+            position=("f", positions),
+            colors=("Bn", list(self.point_color) * points_xy.shape[0]),
+        )

@@ -133,6 +133,7 @@ public:
   void set_reference(const LmpcReference &reference);
   LmpcControlCommand control();
 
+  std::vector<std::array<double, 2>> predicted_horizon() const;
   const SparseErrorModel &error_model() const;
   std::size_t sample_count() const;
   std::size_t completed_laps() const;

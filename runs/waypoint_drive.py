@@ -13,6 +13,7 @@ from controllers.stanley import Stanley
 from f110_gym.viewer import F110Viewer
 from utils.waypoint_view import (
     DrivenLineOverlay,
+    RecedingHorizonOverlay,
     WaypointOverlay,
     initial_pose_from_waypoints,
 )
@@ -24,7 +25,7 @@ LMPC_TRAJECTORY = "outputs/lmpc_trajectories/f110_gym_centerline.txt"
 CENTERLINE_CSV = "maps/custom/f110_gym_10/f110_gym_centerline.csv"
 # Pure pursuit / Stanley can still use the optimized raceline waypoints.
 RACELINE_CSV = "maps/custom/f110_gym_10/example_waypoints.csv"
-ZOOM = 2.0  # > 1 -> Zoom out; < 1 -> Zoom in
+ZOOM = 1.0  # > 1 -> Zoom out; < 1 -> Zoom in
 WINDOW_WIDTH = 1000
 WINDOW_HEIGHT = 800
 CONTROLLER_NAME: Final[str] = "lmpc"
@@ -100,6 +101,7 @@ def lmpc_diagnostics(controller: Any, lateral_errors: list[float]) -> str:
         f" samples={controller.sample_count()}"
         f" lap_samples={controller.lap_sample_count()}"
         f" ss_points={controller.last_safe_set_points()}"
+        f" horizon_points={controller.predicted_horizon_xy().shape[0]}"
         f" mean_abs_e_y={mean_abs_e_y:.3f}"
         f" max_abs_e_y={max_abs_e_y:.3f}"
         f" solver_success={controller.solver_success_rate():.1%}"
@@ -114,13 +116,16 @@ def main() -> None:
     initial_pose = initial_pose_from_waypoints(display_points)
     waypoint_overlay = WaypointOverlay(display_points)
     driven_line_overlay = DrivenLineOverlay()
+    callbacks = [waypoint_overlay, driven_line_overlay]
+    if isinstance(controller, LMPCController):
+        callbacks.append(RecedingHorizonOverlay(controller))
     viewer = F110Viewer.from_env(
         env.unwrapped,
         width=WINDOW_WIDTH,
         height=WINDOW_HEIGHT,
         target_fps=60.0,
         initial_zoom=ZOOM,
-        callbacks=[waypoint_overlay, driven_line_overlay],
+        callbacks=callbacks,
     )
 
     obs, _info = env.reset(options={"poses": initial_pose})

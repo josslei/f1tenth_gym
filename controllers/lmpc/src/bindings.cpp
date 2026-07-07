@@ -129,6 +129,7 @@ PYBIND11_MODULE(lmpc_native, m) {
       .def("set_reference", &lmpc::NativeLMPCController::set_reference,
            py::arg("reference"))
       .def("control", &lmpc::NativeLMPCController::control)
+      .def("predicted_horizon", &lmpc::NativeLMPCController::predicted_horizon)
       .def("error_model", &lmpc::NativeLMPCController::error_model,
            py::return_value_policy::reference_internal)
       .def("sample_count", &lmpc::NativeLMPCController::sample_count)

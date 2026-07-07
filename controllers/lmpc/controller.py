@@ -73,6 +73,9 @@ class LMPCController(Controller):
         )
         centerline_x_array = np.asarray(centerline_x, dtype=np.float64)
         centerline_y_array = np.asarray(centerline_y, dtype=np.float64)
+        self.centerline_x = centerline_x_array
+        self.centerline_y = centerline_y_array
+        self.closed = closed
         self.track = CenterlineTrack(
             centerline_x_array.tolist(),
             centerline_y_array.tolist(),
@@ -218,6 +221,14 @@ class LMPCController(Controller):
     def solver_success_rate(self) -> float:
         return float(self.native_controller.solver_success_rate())
 
+    def predicted_horizon_xy(self) -> np.ndarray:
+        horizon = np.asarray(
+            self.native_controller.predicted_horizon(), dtype=np.float64
+        )
+        if horizon.size == 0:
+            return np.empty((0, 2), dtype=np.float64)
+        return self._frenet_to_world(horizon[:, 0], horizon[:, 1])
+
     def _target_speed_at_current_s(self, fallback: float) -> float:
         if self.speed_s is None or self.speed_profile is None:
             return fallback
@@ -274,6 +285,33 @@ class LMPCController(Controller):
                 closed_profile,
             )
         )
+
+    def _frenet_to_world(self, s: np.ndarray, e_y: np.ndarray) -> np.ndarray:
+        centerline_s = np.asarray(self.track.s(), dtype=np.float64)
+        if self.closed:
+            total_length = float(self.track.total_length())
+            query_s = np.mod(s, total_length)
+            path_s = np.r_[centerline_s, total_length]
+            path_x = np.r_[self.centerline_x, self.centerline_x[0]]
+            path_y = np.r_[self.centerline_y, self.centerline_y[0]]
+        else:
+            query_s = np.clip(s, centerline_s[0], centerline_s[-1])
+            path_s = centerline_s
+            path_x = self.centerline_x
+            path_y = self.centerline_y
+
+        segment_indices = np.searchsorted(path_s, query_s, side="right") - 1
+        segment_indices = np.clip(segment_indices, 0, path_s.size - 2)
+        next_indices = segment_indices + 1
+        dx = path_x[next_indices] - path_x[segment_indices]
+        dy = path_y[next_indices] - path_y[segment_indices]
+        segment_lengths = path_s[next_indices] - path_s[segment_indices]
+        t = (query_s - path_s[segment_indices]) / segment_lengths
+        base_x = path_x[segment_indices] + t * dx
+        base_y = path_y[segment_indices] + t * dy
+        normal_x = -dy / segment_lengths
+        normal_y = dx / segment_lengths
+        return np.column_stack((base_x + e_y * normal_x, base_y + e_y * normal_y))
 
     def _to_native_gym_state(
         self,

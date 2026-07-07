@@ -135,6 +135,7 @@ public:
     C_values_.clear();
     ss_x_value_ = casadi::DM();
     ss_costs_value_ = casadi::DM();
+    last_horizon_.clear();
     lap_x_ = casadi::DM();
     lap_u_ = casadi::DM();
     lap_k_ = casadi::DM();
@@ -184,6 +185,7 @@ public:
     }
     set_dynamics_parameters(x_init);
     set_safe_set_terminal(x_init(Slice(), N - 1));
+    store_predicted_horizon(x_init);
     for (casadi_int i = 0; i < N - 1; ++i) {
       opti_.set_value(A_params_[i], A_values_[i]);
       opti_.set_value(B_params_[i], B_values_[i]);
@@ -198,6 +200,7 @@ public:
       sol_ = std::make_shared<casadi::OptiSol>(opti_.solve_limited());
       last_x_ = sol_->value(X_);
       last_u_ = sol_->value(U_);
+      store_predicted_horizon(last_x_);
       solved_ = true;
       previous_command_ = command_from_solution(last_x_, last_u_);
       previous_native_u_ = command_native_u(previous_command_);
@@ -210,6 +213,10 @@ public:
     solver_attempt_count_++;
     record_current_sample();
     return previous_command_;
+  }
+
+  const std::vector<std::array<double, 2>> &predicted_horizon() const {
+    return last_horizon_;
   }
 
   const SparseErrorModel &error_model() const { return error_model_; }
@@ -373,6 +380,15 @@ private:
     }
     u(kb::UIndex::STEER) = command.steering;
     return u;
+  }
+
+  void store_predicted_horizon(const casadi::DM &x) {
+    last_horizon_.clear();
+    last_horizon_.reserve(static_cast<std::size_t>(x.size2()));
+    for (casadi_int i = 0; i < x.size2(); ++i) {
+      last_horizon_.push_back({static_cast<double>(x(kb::XIndex::PX, i)),
+                               static_cast<double>(x(kb::XIndex::PY, i))});
+    }
   }
 
   casadi::DM current_state_dm() const {
@@ -590,6 +606,7 @@ private:
   casadi::DM last_x_;
   casadi::DM last_u_;
   casadi::DM previous_native_u_;
+  std::vector<std::array<double, 2>> last_horizon_;
   std::vector<casadi::DM> A_values_;
   std::vector<casadi::DM> B_values_;
   std::vector<casadi::DM> C_values_;
@@ -635,6 +652,11 @@ void NativeLMPCController::set_reference(const LmpcReference &reference) {
 }
 
 LmpcControlCommand NativeLMPCController::control() { return impl_->control(); }
+
+std::vector<std::array<double, 2>>
+NativeLMPCController::predicted_horizon() const {
+  return impl_->predicted_horizon();
+}
 
 const SparseErrorModel &NativeLMPCController::error_model() const {
   return impl_->error_model();
