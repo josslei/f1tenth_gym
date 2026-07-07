@@ -31,6 +31,7 @@ WINDOW_HEIGHT = 800
 CONTROLLER_NAME: Final[str] = "lmpc"
 LAPS_TO_COMPLETE = 5
 LMPC_DIAGNOSTIC_INTERVAL_STEPS = 100
+LMPC_HORIZON_STEPS = 150
 
 # Pure Pursuit hyperparameters
 MIN_LOOKAHEAD = 1.0
@@ -81,7 +82,10 @@ def build_controller(f110_env: Any):
             k=STANLEY_K,
         )
     if CONTROLLER_NAME == "lmpc":
-        return LMPCController.from_trajectory_table(LMPC_TRAJECTORY)
+        return LMPCController.from_trajectory_table(
+            LMPC_TRAJECTORY,
+            horizon=LMPC_HORIZON_STEPS,
+        )
     raise ValueError(f"Unknown controller: {CONTROLLER_NAME}")
 
 

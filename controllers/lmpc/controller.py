@@ -38,6 +38,7 @@ class LMPCController(Controller):
         left_bound_profile: Sequence[float] | np.ndarray | None = None,
         right_bound_profile: Sequence[float] | np.ndarray | None = None,
         regression_horizon_stride: int = 0,
+        horizon: int | None = None,
     ) -> None:
         if NativeLMPCController is None:
             raise RuntimeError(
@@ -91,6 +92,8 @@ class LMPCController(Controller):
         else:
             native_config.target_speed = target_speed
         native_config.dt = dt
+        if horizon is not None:
+            native_config.horizon = horizon
         native_config.wheelbase = wheelbase
         native_config.regression_horizon_stride = regression_horizon_stride
         native_config.track_length = (
@@ -120,6 +123,7 @@ class LMPCController(Controller):
         dt: float = 0.01,
         wheelbase: float = 0.33,
         regression_horizon_stride: int = 0,
+        horizon: int | None = None,
     ) -> LMPCController:
         centerline = np.loadtxt(
             csv_path, delimiter=delimiter, skiprows=skiprows, dtype=np.float64
@@ -133,6 +137,7 @@ class LMPCController(Controller):
             dt=dt,
             wheelbase=wheelbase,
             regression_horizon_stride=regression_horizon_stride,
+            horizon=horizon,
         )
 
     @classmethod
@@ -144,6 +149,7 @@ class LMPCController(Controller):
         dt: float = 0.01,
         wheelbase: float = 0.33,
         regression_horizon_stride: int = 0,
+        horizon: int | None = None,
     ) -> LMPCController:
         table = np.loadtxt(table_path, dtype=np.float64)
         table = np.atleast_2d(table)
@@ -164,6 +170,7 @@ class LMPCController(Controller):
             curvature_profile=table[:, 5],
             left_bound_profile=np.maximum(signed_left, signed_right),
             right_bound_profile=np.maximum(-signed_left, -signed_right),
+            horizon=horizon,
         )
 
     def reset(self) -> None:
