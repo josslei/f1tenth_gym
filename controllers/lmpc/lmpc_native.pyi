@@ -69,10 +69,12 @@ class LmpcConfig:
     regression_horizon_stride: int
     lateral_weight: float
     heading_weight: float
-    speed_weight: float
     terminal_lateral_weight: float
     terminal_heading_weight: float
-    progress_weight: float
+    input_weight_fd: float
+    input_weight_fb: float
+    input_weight_steer: float
+    control_rate_weight: float
     safe_set_cost_weight: float
     def __init__(self) -> None: ...
 

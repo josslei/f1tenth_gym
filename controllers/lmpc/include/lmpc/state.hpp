@@ -71,11 +71,13 @@ struct LmpcConfig {
   std::size_t regression_horizon_stride = 0;
   double lateral_weight = 0.0;
   double heading_weight = 0.0;
-  double speed_weight = 0.05;
   double terminal_lateral_weight = 0.0;
   double terminal_heading_weight = 0.0;
-  double progress_weight = 2.0;
-  double safe_set_cost_weight = 5.0;
+  double input_weight_fd = 1.0e-3;
+  double input_weight_fb = 1.0e-3;
+  double input_weight_steer = 0.1;
+  double control_rate_weight = 0.1;
+  double safe_set_cost_weight = 1.0;
 };
 
 struct SparseErrorModel {

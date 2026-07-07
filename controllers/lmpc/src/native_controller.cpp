@@ -169,7 +169,7 @@ public:
     opti_.set_value(x0_, x0);
     opti_.set_value(dt_, config_.dt);
     opti_.set_value(kappa_, curvature_horizon(N - 1));
-    opti_.set_value(target_speed_, current_reference_.target_speed);
+    opti_.set_value(u_prev_param_, previous_native_u_);
     opti_.set_value(left_bound_, current_reference_.left_bound);
     opti_.set_value(right_bound_, current_reference_.right_bound);
 
@@ -259,7 +259,7 @@ private:
     x0_ = opti_.parameter(model_.nx(), 1);
     dt_ = opti_.parameter(1, 1);
     kappa_ = opti_.parameter(1, N - 1);
-    target_speed_ = opti_.parameter(1, 1);
+    u_prev_param_ = opti_.parameter(model_.nu(), 1);
     left_bound_ = opti_.parameter(1, 1);
     right_bound_ = opti_.parameter(1, 1);
     ss_x_ = opti_.parameter(model_.nx(), config_.reg_max_points);
@@ -284,16 +284,21 @@ private:
                                    casadi::MX::mtimes({B_params_[i], ui}) +
                                    C_params_[i]);
 
-      cost += config_.lateral_weight * xi(kb::XIndex::PY) * xi(kb::XIndex::PY);
-      cost +=
-          config_.heading_weight * xi(kb::XIndex::YAW) * xi(kb::XIndex::YAW);
-      const auto dv = xi(kb::XIndex::V) - target_speed_;
-      cost += config_.speed_weight * dv * dv;
-      cost -=
-          config_.progress_weight * (xip1(kb::XIndex::PX) - xi(kb::XIndex::PX));
-      cost += 1.0e-3 * ui(kb::UIndex::FD) * ui(kb::UIndex::FD);
-      cost += 1.0e-3 * ui(kb::UIndex::FB) * ui(kb::UIndex::FB);
-      cost += 0.1 * ui(kb::UIndex::STEER) * ui(kb::UIndex::STEER);
+      // Minimum-time structure: terminal cost-to-go drives improvement while
+      // fixed-horizon stage cost keeps the paper objective form.
+      cost += 1.0;
+      cost += config_.input_weight_fd * ui(kb::UIndex::FD) * ui(kb::UIndex::FD);
+      cost += config_.input_weight_fb * ui(kb::UIndex::FB) * ui(kb::UIndex::FB);
+      cost += config_.input_weight_steer * ui(kb::UIndex::STEER) *
+              ui(kb::UIndex::STEER);
+      casadi::MX u_prev_i;
+      if (i == 0) {
+        u_prev_i = u_prev_param_;
+      } else {
+        u_prev_i = U_(Slice(), i - 1);
+      }
+      const auto du = ui - u_prev_i;
+      cost += config_.control_rate_weight * casadi::MX::sumsqr(du);
 
       opti_.subject_to(
           opti_.bounded(0.0, ui(kb::UIndex::FD), config_.max_drive_force));
@@ -544,7 +549,7 @@ private:
       last_safe_set_points_ = static_cast<std::size_t>(result.x.size2());
       if (result.x.size2() > 0) {
         ss_x = result.x;
-        ss_costs = result.J - result.J(0);
+        ss_costs = result.J;
         if (ss_x.size2() < num_points) {
           const auto pad_count = num_points - ss_x.size2();
           ss_x = casadi::DM::horzcat(
@@ -572,7 +577,7 @@ private:
   casadi::MX x0_;
   casadi::MX dt_;
   casadi::MX kappa_;
-  casadi::MX target_speed_;
+  casadi::MX u_prev_param_;
   casadi::MX left_bound_;
   casadi::MX right_bound_;
   std::vector<casadi::MX> A_params_;

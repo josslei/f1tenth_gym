@@ -82,12 +82,16 @@ PYBIND11_MODULE(lmpc_native, m) {
                      &lmpc::LmpcConfig::regression_horizon_stride)
       .def_readwrite("lateral_weight", &lmpc::LmpcConfig::lateral_weight)
       .def_readwrite("heading_weight", &lmpc::LmpcConfig::heading_weight)
-      .def_readwrite("speed_weight", &lmpc::LmpcConfig::speed_weight)
       .def_readwrite("terminal_lateral_weight",
                      &lmpc::LmpcConfig::terminal_lateral_weight)
       .def_readwrite("terminal_heading_weight",
                      &lmpc::LmpcConfig::terminal_heading_weight)
-      .def_readwrite("progress_weight", &lmpc::LmpcConfig::progress_weight)
+      .def_readwrite("input_weight_fd", &lmpc::LmpcConfig::input_weight_fd)
+      .def_readwrite("input_weight_fb", &lmpc::LmpcConfig::input_weight_fb)
+      .def_readwrite("input_weight_steer",
+                     &lmpc::LmpcConfig::input_weight_steer)
+      .def_readwrite("control_rate_weight",
+                     &lmpc::LmpcConfig::control_rate_weight)
       .def_readwrite("safe_set_cost_weight",
                      &lmpc::LmpcConfig::safe_set_cost_weight);
 
