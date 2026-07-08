@@ -101,6 +101,9 @@ def test_lmpc_controller_loads_upstream_trajectory_table(monkeypatch, tmp_path) 
         def set_reference(self, reference) -> None:
             self.reference = reference
 
+        def set_curvature_profile(self, s, k, total_length) -> None:
+            self.curvature_profile = (s, k, total_length)
+
         def control(self) -> NativeCommand:
             return NativeCommand()
 

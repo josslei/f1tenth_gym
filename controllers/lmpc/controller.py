@@ -113,6 +113,17 @@ class LMPCController(Controller):
         self.native_horizon = int(native_config.horizon)
         self.native_dt = float(native_config.dt)
         self.native_controller = NativeLMPCController(native_config)
+        # Give the native controller kappa(s) so it can evaluate per-stage
+        # curvature at the plan's predicted s (like the upstream), instead of a
+        # uniform-speed-assumed curvature sequence.
+        if self.curvature_profile is not None and self.speed_s is not None:
+            self.native_controller.set_curvature_profile(
+                self.speed_s.tolist(),
+                self.curvature_profile.tolist(),
+                float(self.speed_total_length)
+                if self.speed_total_length is not None
+                else 0.0,
+            )
         self.vehicle_state = VehicleState(0.0, 0.0, 0.0, 0.0)
         self.racing_state = self.track.to_racing_state(
             self._to_native_gym_state(self.vehicle_state, 0.0, 0.0)
@@ -231,9 +242,9 @@ class LMPCController(Controller):
     def load_initial_lap(self, csv_path: str | Path) -> int:
         """Seed the safe set (D^0) from a recorded seed-lap CSV.
 
-        Columns are ``[lap, s, e_y, e_psi, v, Fd, Fb, delta, k, t]`` (one row per
-        simulator step). Each distinct ``lap`` value is added to the safe set as
-        a separate historical lap. Returns the number of laps loaded.
+        Columns are ``[lap, s, e_y, e_psi, v_x, v_y, omega, lon, delta, k, t]``
+        (one row per simulator step). Each distinct ``lap`` value is added to the
+        safe set as a separate historical lap. Returns the number of laps loaded.
         """
         data = np.loadtxt(csv_path, delimiter=",", skiprows=1, dtype=np.float64)
         data = np.atleast_2d(data)
@@ -241,10 +252,10 @@ class LMPCController(Controller):
         for lap_id in np.unique(data[:, 0]):
             lap = data[data[:, 0] == lap_id]
             self.native_controller.add_initial_lap(
-                lap[:, 1:5].tolist(),
-                lap[:, 5:8].tolist(),
-                lap[:, 8].tolist(),
+                lap[:, 1:7].tolist(),
+                lap[:, 7:9].tolist(),
                 lap[:, 9].tolist(),
+                lap[:, 10].tolist(),
             )
             laps_loaded += 1
         return laps_loaded

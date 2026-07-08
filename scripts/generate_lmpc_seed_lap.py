@@ -16,7 +16,7 @@ Two sources, selected with --source:
 The output is NOT a geometric trajectory. Each row is one sample of the LMPC
 closed-loop state/input history:
 
-    lap, s, e_y, e_psi, v, Fd, Fb, delta, k, t
+    lap, s, e_y, e_psi, v_x, v_y, omega, lon, delta, k, t
 
 Load it with ``LMPCController.load_initial_lap(<csv>)`` before driving.
 """
@@ -45,7 +45,17 @@ def synthesize_centerline(table: np.ndarray, max_speed: float) -> dict[str, np.n
     k = table[:, 5]
     e_y = np.zeros_like(s)
     e_psi = np.zeros_like(s)
-    return {"s": s, "e_y": e_y, "e_psi": e_psi, "v": v, "k": k}
+    v_y = np.zeros_like(s)
+    omega = v * k
+    return {
+        "s": s,
+        "e_y": e_y,
+        "e_psi": e_psi,
+        "v_x": v,
+        "v_y": v_y,
+        "omega": omega,
+        "k": k,
+    }
 
 
 def synthesize_raceline(table: np.ndarray, raceline_csv: str) -> dict[str, np.ndarray]:
@@ -67,7 +77,17 @@ def synthesize_raceline(table: np.ndarray, raceline_csv: str) -> dict[str, np.nd
     e_psi = e_psi[order]
     v = np.maximum(rl[order, 5], MIN_SPEED)
     k = rl[order, 4]
-    return {"s": s, "e_y": e_y, "e_psi": e_psi, "v": v, "k": k}
+    v_y = np.zeros_like(s)
+    omega = v * k
+    return {
+        "s": s,
+        "e_y": e_y,
+        "e_psi": e_psi,
+        "v_x": v,
+        "v_y": v_y,
+        "omega": omega,
+        "k": k,
+    }
 
 
 def main() -> None:
@@ -102,33 +122,35 @@ def main() -> None:
         lap = synthesize_raceline(table, args.raceline)
 
     s, e_y, e_psi = lap["s"], lap["e_y"], lap["e_psi"]
-    v, k = lap["v"], lap["k"]
+    v_x, v_y, omega, k = lap["v_x"], lap["v_y"], lap["omega"], lap["k"]
 
-    # Longitudinal acceleration along the path: dv/dt = v * dv/ds. Split the
-    # implied force m*a into drive (>=0) / brake (<0); steer is the curvature
-    # feedforward. u only feeds the error-dynamics regression, so an analytic
-    # reconstruction is sufficient.
-    dv_ds = np.gradient(v, s)
-    accel = v * dv_ds
+    # Longitudinal acceleration along the path: dv/dt = v * dv/ds. The simplified
+    # single-track model uses one longitudinal input scaled by 1000 internally.
+    # u only feeds the error-dynamics regression, so an analytic reconstruction
+    # is sufficient.
+    dv_ds = np.gradient(v_x, s)
+    accel = v_x * dv_ds
     force = VEHICLE_MASS * accel
-    fd = np.maximum(force, 0.0)
-    fb = np.minimum(force, 0.0)
+    lon = force / 1000.0
     delta = np.arctan(WHEELBASE * k)
 
     # Timestamps by integrating dt = ds / v along the lap.
     ds = np.diff(s)
-    dt = ds / v[:-1]
+    dt = ds / v_x[:-1]
     t = np.concatenate([[0.0], np.cumsum(dt)])
 
-    rows = np.column_stack([np.zeros_like(s), s, e_y, e_psi, v, fd, fb, delta, k, t])
+    rows = np.column_stack(
+        [np.zeros_like(s), s, e_y, e_psi, v_x, v_y, omega, lon, delta, k, t]
+    )
 
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    header = "lap,s,e_y,e_psi,v,Fd,Fb,delta,k,t"
+    header = "lap,s,e_y,e_psi,v_x,v_y,omega,lon,delta,k,t"
     np.savetxt(output, rows, delimiter=",", header=header, comments="")
     print(
         f"Wrote {rows.shape[0]} samples ({args.source}) to {output} "
-        f"| v[{v.min():.2f},{v.max():.2f}] e_y[{e_y.min():.2f},{e_y.max():.2f}]"
+        f"| v_x[{v_x.min():.2f},{v_x.max():.2f}] "
+        f"e_y[{e_y.min():.2f},{e_y.max():.2f}]"
     )
 
 

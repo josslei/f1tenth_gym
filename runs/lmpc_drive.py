@@ -34,11 +34,10 @@ DIAGNOSTIC_INTERVAL_STEPS = 100
 HORIZON_STEPS = 75
 # qrqp active-set iteration cap. Cheap now (convex QP converges fast), but
 # load-bearing once the safe set makes the terminal QP degenerate.
-SOLVER_MAX_ITER = 50
+SOLVER_MAX_ITER = 100
 # qrqp primal/dual feasibility tolerances (constr_viol_tol / dual_inf_tol).
 SOLVER_TOLERANCE = 1e-6
 # Terminal safe-set size; shrink for speed after a seed lap exists.
-# REG_MAX_POINTS = 96
 REG_MAX_POINTS = 24
 
 

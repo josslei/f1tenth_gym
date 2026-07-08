@@ -62,6 +62,7 @@ class LmpcConfig:
     max_steer: float
     wheelbase: float
     track_length: float
+    linearization_speed_floor: float
     max_lap_stored: int
     reg_dist_max: float
     reg_max_points: int
@@ -71,8 +72,7 @@ class LmpcConfig:
     heading_weight: float
     terminal_lateral_weight: float
     terminal_heading_weight: float
-    input_weight_fd: float
-    input_weight_fb: float
+    input_weight_lon: float
     input_weight_steer: float
     control_rate_weight: float
     safe_set_cost_weight: float
@@ -114,6 +114,9 @@ class NativeLMPCController:
         u: Sequence[Sequence[float]],
         k: Sequence[float],
         t: Sequence[float],
+    ) -> None: ...
+    def set_curvature_profile(
+        self, s: Sequence[float], k: Sequence[float], total_length: float
     ) -> None: ...
     def control(self) -> LmpcControlCommand: ...
     def predicted_horizon(self) -> list[list[float]]: ...

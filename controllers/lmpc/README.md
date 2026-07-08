@@ -90,15 +90,15 @@ The native controller records samples, adds completed laps to the upstream
 `SafeSetManager`, queries `RegQuery`, and feeds the latest affine regression into
 the MPC prediction model:
 
-- `A`: kinematic-model state matrix, shape `4 x 4`
-- `B`: kinematic-model input matrix, shape `4 x 3`
-- `C`: affine offset, shape `4`
+- `A`: single-track state matrix, shape `6 x 6`
+- `B`: simplified-control input matrix, shape `6 x 2`
+- `C`: affine offset, shape `6`
 
 Before a completed lap is available, those matrices are nominal linearizations
-of the kinematic bicycle model. After a lap is available, they are corrected by
-safe-set regression. The terminal state is constrained to a convex combination
-of safe-set states, with slack for feasibility, and the safe-set cost-to-go is
-added as a terminal cost.
+of the upstream single-track planar model. After a lap is available, the
+velocity-state rows are corrected by safe-set regression. The terminal state is
+constrained to a convex combination of safe-set states, with slack for
+feasibility, and the safe-set cost-to-go is added as a terminal cost.
 
 TODO(performance): the Gym native build currently uses standard-library safe-set
 lookup/sorting to avoid bringing in upstream Eigen/CGAL/Boost dependencies during

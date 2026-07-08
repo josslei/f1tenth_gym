@@ -16,15 +16,15 @@
 #include <casadi/casadi.hpp>
 
 #include "base_vehicle_model/base_vehicle_model_config.hpp"
-#include "kinematic_bicycle_model/kinematic_bicycle_model.hpp"
 #include "racing_trajectory/safe_set.hpp"
+#include "single_track_planar_model/single_track_planar_model.hpp"
 
 namespace f110_gym_lmpc {
 namespace {
 
 namespace base = ::lmpc::vehicle_model::base_vehicle_model;
-namespace kb = ::lmpc::vehicle_model::kinematic_bicycle_model;
 namespace rt = ::lmpc::vehicle_model::racing_trajectory;
+namespace st = ::lmpc::vehicle_model::single_track_planar_model;
 
 constexpr double kTerminalSlackPenalty = 1.0e4;
 constexpr double kVehicleMass = 3.47;
@@ -45,24 +45,32 @@ base::BaseVehicleModelConfig::SharedPtr
 make_base_config(const LmpcConfig &config) {
   auto front_tyre = std::make_shared<base::TyreConfig>();
   front_tyre->radius = 0.05;
-  front_tyre->width = 0.03;
-  front_tyre->mass = 0.1;
-  front_tyre->moi = 1.0e-4;
+  front_tyre->width = 0.04;
+  front_tyre->mass = 0.05;
+  front_tyre->moi = 0.05;
+  front_tyre->pacejka_b = 5.0;
+  front_tyre->pacejka_c = 2.28;
+  front_tyre->pacejka_e = 1.0;
+  front_tyre->pacejka_fz0 = 1543.5;
+  front_tyre->pacejka_eps = -0.0813;
 
   auto rear_tyre = std::make_shared<base::TyreConfig>(*front_tyre);
+  rear_tyre->pacejka_fz0 = 1886.5;
+  rear_tyre->pacejka_eps = -0.1263;
 
   auto front_brake = std::make_shared<base::BrakeConfig>();
   front_brake->max_brake = 1000.0;
   front_brake->brake_pad_out_r = 0.03;
   front_brake->brake_pad_in_r = 0.01;
-  front_brake->brake_pad_friction_coeff = 0.4;
-  front_brake->piston_area = 1.0e-4;
+  front_brake->brake_pad_friction_coeff = 0.5;
+  front_brake->piston_area = 0.00389508401;
   front_brake->bias = 0.5;
 
   auto rear_brake = std::make_shared<base::BrakeConfig>(*front_brake);
+  rear_brake->piston_area = 0.0050543317;
 
   auto steer = std::make_shared<base::SteerConfig>();
-  steer->max_steer_rate = 3.2;
+  steer->max_steer_rate = 10.0;
   steer->max_steer = config.max_steer;
   steer->turn_left_bias = 0.0;
 
@@ -71,13 +79,13 @@ make_base_config(const LmpcConfig &config) {
   chassis->sprung_mass = 3.47;
   chassis->unsprung_mass = 0.0;
   chassis->cg_ratio = 0.5;
-  chassis->cg_height = 0.074;
+  chassis->cg_height = 0.07;
   chassis->wheel_base = config.wheelbase;
-  chassis->tw_f = 0.25;
-  chassis->tw_r = 0.25;
+  chassis->tw_f = 0.281;
+  chassis->tw_r = 0.281;
   chassis->moi = 0.04712;
-  chassis->b = 0.31;
-  chassis->fr = 0.0;
+  chassis->b = 0.281;
+  chassis->fr = 0.012;
 
   auto aero = std::make_shared<base::AeroConfig>();
   aero->air_density = 1.225;
@@ -103,9 +111,9 @@ make_base_config(const LmpcConfig &config) {
                                    modeling});
 }
 
-kb::KinematicBicycleModelConfig::SharedPtr
-make_kinematic_config(const LmpcConfig &config) {
-  auto model_config = std::make_shared<kb::KinematicBicycleModelConfig>();
+st::SingleTrackPlanarModelConfig::SharedPtr
+make_single_track_config(const LmpcConfig &config) {
+  auto model_config = std::make_shared<st::SingleTrackPlanarModelConfig>();
   model_config->Fd_max = config.max_drive_force;
   model_config->Fb_max = config.max_brake_force;
   model_config->Td = 0.1;
@@ -113,6 +121,7 @@ make_kinematic_config(const LmpcConfig &config) {
   model_config->v_max = std::max(config.target_speed * 2.0, 5.0);
   model_config->P_max = 100.0;
   model_config->mu = 1.0;
+  model_config->simplify_lon_control = true;
   return model_config;
 }
 
@@ -122,7 +131,7 @@ class NativeLMPCController::Impl {
 public:
   explicit Impl(const LmpcConfig &config)
       : config_(config),
-        model_(make_base_config(config), make_kinematic_config(config)),
+        model_(make_base_config(config), make_single_track_config(config)),
         safe_set_(std::make_unique<rt::SafeSetManager>(config.max_lap_stored)) {
     build_solver();
     reset();
@@ -170,10 +179,10 @@ public:
   }
 
   // Seed the safe set with a pre-recorded lap (the paper's D^0). x_rows are M
-  // states [s, e_y, e_psi, v]; u_rows are M controls [Fd, Fb, delta]; k and t
-  // are per-step curvature and timestamp. Bumping completed_laps_ is what turns
-  // on the terminal cost-to-go and the error-dynamics regression, so LMPC has a
-  // safe set to drive toward from the very first control step.
+  // states [s, e_y, e_psi, v_x, v_y, omega_z]; u_rows are M controls
+  // [longitudinal, delta]; k and t are per-step curvature and timestamp.
+  // Bumping completed_laps_ turns on the terminal cost-to-go, so LMPC has a
+  // safe set to drive toward from the first control step.
   void add_initial_lap(const std::vector<std::vector<double>> &x_rows,
                        const std::vector<std::vector<double>> &u_rows,
                        const std::vector<double> &k,
@@ -197,29 +206,39 @@ public:
     completed_laps_++;
   }
 
+  void set_curvature_profile(const std::vector<double> &s,
+                             const std::vector<double> &k,
+                             double total_length) {
+    curv_s_ = s;
+    curv_k_ = k;
+    curv_total_length_ = total_length;
+    // Append a wrap-around closing sample so interpolation is continuous across
+    // the start/finish seam.
+    if (!curv_s_.empty() && total_length > curv_s_.back()) {
+      curv_s_.push_back(total_length);
+      curv_k_.push_back(curv_k_.front());
+    }
+  }
+
   LmpcControlCommand control() {
     using casadi::DM;
     using casadi::Slice;
 
     const auto N = static_cast<casadi_int>(config_.horizon);
-    const DM x0 = DM{current_state_.s, current_state_.e_y, current_state_.e_psi,
-                     std::max(current_state_.v_x, 0.05)};
-
-    opti_.set_value(x0_, x0);
-    opti_.set_value(dt_, config_.dt);
-    opti_.set_value(kappa_, curvature_horizon(N - 1));
-    opti_.set_value(u_prev_param_, previous_native_u_);
-    opti_.set_value(left_bound_, current_reference_.left_bound);
-    opti_.set_value(right_bound_, current_reference_.right_bound);
+    const DM x0 = DM{current_state_.s,     current_state_.e_y,
+                     current_state_.e_psi, std::max(current_state_.v_x, 0.05),
+                     current_state_.v_y,   current_state_.omega};
 
     DM x_init = DM::zeros(model_.nx(), N);
     x_init(Slice(), 0) = x0;
     for (casadi_int i = 1; i < N; ++i) {
-      x_init(kb::XIndex::PX, i) =
-          x_init(kb::XIndex::PX, i - 1) + config_.dt * x0(kb::XIndex::V);
-      x_init(kb::XIndex::PY, i) = x0(kb::XIndex::PY);
-      x_init(kb::XIndex::YAW, i) = x0(kb::XIndex::YAW);
-      x_init(kb::XIndex::V, i) = x0(kb::XIndex::V);
+      x_init(st::XIndex::PX, i) =
+          x_init(st::XIndex::PX, i - 1) + config_.dt * x0(st::XIndex::VX);
+      x_init(st::XIndex::PY, i) = x0(st::XIndex::PY);
+      x_init(st::XIndex::YAW, i) = x0(st::XIndex::YAW);
+      x_init(st::XIndex::VX, i) = x0(st::XIndex::VX);
+      x_init(st::XIndex::VY, i) = x0(st::XIndex::VY);
+      x_init(st::XIndex::VYAW, i) = x0(st::XIndex::VYAW);
     }
     // Reference z_bar for the ATV linearization and the safe-set query. Per the
     // paper (eq. 4) z_bar is the previous FHOCP solution. We apply the standard
@@ -232,8 +251,21 @@ public:
     DM ref;
     DM u_ws;
     if (solved_) {
-      ref =
-          DM::horzcat({last_x_(Slice(), Slice(1, N)), last_x_(Slice(), N - 1)});
+      // Fill the shifted terminal by rolling the old terminal forward through
+      // the discrete dynamics (matching upstream racing_mpc_node.cpp:
+      // last_x_(-1) = f(last_x_(-2), last_u_(-1))). Duplicating the old
+      // terminal instead leaves a stale zero-progress last column that the
+      // solver must re-fix every step, adding terminal jitter to the plan.
+      const DM rolled_terminal =
+          model_
+              .discrete_dynamics()(casadi::DMDict{
+                  {"x", last_x_(Slice(), N - 1)},
+                  {"u", last_u_(Slice(), N - 2)},
+                  {"k", casadi::DM{curvature_at_s(static_cast<double>(
+                            last_x_(st::XIndex::PX, N - 1)))}},
+                  {"dt", casadi::DM{config_.dt}}})
+              .at("xip1");
+      ref = DM::horzcat({last_x_(Slice(), Slice(1, N)), rolled_terminal});
       u_ws = DM::horzcat(
           {last_u_(Slice(), Slice(1, N - 1)), last_u_(Slice(), N - 2)});
     } else {
@@ -243,24 +275,65 @@ public:
     // Anchor the reference start at the measured state so the t=0 linearization
     // is about where the vehicle actually is.
     ref(Slice(), 0) = x0;
-    set_dynamics_parameters(ref, u_ws);
-    set_safe_set_terminal(ref(Slice(), N - 1));
     store_predicted_horizon(ref);
-    for (casadi_int i = 0; i < N - 1; ++i) {
-      opti_.set_value(A_params_[i], A_values_[i]);
-      opti_.set_value(B_params_[i], B_values_[i]);
-      opti_.set_value(C_params_[i], C_values_[i]);
-    }
-    opti_.set_value(ss_x_, ss_x_value_);
-    opti_.set_value(ss_costs_, ss_costs_value_);
-    opti_.set_initial(X_, ref);
-    opti_.set_initial(U_, u_ws);
 
+    // Everything that can touch the Opti object -- including parameter
+    // preparation, not just solve_limited() -- must be inside this try. A
+    // genuinely degenerate solve (e.g. "Failed to calculate search direction")
+    // can leave last_x_/last_u_ or a regression result non-finite; the NEXT
+    // call's opti_.set_value then throws CasADi's "v.is_regular()" assertion,
+    // which used to escape uncaught (set_value was outside the try) and kill
+    // the process. Widening the try costs nothing on the non-throwing path --
+    // C++ exception handling here is zero-cost until something actually
+    // throws -- so this is a pure robustness fix, not a perf tradeoff.
     try {
+      set_dynamics_parameters(ref, u_ws);
+      set_safe_set_terminal(ref(Slice(), N - 1));
+      opti_.set_value(x0_, x0);
+      opti_.set_value(dt_, config_.dt);
+      opti_.set_value(kappa_, curvature_horizon(N - 1));
+      opti_.set_value(u_prev_param_, previous_native_u_);
+      opti_.set_value(left_bound_, current_reference_.left_bound);
+      opti_.set_value(right_bound_, current_reference_.right_bound);
+      for (casadi_int i = 0; i < N - 1; ++i) {
+        opti_.set_value(A_params_[i], A_values_[i]);
+        opti_.set_value(B_params_[i], B_values_[i]);
+        opti_.set_value(C_params_[i], C_values_[i]);
+      }
+      opti_.set_value(ss_x_, ss_x_value_);
+      opti_.set_value(ss_costs_, ss_costs_value_);
+      opti_.set_initial(X_, ref);
+      opti_.set_initial(U_, u_ws);
+
       sol_ = std::make_shared<casadi::OptiSol>(opti_.solve_limited());
       last_solver_status_ = opti_.return_status();
-      last_x_ = sol_->value(X_);
-      last_u_ = sol_->value(U_);
+      const casadi::DM sol_x = sol_->value(X_);
+      const casadi::DM sol_u = sol_->value(U_);
+      // qrqp can report "success" yet return a garbage iterate on the
+      // ill-conditioned dynamic-model QP: either non-finite (NaN/Inf) OR
+      // exploding-but-finite (e_y seen reaching 5e10 while the corridor is
+      // +-1.5 m -- it VIOLATES its own constraints). Both must be rejected: a
+      // bad solution reaching the sim corrupts the vehicle state, and storing
+      // it as last_x_ poisons the next warm start so the plan (and its drawn
+      // horizon) explodes and "flies" every step. Reject -> fall back, leaving
+      // last_x_/solved_ untouched. (Root cause is unscaled QP conditioning;
+      // the permanent fix is variable scaling -- task #7.)
+      const double kMaxLateral = 2.0 * std::max(current_reference_.left_bound,
+                                                current_reference_.right_bound);
+      const double kMaxSpeed = 3.0 * std::max(config_.target_speed * 2.0, 5.0);
+      const double max_abs_ey = static_cast<double>(
+          casadi::DM::mmax(casadi::DM::abs(sol_x(st::XIndex::PY, Slice()))));
+      const double max_vx = static_cast<double>(
+          casadi::DM::mmax(casadi::DM::abs(sol_x(st::XIndex::VX, Slice()))));
+      if (!sol_x.is_regular() || !sol_u.is_regular()) {
+        throw std::runtime_error("non-finite solution (" + last_solver_status_ +
+                                 ")");
+      }
+      if (max_abs_ey > kMaxLateral || max_vx > kMaxSpeed) {
+        throw std::runtime_error("solution violates physical bounds");
+      }
+      last_x_ = sol_x;
+      last_u_ = sol_u;
       store_predicted_horizon(last_x_);
       solved_ = true;
       previous_command_ = command_from_solution(last_x_, last_u_);
@@ -317,6 +390,37 @@ private:
     return current_reference_.curvature;
   }
 
+  // Curvature as a function of arc length, evaluated at the PLAN's predicted s
+  // per stage. The upstream (racing_mpc_node.cpp) linearizes/evaluates its
+  // reference at abscissa = last_x_(PX, :); our old curvature_sequence assumed
+  // a uniform target speed, so once the car accelerates the plan's real s
+  // (spanning 10+ m) diverges from the assumed s (~3.7 m) and the ATV dynamics
+  // get curvature from the wrong section of track, bending the plan off the
+  // real track (the "wiggle / not following the track").
+  double curvature_at_s(double s) const {
+    if (curv_s_.empty()) {
+      return current_reference_.curvature;
+    }
+    double q = s;
+    if (curv_total_length_ > 0.0) {
+      q = std::fmod(s, curv_total_length_);
+      if (q < 0.0) {
+        q += curv_total_length_;
+      }
+    }
+    if (q <= curv_s_.front()) {
+      return curv_k_.front();
+    }
+    if (q >= curv_s_.back()) {
+      return curv_k_.back();
+    }
+    const auto it = std::upper_bound(curv_s_.begin(), curv_s_.end(), q);
+    const auto hi = static_cast<std::size_t>(it - curv_s_.begin());
+    const auto lo = hi - 1;
+    const double frac = (q - curv_s_[lo]) / (curv_s_[hi] - curv_s_[lo]);
+    return curv_k_[lo] + frac * (curv_k_[hi] - curv_k_[lo]);
+  }
+
   void build_solver() {
     using casadi::DM;
     using casadi::MX;
@@ -347,9 +451,6 @@ private:
       const auto xi = X_(Slice(), i);
       const auto xip1 = X_(Slice(), i + 1);
       const auto ui = U_(Slice(), i);
-      // TODO(dynamics-model): kinematic_bicycle_model is the first Gym target.
-      // Replace model_ construction plus bounds/config here when switching to
-      // single_track_planar_model or another Racing-LMPC vehicle model.
       opti_.subject_to(xip1 == casadi::MX::mtimes({A_params_[i], xi}) +
                                    casadi::MX::mtimes({B_params_[i], ui}) +
                                    C_params_[i]);
@@ -361,10 +462,10 @@ private:
       // the safe-set query walks forward and pulls x_N toward lower
       // time-to-finish.
       cost += 1.0;
-      cost += config_.input_weight_fd * ui(kb::UIndex::FD) * ui(kb::UIndex::FD);
-      cost += config_.input_weight_fb * ui(kb::UIndex::FB) * ui(kb::UIndex::FB);
-      cost += config_.input_weight_steer * ui(kb::UIndex::STEER) *
-              ui(kb::UIndex::STEER);
+      cost += config_.input_weight_lon * ui(st::UIndexSimple::LON) *
+              ui(st::UIndexSimple::LON);
+      cost += config_.input_weight_steer * ui(st::UIndexSimple::STEER_SIMPLE) *
+              ui(st::UIndexSimple::STEER_SIMPLE);
       casadi::MX u_prev_i;
       if (i == 0) {
         u_prev_i = u_prev_param_;
@@ -374,19 +475,26 @@ private:
       const auto du = ui - u_prev_i;
       cost += config_.control_rate_weight * casadi::MX::sumsqr(du);
 
-      opti_.subject_to(
-          opti_.bounded(0.0, ui(kb::UIndex::FD), config_.max_drive_force));
-      opti_.subject_to(
-          opti_.bounded(config_.max_brake_force, ui(kb::UIndex::FB), 0.0));
-      opti_.subject_to(opti_.bounded(-config_.max_steer, ui(kb::UIndex::STEER),
+      opti_.subject_to(opti_.bounded(config_.max_brake_force / 1000.0,
+                                     ui(st::UIndexSimple::LON),
+                                     config_.max_drive_force / 1000.0));
+      opti_.subject_to(opti_.bounded(-config_.max_steer,
+                                     ui(st::UIndexSimple::STEER_SIMPLE),
                                      config_.max_steer));
-      opti_.subject_to(xi(kb::XIndex::PY) >= -right_bound_);
-      opti_.subject_to(xi(kb::XIndex::PY) <= left_bound_);
+      opti_.subject_to(xi(st::XIndex::PY) >= -right_bound_);
+      opti_.subject_to(xi(st::XIndex::PY) <= left_bound_);
       opti_.subject_to(opti_.bounded(
-          0.0, xi(kb::XIndex::V), std::max(config_.target_speed * 2.0, 5.0)));
+          0.0, xi(st::XIndex::VX), std::max(config_.target_speed * 2.0, 5.0)));
     }
 
     const auto xN = X_(Slice(), N - 1);
+    // The terminal state must also respect the track corridor and speed bounds.
+    // The stage loop above only constrains x_0..x_{N-2}; leaving x_N bounded
+    // solely by the (slacked) safe-set constraint let its e_y drift off-track.
+    opti_.subject_to(xN(st::XIndex::PY) >= -right_bound_);
+    opti_.subject_to(xN(st::XIndex::PY) <= left_bound_);
+    opti_.subject_to(opti_.bounded(0.0, xN(st::XIndex::VX),
+                                   std::max(config_.target_speed * 2.0, 5.0)));
     opti_.subject_to(lambda_ >= 0.0);
     opti_.subject_to(casadi::MX::sum1(lambda_) == 1.0);
     opti_.subject_to(xN ==
@@ -395,10 +503,10 @@ private:
         config_.safe_set_cost_weight * casadi::MX::mtimes({ss_costs_, lambda_});
     cost += kLambdaRidge * casadi::MX::sumsqr(lambda_);
     cost += kTerminalSlackPenalty * casadi::MX::sumsqr(terminal_slack_);
-    cost += config_.terminal_lateral_weight * xN(kb::XIndex::PY) *
-            xN(kb::XIndex::PY);
-    cost += config_.terminal_heading_weight * xN(kb::XIndex::YAW) *
-            xN(kb::XIndex::YAW);
+    cost += config_.terminal_lateral_weight * xN(st::XIndex::PY) *
+            xN(st::XIndex::PY);
+    cost += config_.terminal_heading_weight * xN(st::XIndex::YAW) *
+            xN(st::XIndex::YAW);
     opti_.minimize(cost);
 
     // The FHOCP is a convex QP (affine A/B/C dynamics, convex quadratic cost,
@@ -421,8 +529,9 @@ private:
 
   LmpcControlCommand command_from_solution(const casadi::DM &x,
                                            const casadi::DM &u) const {
-    const double steer = clamp(static_cast<double>(u(kb::UIndex::STEER, 0)),
-                               -config_.max_steer, config_.max_steer);
+    const double steer =
+        clamp(static_cast<double>(u(st::UIndexSimple::STEER_SIMPLE, 0)),
+              -config_.max_steer, config_.max_steer);
     // Command the plan's longitudinal progress rate ds/dt a short preview
     // ahead. The Gym action is a forward-speed setpoint (~ds/dt for small
     // e_y/e_psi). Two reasons not to use the velocity state x(V) directly: (1)
@@ -433,8 +542,8 @@ private:
     // so previewing it keeps the car moving.
     const casadi_int preview = std::min(
         static_cast<casadi_int>(config_.command_preview_steps), x.size2() - 2);
-    const double ds = static_cast<double>(x(kb::XIndex::PX, preview + 1)) -
-                      static_cast<double>(x(kb::XIndex::PX, preview));
+    const double ds = static_cast<double>(x(st::XIndex::PX, preview + 1)) -
+                      static_cast<double>(x(st::XIndex::PX, preview));
     const double velocity =
         clamp(ds / config_.dt, 0.0, std::max(config_.target_speed * 2.0, 5.0));
     return LmpcControlCommand{steer, velocity};
@@ -457,11 +566,13 @@ private:
         (command.velocity - std::max(current_state_.v_x, 0.0)) / config_.dt;
     const double force = kVehicleMass * acceleration;
     if (force >= 0.0) {
-      u(kb::UIndex::FD) = clamp(force, 0.0, config_.max_drive_force);
+      u(st::UIndexSimple::LON) =
+          clamp(force / 1000.0, 0.0, config_.max_drive_force / 1000.0);
     } else {
-      u(kb::UIndex::FB) = clamp(force, config_.max_brake_force, 0.0);
+      u(st::UIndexSimple::LON) =
+          clamp(force / 1000.0, config_.max_brake_force / 1000.0, 0.0);
     }
-    u(kb::UIndex::STEER) = command.steering;
+    u(st::UIndexSimple::STEER_SIMPLE) = command.steering;
     return u;
   }
 
@@ -469,14 +580,15 @@ private:
     last_horizon_.clear();
     last_horizon_.reserve(static_cast<std::size_t>(x.size2()));
     for (casadi_int i = 0; i < x.size2(); ++i) {
-      last_horizon_.push_back({static_cast<double>(x(kb::XIndex::PX, i)),
-                               static_cast<double>(x(kb::XIndex::PY, i))});
+      last_horizon_.push_back({static_cast<double>(x(st::XIndex::PX, i)),
+                               static_cast<double>(x(st::XIndex::PY, i))});
     }
   }
 
   casadi::DM current_state_dm() const {
-    return casadi::DM{current_state_.s, current_state_.e_y,
-                      current_state_.e_psi, std::max(current_state_.v_x, 0.05)};
+    return casadi::DM{current_state_.s,     current_state_.e_y,
+                      current_state_.e_psi, std::max(current_state_.v_x, 0.05),
+                      current_state_.v_y,   current_state_.omega};
   }
 
   void record_current_sample() {
@@ -532,12 +644,20 @@ private:
       casadi::DM dA = casadi::DM::zeros(model_.nx(), model_.nx());
       casadi::DM dB = casadi::DM::zeros(model_.nx(), model_.nu());
       casadi::DM dC = casadi::DM::zeros(model_.nx(), 1);
-      const casadi::DM x_ref = x_ref_mat(Slice(), i);
+      casadi::DM x_ref = x_ref_mat(Slice(), i);
+      // Floor the linearization speed: the dynamic single-track Jacobian
+      // scales like 1/v_x and blows up (~1e5) near rest, making the QP
+      // non-finite. Linearize at max(v_x, floor) so A/B/C stay well
+      // conditioned; the true state is still pinned via x0 and the bounds.
+      x_ref(st::XIndex::VX) =
+          std::max(static_cast<double>(x_ref(st::XIndex::VX)),
+                   config_.linearization_speed_floor);
       const casadi::DM u_ref = u_ref_mat(Slice(), i);
       casadi::DM A;
       casadi::DM B;
       casadi::DM C;
-      const double curvature = curvature_at(i);
+      const double curvature =
+          curvature_at_s(static_cast<double>(x_ref_mat(st::XIndex::PX, i)));
       compute_nominal_affine_model(x_ref, u_ref, curvature, A, B, C);
       if (driven_laps_ > 0 && should_update_regression(i)) {
         compute_regression_residual(x_ref, u_ref, A, B, C, dA, dB, dC);
@@ -590,8 +710,7 @@ private:
                                    const casadi::DM &nominal_c, casadi::DM &dA,
                                    casadi::DM &dB, casadi::DM &dC) {
     const rt::RegQuery query{
-        casadi::DM::vertcat(
-            {x(kb::XIndex::PY), x(kb::XIndex::YAW), x(kb::XIndex::V), u}),
+        casadi::DM::vertcat({x, u}),
         nominal_a,
         nominal_b,
         nominal_c,
@@ -599,15 +718,19 @@ private:
         config_.reg_dist_max,
         static_cast<casadi_int>(config_.reg_max_points),
         static_cast<casadi_int>(config_.reg_max_points_per_lap),
-        rt::RegQuery::Indices{{kb::XIndex::PY, kb::XIndex::YAW, kb::XIndex::V},
-                              {kb::XIndex::PY, kb::XIndex::YAW, kb::XIndex::V},
-                              {kb::XIndex::PY, kb::XIndex::YAW, kb::XIndex::V}},
         rt::RegQuery::Indices{
-            {kb::UIndex::FD, kb::UIndex::FB, kb::UIndex::STEER},
-            {kb::UIndex::FD, kb::UIndex::FB, kb::UIndex::STEER},
-            {kb::UIndex::FD, kb::UIndex::FB, kb::UIndex::STEER}},
+            {st::XIndex::PX, st::XIndex::PY, st::XIndex::YAW, st::XIndex::VX,
+             st::XIndex::VY, st::XIndex::VYAW},
+            {st::XIndex::PX, st::XIndex::PY, st::XIndex::YAW, st::XIndex::VX,
+             st::XIndex::VY, st::XIndex::VYAW},
+            {st::XIndex::PX, st::XIndex::PY, st::XIndex::YAW, st::XIndex::VX,
+             st::XIndex::VY, st::XIndex::VYAW}},
         rt::RegQuery::Indices{
-            {kb::XIndex::PY}, {kb::XIndex::YAW}, {kb::XIndex::V}},
+            {st::UIndexSimple::LON, st::UIndexSimple::STEER_SIMPLE},
+            {st::UIndexSimple::LON, st::UIndexSimple::STEER_SIMPLE},
+            {st::UIndexSimple::LON, st::UIndexSimple::STEER_SIMPLE}},
+        rt::RegQuery::Indices{
+            {st::XIndex::VX}, {st::XIndex::VY}, {st::XIndex::VYAW}},
     };
     const auto result = safe_set_->query(query);
     dA = result.A - nominal_a;
@@ -675,7 +798,7 @@ private:
   }
 
   LmpcConfig config_;
-  kb::KinematicBicycleModel model_;
+  st::SingleTrackPlanarModel model_;
   std::unique_ptr<rt::SafeSetManager> safe_set_;
   casadi::Opti opti_;
   casadi::MX X_;
@@ -723,6 +846,11 @@ private:
   std::size_t solver_attempt_count_ = 0;
   std::size_t solver_success_count_ = 0;
   std::string last_solver_status_;
+  // Curvature profile kappa(s) for evaluating per-stage curvature at the plan's
+  // predicted s (set once via set_curvature_profile).
+  std::vector<double> curv_s_;
+  std::vector<double> curv_k_;
+  double curv_total_length_ = 0.0;
   double elapsed_time_ = 0.0;
   double last_recorded_s_ = 0.0;
   bool has_recorded_sample_ = false;
@@ -752,6 +880,12 @@ void NativeLMPCController::add_initial_lap(
     const std::vector<std::vector<double>> &u, const std::vector<double> &k,
     const std::vector<double> &t) {
   impl_->add_initial_lap(x, u, k, t);
+}
+
+void NativeLMPCController::set_curvature_profile(const std::vector<double> &s,
+                                                 const std::vector<double> &k,
+                                                 double total_length) {
+  impl_->set_curvature_profile(s, k, total_length);
 }
 
 LmpcControlCommand NativeLMPCController::control() { return impl_->control(); }

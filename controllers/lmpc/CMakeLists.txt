@@ -99,7 +99,7 @@ add_library(lmpc_state_core STATIC
   "${LMPC_RACING_SOURCE_DIR}/tools/lmpc_utils/src/lookup.cpp"
   "${LMPC_RACING_SOURCE_DIR}/tools/lmpc_utils/src/utils.cpp"
   "${LMPC_RACING_SOURCE_DIR}/vehicle_dynamics_models/base_vehicle_model/src/base_vehicle_model.cpp"
-  "${LMPC_RACING_SOURCE_DIR}/vehicle_dynamics_models/kinematic_bicycle_model/src/kinematic_bicycle_model.cpp"
+  "${LMPC_RACING_SOURCE_DIR}/vehicle_dynamics_models/single_track_planar_model/src/single_track_planar_model.cpp"
   "${LMPC_RACING_SOURCE_DIR}/vehicle_dynamics_models/racing_trajectory/src/safe_set.cpp"
   "${LMPC_RACING_SOURCE_DIR}/vehicle_dynamics_models/racing_trajectory/src/trajectory_kd_tree.cpp"
 )
@@ -112,7 +112,7 @@ target_include_directories(lmpc_state_core PUBLIC
   ${LMPC_BOOST_INCLUDE_DIRS}
   "${LMPC_RACING_SOURCE_DIR}/tools/lmpc_utils/include"
   "${LMPC_RACING_SOURCE_DIR}/vehicle_dynamics_models/base_vehicle_model/include"
-  "${LMPC_RACING_SOURCE_DIR}/vehicle_dynamics_models/kinematic_bicycle_model/include"
+  "${LMPC_RACING_SOURCE_DIR}/vehicle_dynamics_models/single_track_planar_model/include"
   "${LMPC_RACING_SOURCE_DIR}/vehicle_dynamics_models/racing_trajectory/include"
 )
 target_compile_features(lmpc_state_core PUBLIC cxx_std_17)

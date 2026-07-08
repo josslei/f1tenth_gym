@@ -65,6 +65,13 @@ struct LmpcConfig {
   double max_steer = 0.42;
   double wheelbase = 0.33;
   double track_length = 1.0e6;
+  // Speed floor (m/s) used ONLY for the ATV linearization reference of the
+  // dynamic single-track model. Its lateral/yaw Jacobian scales like 1/v_x
+  // (slip-angle derivatives), so near v_x=0 the A matrix blows up to ~1e5 and
+  // the QP goes non-finite. Linearizing at max(v_x, this) keeps the model well
+  // conditioned while the actual state/command still use the true low speed, so
+  // the car can launch from rest. Does not affect the model above this speed.
+  double linearization_speed_floor = 2.0;
   std::size_t max_lap_stored = 3;
   double reg_dist_max = 2.0;
   std::size_t reg_max_points = 96;
@@ -74,8 +81,7 @@ struct LmpcConfig {
   double heading_weight = 0.0;
   double terminal_lateral_weight = 0.0;
   double terminal_heading_weight = 0.0;
-  double input_weight_fd = 1.0e-3;
-  double input_weight_fb = 1.0e-3;
+  double input_weight_lon = 1.0e-3;
   double input_weight_steer = 0.1;
   double control_rate_weight = 0.1;
   double safe_set_cost_weight = 1.0;
@@ -89,14 +95,14 @@ struct LmpcConfig {
 };
 
 struct SparseErrorModel {
-  std::array<std::array<double, 4>, 4> A{};
-  std::array<std::array<double, 3>, 4> B{};
-  std::array<double, 4> C{};
+  std::array<std::array<double, 6>, 6> A{};
+  std::array<std::array<double, 2>, 6> B{};
+  std::array<double, 6> C{};
 };
 
 struct LmpcSample {
   PaperLmpcState x;
-  std::array<double, 3> u{};
+  std::array<double, 2> u{};
   PaperLmpcState x_next;
 };
 
@@ -143,6 +149,8 @@ public:
                        const std::vector<std::vector<double>> &u,
                        const std::vector<double> &k,
                        const std::vector<double> &t);
+  void set_curvature_profile(const std::vector<double> &s,
+                             const std::vector<double> &k, double total_length);
   LmpcControlCommand control();
 
   std::vector<std::array<double, 2>> predicted_horizon() const;

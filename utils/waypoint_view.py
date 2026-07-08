@@ -74,9 +74,19 @@ class DrivenLineOverlay:
     previous_color: tuple[int, int, int, int] = (255, 90, 90, 190)
     render_scale: float = WAYPOINT_RENDER_SCALE
     min_point_distance: float = 0.05
+    # _replace_vertex_list rebuilds the whole line's GL buffer from scratch
+    # (O(n) in points-so-far), so at min_point_distance spacing it was doing a
+    # full rebuild almost every control step -- a real per-frame cost that
+    # grows over a lap and is independent of any LMPC solver setting. Only
+    # rebuilding every rebuild_stride accepted points cuts that by the same
+    # factor; the live trace can lag by up to rebuild_stride points but always
+    # catches up, and the finalized previous-lap trace (rebuilt once, in full,
+    # on lap change) is never affected.
+    rebuild_stride: int = 4
     current_points: list[tuple[float, float]] = field(default_factory=list)
     previous_points: list[tuple[float, float]] = field(default_factory=list)
     _last_lap_count: int = 0
+    _pending_rebuild: int = 0
     _current_vertex_list: Any | None = None
     _previous_vertex_list: Any | None = None
 
@@ -92,15 +102,19 @@ class DrivenLineOverlay:
             self.previous_points = self.current_points
             self.current_points = []
             self._last_lap_count = lap_count
+            self._pending_rebuild = 0
             self._replace_vertex_list(
                 "previous", renderer, self.previous_points, self.previous_color
             )
 
         if self._should_append(point):
             self.current_points.append(point)
-            self._replace_vertex_list(
-                "current", renderer, self.current_points, self.current_color
-            )
+            self._pending_rebuild += 1
+            if self._pending_rebuild >= self.rebuild_stride:
+                self._pending_rebuild = 0
+                self._replace_vertex_list(
+                    "current", renderer, self.current_points, self.current_color
+                )
 
     def _should_append(self, point: tuple[float, float]) -> bool:
         if not self.current_points:

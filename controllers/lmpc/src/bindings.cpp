@@ -73,6 +73,8 @@ PYBIND11_MODULE(lmpc_native, m) {
       .def_readwrite("max_steer", &lmpc::LmpcConfig::max_steer)
       .def_readwrite("wheelbase", &lmpc::LmpcConfig::wheelbase)
       .def_readwrite("track_length", &lmpc::LmpcConfig::track_length)
+      .def_readwrite("linearization_speed_floor",
+                     &lmpc::LmpcConfig::linearization_speed_floor)
       .def_readwrite("max_lap_stored", &lmpc::LmpcConfig::max_lap_stored)
       .def_readwrite("reg_dist_max", &lmpc::LmpcConfig::reg_dist_max)
       .def_readwrite("reg_max_points", &lmpc::LmpcConfig::reg_max_points)
@@ -86,8 +88,7 @@ PYBIND11_MODULE(lmpc_native, m) {
                      &lmpc::LmpcConfig::terminal_lateral_weight)
       .def_readwrite("terminal_heading_weight",
                      &lmpc::LmpcConfig::terminal_heading_weight)
-      .def_readwrite("input_weight_fd", &lmpc::LmpcConfig::input_weight_fd)
-      .def_readwrite("input_weight_fb", &lmpc::LmpcConfig::input_weight_fb)
+      .def_readwrite("input_weight_lon", &lmpc::LmpcConfig::input_weight_lon)
       .def_readwrite("input_weight_steer",
                      &lmpc::LmpcConfig::input_weight_steer)
       .def_readwrite("control_rate_weight",
@@ -132,6 +133,9 @@ PYBIND11_MODULE(lmpc_native, m) {
            py::arg("reference"))
       .def("add_initial_lap", &lmpc::NativeLMPCController::add_initial_lap,
            py::arg("x"), py::arg("u"), py::arg("k"), py::arg("t"))
+      .def("set_curvature_profile",
+           &lmpc::NativeLMPCController::set_curvature_profile, py::arg("s"),
+           py::arg("k"), py::arg("total_length"))
       .def("control", &lmpc::NativeLMPCController::control)
       .def("predicted_horizon", &lmpc::NativeLMPCController::predicted_horizon)
       .def("error_model", &lmpc::NativeLMPCController::error_model,
