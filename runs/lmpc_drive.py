@@ -28,6 +28,11 @@ WINDOW_HEIGHT = 800
 LAPS_TO_COMPLETE = 5
 DIAGNOSTIC_INTERVAL_STEPS = 100
 
+# Shared physics/control timestep for both the Gym simulator and the LMPC
+# controller's own discretization -- must match or the ATV model is linearized
+# at a dt different from what the sim actually steps at.
+SIM_DT = 0.025
+
 # --- LMPC tuning: read here in Python, passed through to the C++ backend ---
 # Halved from 150 for now; lengthen again once a seed lap gives the terminal
 # cost-to-go that lets a short horizon stay on the (sub)optimal line.
@@ -51,6 +56,7 @@ def build_controller() -> LMPCController:
     return LMPCController.from_trajectory_table(
         LMPC_TRAJECTORY,
         horizon=HORIZON_STEPS,
+        dt=SIM_DT,
         max_iter=SOLVER_MAX_ITER,
         tolerance=SOLVER_TOLERANCE,
         reg_max_points=REG_MAX_POINTS,
@@ -74,7 +80,13 @@ def lmpc_diagnostics(controller: LMPCController, lateral_errors: list[float]) ->
 
 
 def main() -> None:
-    env = gym.make("f110-v0", map=MAP, num_agents=1, laps_to_complete=LAPS_TO_COMPLETE)
+    env = gym.make(
+        "f110-v0",
+        map=MAP,
+        num_agents=1,
+        laps_to_complete=LAPS_TO_COMPLETE,
+        timestep=SIM_DT,
+    )
     controller = build_controller()
     seed_laps = controller.load_initial_lap(LMPC_SEED_LAP)
     print(f"Loaded {seed_laps} seed lap(s) into the LMPC safe set.")
