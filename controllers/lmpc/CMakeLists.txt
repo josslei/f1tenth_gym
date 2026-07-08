@@ -55,6 +55,24 @@ if(NOT TARGET casadi AND NOT TARGET casadi::casadi)
   set(WITH_PYTHON OFF CACHE BOOL "Do not build CasADi Python frontend here" FORCE)
   set(WITH_EXAMPLES OFF CACHE BOOL "Do not build CasADi examples here" FORCE)
   set(WITH_DOC OFF CACHE BOOL "Do not build CasADi docs here" FORCE)
+  set(LMPC_CASADI_PATCH_FILE
+    "${CMAKE_CURRENT_LIST_DIR}/../../thirdparty/patches/casadi/0001-build-osqp-support-newer-CMake-policy-version.patch"
+  )
+  execute_process(
+    COMMAND ${CMAKE_COMMAND} -E chdir "${LMPC_CASADI_SOURCE_DIR}" git apply --check "${LMPC_CASADI_PATCH_FILE}"
+    RESULT_VARIABLE LMPC_CASADI_PATCH_CHECK
+    OUTPUT_QUIET
+    ERROR_QUIET
+  )
+  if(LMPC_CASADI_PATCH_CHECK EQUAL 0)
+    execute_process(
+      COMMAND ${CMAKE_COMMAND} -E chdir "${LMPC_CASADI_SOURCE_DIR}" git apply "${LMPC_CASADI_PATCH_FILE}"
+      RESULT_VARIABLE LMPC_CASADI_PATCH_APPLY
+    )
+    if(NOT LMPC_CASADI_PATCH_APPLY EQUAL 0)
+      message(FATAL_ERROR "Failed to apply LMPC CasADi patch: ${LMPC_CASADI_PATCH_FILE}")
+    endif()
+  endif()
   add_subdirectory(
     "${LMPC_CASADI_SOURCE_DIR}"
     "${CMAKE_CURRENT_BINARY_DIR}/casadi"

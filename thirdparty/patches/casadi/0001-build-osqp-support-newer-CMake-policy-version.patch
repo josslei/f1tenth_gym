@@ -1,0 +1,94 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index fb1e9d1cd..87290041f 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -796,7 +796,7 @@ function(libraries2flags libraries out)
+   endforeach()
+ endfunction()
+
+-macro(create_import_library TARGET)
++macro(create_import_library TARGET)
+   if(CMAKE_CROSS_COMPILING AND MINGW)
+     # Get target in lowercase
+     string(TOLOWER ${TARGET} TARGET_LOWER)
+@@ -1016,7 +1016,7 @@ if(WITH_LAPACK)
+       CMAKE_COMMAND "${EXTERNAL_CMAKE_COMMAND}"
+       PATCH_COMMAND ${EXTERNAL_CMAKE_COMMAND} -DFILE=CMakeLists.txt -DCASADI_TP_SHARED_PREFIX=${CASADI_TP_SHARED_PREFIX} -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/patch_openblas.cmake
+       CMAKE_ARGS -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE} -DBUILD_SHARED_LIBS=ON -DCMAKE_INSTALL_LIBDIR=lib ${OPENBLAS_FLAGS} -DBUILD_SINGLE=ON -DBUILD_DOUBLE=ON -DBUILD_COMPLEX=ON -DBUILD_COMPLEX16=ON -DUSE_OPENMP=OFF -DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>)
+-    set(LAPACK_LIBRARIES "${CMAKE_BINARY_DIR}/external_projects/${SHARED_LIBRARY_RELDIR}/${CMAKE_SHARED_LIBRARY_PREFIX}${CASADI_TP_SHARED_PREFIX}openblas${CMAKE_SHARED_LIBRARY_SUFFIX}"    )
++    set(LAPACK_LIBRARIES "${CMAKE_BINARY_DIR}/external_projects/${SHARED_LIBRARY_RELDIR}/${CMAKE_SHARED_LIBRARY_PREFIX}${CASADI_TP_SHARED_PREFIX}openblas${CMAKE_SHARED_LIBRARY_SUFFIX}")
+     set(LAPACK_DEPENDS_TARGET openblas-external)
+
+     add_library(lapack SHARED IMPORTED)
+@@ -1253,7 +1253,7 @@ if(WITH_CLP)
+         PREFIX "${CMAKE_BINARY_DIR}/external_projects"
+         UPDATE_COMMAND ""
+         CONFIGURE_COMMAND <SOURCE_DIR>/configure ${CROSS_FLAGS_CONFIGURE} --prefix=<INSTALL_DIR> ${CROSS_FLAGS_FORTRAN}
+-	# For unknown reasons, Coin-or/configure disables pkg-config by default for clang compilers
++	# For unknown reasons, Coin-or/configure disables pkg-config by default for clang compilers
+ 	--enable-pkg-config
+     )
+     add_library(osi SHARED IMPORTED)
+@@ -1274,7 +1274,7 @@ if(WITH_CLP)
+         PREFIX "${CMAKE_BINARY_DIR}/external_projects"
+         UPDATE_COMMAND ""
+         CONFIGURE_COMMAND <SOURCE_DIR>/configure ${CROSS_FLAGS_CONFIGURE} "--with-lapack-lflags=${LAPACK_LFLAGS}" --prefix=<INSTALL_DIR>  ${CROSS_FLAGS_FORTRAN}
+-	# For unknown reasons, Coin-or/configure disables pkg-config by default for clang compilers
++	# For unknown reasons, Coin-or/configure disables pkg-config by default for clang compilers
+ 	--enable-pkg-config
+	${APPLE_FLAGS}
+	)
+@@ -1310,7 +1310,7 @@ if(WITH_CBC)
+         PREFIX "${CMAKE_BINARY_DIR}/external_projects"
+         UPDATE_COMMAND ""
+         CONFIGURE_COMMAND <SOURCE_DIR>/configure ${CROSS_FLAGS_CONFIGURE} --prefix=<INSTALL_DIR> ${CROSS_FLAGS_FORTRAN}
+-	# For unknown reasons, Coin-or/configure disables pkg-config by default for clang compilers
++	# For unknown reasons, Coin-or/configure disables pkg-config by default for clang compilers
+ 	--enable-pkg-config
+ 	)
+
+@@ -1321,7 +1321,7 @@ if(WITH_CBC)
+         PREFIX "${CMAKE_BINARY_DIR}/external_projects"
+         UPDATE_COMMAND ""
+         CONFIGURE_COMMAND <SOURCE_DIR>/configure ${CROSS_FLAGS_CONFIGURE} --prefix=<INSTALL_DIR> "--with-lapack-lflags=${LAPACK_LFLAGS}"  ${CROSS_FLAGS_FORTRAN}
+-	# For unknown reasons, Coin-or/configure disables pkg-config by default for clang compilers
++	# For unknown reasons, Coin-or/configure disables pkg-config by default for clang compilers
+ 	--enable-pkg-config
+ 	)
+     file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/external_projects/include/coin")
+@@ -1362,7 +1362,7 @@ if(WITH_IPOPT)
+         ${SPRAL_FLAGS}
+         "--with-lapack-lflags= ${LAPACK_LFLAGS}" ${CROSS_FLAGS_FORTRAN}
+	--disable-java
+-	# For unknown reasons, Coin-or/configure disables pkg-config by default for clang compilers
++	# For unknown reasons, Coin-or/configure disables pkg-config by default for clang compilers
+ 	--enable-pkg-config
+ 	--enable-dependency-linking
+ 	${COIN_FLAGS}
+@@ -1390,7 +1390,7 @@ if(WITH_BONMIN)
+         PREFIX "${CMAKE_BINARY_DIR}/external_projects"
+         UPDATE_COMMAND ""
+         CONFIGURE_COMMAND <SOURCE_DIR>/configure ${CROSS_FLAGS_CONFIGURE} --prefix=<INSTALL_DIR>  ${CROSS_FLAGS_FORTRAN}
+-	# For unknown reasons, Coin-or/configure disables pkg-config by default for clang compilers
++	# For unknown reasons, Coin-or/configure disables pkg-config by default for clang compilers
+ 	--enable-pkg-config
+ 	# issue #2988
+ 	--enable-dependency-linking
+@@ -1504,7 +1504,7 @@ if(WITH_OSQP)
+         PREFIX "${CMAKE_BINARY_DIR}/external_projects"
+         UPDATE_COMMAND ""
+         CMAKE_COMMAND "${EXTERNAL_CMAKE_COMMAND}"
+-        CMAKE_ARGS -DCMAKE_C_STANDARD_REQUIRED=TRUE -DCMAKE_C_STANDARD=99 -DENABLE_MKL_PARDISO=OFF -DPROFILING=OFF -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>)
++        CMAKE_ARGS -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_C_STANDARD_REQUIRED=TRUE -DCMAKE_C_STANDARD=99 -DENABLE_MKL_PARDISO=OFF -DPROFILING=OFF -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>)
+     file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/external_projects/include/osqp")
+     add_library(osqp SHARED IMPORTED)
+     # This is similar to ALIAS but works fine on imported targets with CMake 3.10
+@@ -1537,7 +1537,7 @@ if(WITH_SUPERSCS)
+     file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/external_projects/include/superscs")
+     add_library(superscs STATIC IMPORTED)
+     add_library(superscs-linsys STATIC IMPORTED)
+-    add_library(superscs-linsys-indirect STATIC IMPORTED)
++    add_library(superscs-linsys-indirect STATIC IMPORTED)
+     add_dependencies(superscs superscs-external superscs-linsys superscs-linsys-indirect casadi)
+     target_link_libraries(superscs INTERFACE lapack superscs-linsys superscs-linsys-indirect casadi)
+     target_link_libraries(superscs-linsys-indirect INTERFACE superscs)
