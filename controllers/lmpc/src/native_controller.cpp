@@ -28,6 +28,14 @@ namespace rt = ::lmpc::vehicle_model::racing_trajectory;
 
 constexpr double kTerminalSlackPenalty = 1.0e4;
 constexpr double kVehicleMass = 3.47;
+// Tiny ridge on the safe-set multipliers. The terminal constraint
+// xN == ss_x*lambda + slack is rank-deficient whenever safe-set columns repeat
+// (always, before a seed lap exists: ss_x is one point repmat'd). Without this,
+// qrqp's active set cannot pin down the under-determined lambda and grinds to
+// the iteration cap every solve. The ridge selects the minimum-norm lambda,
+// which does not change the physical solution (xN/X/U) when ss_x columns are
+// identical, and only mildly biases lambda toward uniform once they differ.
+constexpr double kLambdaRidge = 1.0e-3;
 
 double clamp(double value, double low, double high) {
   return std::min(std::max(value, low), high);
@@ -143,9 +151,11 @@ public:
     lap_sample_count_ = 0;
     total_sample_count_ = 0;
     completed_laps_ = 0;
+    driven_laps_ = 0;
     last_safe_set_points_ = 0;
     solver_attempt_count_ = 0;
     solver_success_count_ = 0;
+    last_solver_status_.clear();
     elapsed_time_ = 0.0;
     last_recorded_s_ = 0.0;
     has_recorded_sample_ = false;
@@ -157,6 +167,34 @@ public:
 
   void set_reference(const LmpcReference &reference) {
     current_reference_ = reference;
+  }
+
+  // Seed the safe set with a pre-recorded lap (the paper's D^0). x_rows are M
+  // states [s, e_y, e_psi, v]; u_rows are M controls [Fd, Fb, delta]; k and t
+  // are per-step curvature and timestamp. Bumping completed_laps_ is what turns
+  // on the terminal cost-to-go and the error-dynamics regression, so LMPC has a
+  // safe set to drive toward from the very first control step.
+  void add_initial_lap(const std::vector<std::vector<double>> &x_rows,
+                       const std::vector<std::vector<double>> &u_rows,
+                       const std::vector<double> &k,
+                       const std::vector<double> &t) {
+    const auto M = static_cast<casadi_int>(x_rows.size());
+    casadi::DM x(model_.nx(), M);
+    casadi::DM u(model_.nu(), M);
+    casadi::DM k_dm(1, M);
+    casadi::DM t_dm(1, M);
+    for (casadi_int j = 0; j < M; ++j) {
+      for (casadi_int i = 0; i < model_.nx(); ++i) {
+        x(i, j) = x_rows[j][i];
+      }
+      for (casadi_int i = 0; i < model_.nu(); ++i) {
+        u(i, j) = u_rows[j][i];
+      }
+      k_dm(0, j) = k[j];
+      t_dm(0, j) = t[j];
+    }
+    safe_set_->add_lap(x, u, k_dm, t_dm, config_.track_length);
+    completed_laps_++;
   }
 
   LmpcControlCommand control() {
@@ -183,9 +221,31 @@ public:
       x_init(kb::XIndex::YAW, i) = x0(kb::XIndex::YAW);
       x_init(kb::XIndex::V, i) = x0(kb::XIndex::V);
     }
-    set_dynamics_parameters(x_init);
-    set_safe_set_terminal(x_init(Slice(), N - 1));
-    store_predicted_horizon(x_init);
+    // Reference z_bar for the ATV linearization and the safe-set query. Per the
+    // paper (eq. 4) z_bar is the previous FHOCP solution. We apply the standard
+    // receding-horizon shift z_bar_t = x*_{t+1} (repeating the terminal) so the
+    // reference and warm start stay aligned with the current horizon: the
+    // unshifted solution lags one step every solve, drifts off the vehicle, and
+    // makes the plan diverge (and the drawn horizon scatter) after a few
+    // hundred steps. The first solve falls back to the current-speed
+    // roll-forward.
+    DM ref;
+    DM u_ws;
+    if (solved_) {
+      ref =
+          DM::horzcat({last_x_(Slice(), Slice(1, N)), last_x_(Slice(), N - 1)});
+      u_ws = DM::horzcat(
+          {last_u_(Slice(), Slice(1, N - 1)), last_u_(Slice(), N - 2)});
+    } else {
+      ref = x_init;
+      u_ws = DM::zeros(model_.nu(), N - 1);
+    }
+    // Anchor the reference start at the measured state so the t=0 linearization
+    // is about where the vehicle actually is.
+    ref(Slice(), 0) = x0;
+    set_dynamics_parameters(ref, u_ws);
+    set_safe_set_terminal(ref(Slice(), N - 1));
+    store_predicted_horizon(ref);
     for (casadi_int i = 0; i < N - 1; ++i) {
       opti_.set_value(A_params_[i], A_values_[i]);
       opti_.set_value(B_params_[i], B_values_[i]);
@@ -193,11 +253,12 @@ public:
     }
     opti_.set_value(ss_x_, ss_x_value_);
     opti_.set_value(ss_costs_, ss_costs_value_);
-    opti_.set_initial(X_, solved_ ? last_x_ : x_init);
-    opti_.set_initial(U_, solved_ ? last_u_ : DM::zeros(model_.nu(), N - 1));
+    opti_.set_initial(X_, ref);
+    opti_.set_initial(U_, u_ws);
 
     try {
       sol_ = std::make_shared<casadi::OptiSol>(opti_.solve_limited());
+      last_solver_status_ = opti_.return_status();
       last_x_ = sol_->value(X_);
       last_u_ = sol_->value(U_);
       store_predicted_horizon(last_x_);
@@ -205,8 +266,9 @@ public:
       previous_command_ = command_from_solution(last_x_, last_u_);
       previous_native_u_ = command_native_u(previous_command_);
       solver_success_count_++;
-    } catch (const std::exception &) {
+    } catch (const std::exception &e) {
       solved_ = false;
+      last_solver_status_ = e.what();
       previous_command_ = fallback_command();
       previous_native_u_ = command_native_u(previous_command_);
     }
@@ -224,6 +286,7 @@ public:
   std::size_t completed_laps() const { return completed_laps_; }
   std::size_t lap_sample_count() const { return lap_sample_count_; }
   std::size_t last_safe_set_points() const { return last_safe_set_points_; }
+  const std::string &last_solver_status() const { return last_solver_status_; }
   double solver_success_rate() const {
     if (solver_attempt_count_ == 0) {
       return 0.0;
@@ -260,7 +323,7 @@ private:
     using casadi::Slice;
 
     const auto N = static_cast<casadi_int>(config_.horizon);
-    opti_ = casadi::Opti();
+    opti_ = casadi::Opti("conic");
     X_ = opti_.variable(model_.nx(), N);
     U_ = opti_.variable(model_.nu(), N - 1);
     x0_ = opti_.parameter(model_.nx(), 1);
@@ -291,8 +354,12 @@ private:
                                    casadi::MX::mtimes({B_params_[i], ui}) +
                                    C_params_[i]);
 
-      // Minimum-time structure: terminal cost-to-go drives improvement while
-      // fixed-horizon stage cost keeps the paper objective form.
+      // Paper eq. (4a) stage cost: the minimum-time indicator 1_F(x_t) (= 1 for
+      // every not-yet-finished step) plus input and control-rate penalties. The
+      // progress driver is NOT a stage reward but the terminal cost-to-go
+      // J_N(x_N)^T*lambda below; with z_bar taken from the previous solution
+      // the safe-set query walks forward and pulls x_N toward lower
+      // time-to-finish.
       cost += 1.0;
       cost += config_.input_weight_fd * ui(kb::UIndex::FD) * ui(kb::UIndex::FD);
       cost += config_.input_weight_fb * ui(kb::UIndex::FB) * ui(kb::UIndex::FB);
@@ -326,6 +393,7 @@ private:
                      casadi::MX::mtimes({ss_x_, lambda_}) + terminal_slack_);
     cost +=
         config_.safe_set_cost_weight * casadi::MX::mtimes({ss_costs_, lambda_});
+    cost += kLambdaRidge * casadi::MX::sumsqr(lambda_);
     cost += kTerminalSlackPenalty * casadi::MX::sumsqr(terminal_slack_);
     cost += config_.terminal_lateral_weight * xN(kb::XIndex::PY) *
             xN(kb::XIndex::PY);
@@ -333,27 +401,42 @@ private:
             xN(kb::XIndex::YAW);
     opti_.minimize(cost);
 
-    const auto p_opts = casadi::Dict{{"expand", true}, {"print_time", false}};
-    const auto s_opts = casadi::Dict{{"conic", "qrqp"},
-                                     {"max_iter", config_.max_iter},
-                                     {"print_header", false},
-                                     {"print_iteration", false},
-                                     {"print_time", false},
-                                     {"tol_du", config_.tolerance},
-                                     {"tol_pr", config_.tolerance}};
-    opti_.solver("sqpmethod", p_opts, s_opts);
+    // The FHOCP is a convex QP (affine A/B/C dynamics, convex quadratic cost,
+    // linear constraints), so it is solved directly as a conic QP with qrqp.
+    // Wrapping it in an SQP (sqpmethod) only adds outer-loop machinery around a
+    // single QP solve and is ~7x slower for identical accuracy. error_on_fail
+    // keeps a non-converged QP from dumping to the console; a max-iteration
+    // limit is reported as SOLVER_RET_LIMITED and accepted by solve_limited().
+    const auto solver_opts =
+        casadi::Dict{{"print_time", false},
+                     {"print_iter", false},
+                     {"print_header", false},
+                     {"print_info", false},
+                     {"error_on_fail", false},
+                     {"max_iter", config_.max_iter},
+                     {"constr_viol_tol", config_.tolerance},
+                     {"dual_inf_tol", config_.tolerance}};
+    opti_.solver("qrqp", solver_opts);
   }
 
   LmpcControlCommand command_from_solution(const casadi::DM &x,
                                            const casadi::DM &u) const {
     const double steer = clamp(static_cast<double>(u(kb::UIndex::STEER, 0)),
                                -config_.max_steer, config_.max_steer);
-    const double fd = static_cast<double>(u(kb::UIndex::FD, 0));
-    const double fb = static_cast<double>(u(kb::UIndex::FB, 0));
-    const double v = static_cast<double>(x(kb::XIndex::V, 0));
-    const double acceleration = (fd + fb) / kVehicleMass;
-    const double velocity = clamp(v + config_.dt * acceleration, 0.0,
-                                  std::max(config_.target_speed * 2.0, 5.0));
+    // Command the plan's longitudinal progress rate ds/dt a short preview
+    // ahead. The Gym action is a forward-speed setpoint (~ds/dt for small
+    // e_y/e_psi). Two reasons not to use the velocity state x(V) directly: (1)
+    // with no stage progress reward the plan defers acceleration, so the
+    // immediate next step is ~0; (2) the linearized model can advance s through
+    // its affine offset while leaving x(V) low, so x(V) is an unreliable
+    // command. The s-progress rate is what the terminal cost actually drives,
+    // so previewing it keeps the car moving.
+    const casadi_int preview = std::min(
+        static_cast<casadi_int>(config_.command_preview_steps), x.size2() - 2);
+    const double ds = static_cast<double>(x(kb::XIndex::PX, preview + 1)) -
+                      static_cast<double>(x(kb::XIndex::PX, preview));
+    const double velocity =
+        clamp(ds / config_.dt, 0.0, std::max(config_.target_speed * 2.0, 5.0));
     return LmpcControlCommand{steer, velocity};
   }
 
@@ -408,6 +491,7 @@ private:
     if (wrapped && lap_sample_count_ > 1) {
       safe_set_->add_lap(lap_x_, lap_u_, lap_k_, lap_t_, config_.track_length);
       completed_laps_++;
+      driven_laps_++;
       lap_x_ = x;
       lap_u_ = u;
       lap_k_ = k;
@@ -433,7 +517,8 @@ private:
     has_recorded_sample_ = true;
   }
 
-  void set_dynamics_parameters(const casadi::DM &x_init) {
+  void set_dynamics_parameters(const casadi::DM &x_ref_mat,
+                               const casadi::DM &u_ref_mat) {
     using casadi::Slice;
 
     A_values_.clear();
@@ -447,15 +532,14 @@ private:
       casadi::DM dA = casadi::DM::zeros(model_.nx(), model_.nx());
       casadi::DM dB = casadi::DM::zeros(model_.nx(), model_.nu());
       casadi::DM dC = casadi::DM::zeros(model_.nx(), 1);
-      const casadi::DM x_ref = x_init(Slice(), i);
-      const casadi::DM u_ref =
-          solved_ ? last_u_(Slice(), i) : previous_native_u_;
+      const casadi::DM x_ref = x_ref_mat(Slice(), i);
+      const casadi::DM u_ref = u_ref_mat(Slice(), i);
       casadi::DM A;
       casadi::DM B;
       casadi::DM C;
       const double curvature = curvature_at(i);
       compute_nominal_affine_model(x_ref, u_ref, curvature, A, B, C);
-      if (completed_laps_ > 0 && should_update_regression(i)) {
+      if (driven_laps_ > 0 && should_update_regression(i)) {
         compute_regression_residual(x_ref, u_ref, A, B, C, dA, dB, dC);
       }
       A += dA;
@@ -577,6 +661,12 @@ private:
           ss_x = ss_x(Slice(), Slice(0, num_points));
           ss_costs = ss_costs(Slice(), Slice(0, num_points));
         }
+        // NOTE: upstream racing_mpc normalizes here (ss_j - ss_j[0]) to keep
+        // the terminal cost-to-go well scaled, but that only works together
+        // with its variable scaling (scale_x/scale_u). Without scaling,
+        // normalizing shrinks the cost-to-go pull below the input penalties and
+        // the car freezes; raw J drives but is large and ill-conditions qrqp.
+        // Proper fix is to port the variable scaling (see task #7).
       }
     }
 
@@ -624,9 +714,15 @@ private:
   std::size_t lap_sample_count_ = 0;
   std::size_t total_sample_count_ = 0;
   std::size_t completed_laps_ = 0;
+  // Laps actually driven closed-loop (excludes seeded D^0 laps). The error
+  // dynamics regression must only use real (x,u)->x_next data; the synthesized
+  // seed's u is analytic and would corrupt the ATV model, so regression is
+  // gated on this while the safe set / cost-to-go still uses the seed.
+  std::size_t driven_laps_ = 0;
   std::size_t last_safe_set_points_ = 0;
   std::size_t solver_attempt_count_ = 0;
   std::size_t solver_success_count_ = 0;
+  std::string last_solver_status_;
   double elapsed_time_ = 0.0;
   double last_recorded_s_ = 0.0;
   bool has_recorded_sample_ = false;
@@ -649,6 +745,13 @@ void NativeLMPCController::update(const RacingLmpcState &state) {
 
 void NativeLMPCController::set_reference(const LmpcReference &reference) {
   impl_->set_reference(reference);
+}
+
+void NativeLMPCController::add_initial_lap(
+    const std::vector<std::vector<double>> &x,
+    const std::vector<std::vector<double>> &u, const std::vector<double> &k,
+    const std::vector<double> &t) {
+  impl_->add_initial_lap(x, u, k, t);
 }
 
 LmpcControlCommand NativeLMPCController::control() { return impl_->control(); }
@@ -680,6 +783,10 @@ std::size_t NativeLMPCController::last_safe_set_points() const {
 
 double NativeLMPCController::solver_success_rate() const {
   return impl_->solver_success_rate();
+}
+
+std::string NativeLMPCController::last_solver_status() const {
+  return impl_->last_solver_status();
 }
 
 } // namespace f110_gym_lmpc

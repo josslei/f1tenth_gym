@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace f110_gym_lmpc {
@@ -78,6 +79,13 @@ struct LmpcConfig {
   double input_weight_steer = 0.1;
   double control_rate_weight = 0.1;
   double safe_set_cost_weight = 1.0;
+  // The velocity command tracks the plan's speed this many steps ahead instead
+  // of the immediate next step. The FHOCP has no stage-level progress reward,
+  // so its optimal plan defers acceleration to late in the horizon; commanding
+  // the next-step velocity would keep the car crawling. Previewing ~0.2 s ahead
+  // lets the sim's velocity PID chase the plan's intended speed. Clamped to
+  // N-1.
+  std::size_t command_preview_steps = 20;
 };
 
 struct SparseErrorModel {
@@ -131,6 +139,10 @@ public:
   void reset();
   void update(const RacingLmpcState &state);
   void set_reference(const LmpcReference &reference);
+  void add_initial_lap(const std::vector<std::vector<double>> &x,
+                       const std::vector<std::vector<double>> &u,
+                       const std::vector<double> &k,
+                       const std::vector<double> &t);
   LmpcControlCommand control();
 
   std::vector<std::array<double, 2>> predicted_horizon() const;
@@ -140,6 +152,7 @@ public:
   std::size_t lap_sample_count() const;
   std::size_t last_safe_set_points() const;
   double solver_success_rate() const;
+  std::string last_solver_status() const;
 
 private:
   class Impl;

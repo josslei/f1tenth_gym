@@ -93,7 +93,9 @@ PYBIND11_MODULE(lmpc_native, m) {
       .def_readwrite("control_rate_weight",
                      &lmpc::LmpcConfig::control_rate_weight)
       .def_readwrite("safe_set_cost_weight",
-                     &lmpc::LmpcConfig::safe_set_cost_weight);
+                     &lmpc::LmpcConfig::safe_set_cost_weight)
+      .def_readwrite("command_preview_steps",
+                     &lmpc::LmpcConfig::command_preview_steps);
 
   py::class_<lmpc::SparseErrorModel>(m, "SparseErrorModel")
       .def_readonly("A", &lmpc::SparseErrorModel::A)
@@ -128,6 +130,8 @@ PYBIND11_MODULE(lmpc_native, m) {
       .def("update", &lmpc::NativeLMPCController::update, py::arg("state"))
       .def("set_reference", &lmpc::NativeLMPCController::set_reference,
            py::arg("reference"))
+      .def("add_initial_lap", &lmpc::NativeLMPCController::add_initial_lap,
+           py::arg("x"), py::arg("u"), py::arg("k"), py::arg("t"))
       .def("control", &lmpc::NativeLMPCController::control)
       .def("predicted_horizon", &lmpc::NativeLMPCController::predicted_horizon)
       .def("error_model", &lmpc::NativeLMPCController::error_model,
@@ -138,5 +142,7 @@ PYBIND11_MODULE(lmpc_native, m) {
       .def("last_safe_set_points",
            &lmpc::NativeLMPCController::last_safe_set_points)
       .def("solver_success_rate",
-           &lmpc::NativeLMPCController::solver_success_rate);
+           &lmpc::NativeLMPCController::solver_success_rate)
+      .def("last_solver_status",
+           &lmpc::NativeLMPCController::last_solver_status);
 }

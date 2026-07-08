@@ -39,6 +39,9 @@ class LMPCController(Controller):
         right_bound_profile: Sequence[float] | np.ndarray | None = None,
         regression_horizon_stride: int = 0,
         horizon: int | None = None,
+        max_iter: int | None = None,
+        tolerance: float | None = None,
+        reg_max_points: int | None = None,
     ) -> None:
         if NativeLMPCController is None:
             raise RuntimeError(
@@ -94,6 +97,12 @@ class LMPCController(Controller):
         native_config.dt = dt
         if horizon is not None:
             native_config.horizon = horizon
+        if max_iter is not None:
+            native_config.max_iter = max_iter
+        if tolerance is not None:
+            native_config.tolerance = tolerance
+        if reg_max_points is not None:
+            native_config.reg_max_points = reg_max_points
         native_config.wheelbase = wheelbase
         native_config.regression_horizon_stride = regression_horizon_stride
         native_config.track_length = (
@@ -150,6 +159,9 @@ class LMPCController(Controller):
         wheelbase: float = 0.33,
         regression_horizon_stride: int = 0,
         horizon: int | None = None,
+        max_iter: int | None = None,
+        tolerance: float | None = None,
+        reg_max_points: int | None = None,
     ) -> LMPCController:
         table = np.loadtxt(table_path, dtype=np.float64)
         table = np.atleast_2d(table)
@@ -171,6 +183,9 @@ class LMPCController(Controller):
             left_bound_profile=np.maximum(signed_left, signed_right),
             right_bound_profile=np.maximum(-signed_left, -signed_right),
             horizon=horizon,
+            max_iter=max_iter,
+            tolerance=tolerance,
+            reg_max_points=reg_max_points,
         )
 
     def reset(self) -> None:
@@ -213,6 +228,27 @@ class LMPCController(Controller):
             velocity=float(command.velocity),
         )
 
+    def load_initial_lap(self, csv_path: str | Path) -> int:
+        """Seed the safe set (D^0) from a recorded seed-lap CSV.
+
+        Columns are ``[lap, s, e_y, e_psi, v, Fd, Fb, delta, k, t]`` (one row per
+        simulator step). Each distinct ``lap`` value is added to the safe set as
+        a separate historical lap. Returns the number of laps loaded.
+        """
+        data = np.loadtxt(csv_path, delimiter=",", skiprows=1, dtype=np.float64)
+        data = np.atleast_2d(data)
+        laps_loaded = 0
+        for lap_id in np.unique(data[:, 0]):
+            lap = data[data[:, 0] == lap_id]
+            self.native_controller.add_initial_lap(
+                lap[:, 1:5].tolist(),
+                lap[:, 5:8].tolist(),
+                lap[:, 8].tolist(),
+                lap[:, 9].tolist(),
+            )
+            laps_loaded += 1
+        return laps_loaded
+
     def sample_count(self) -> int:
         return int(self.native_controller.sample_count())
 
@@ -227,6 +263,9 @@ class LMPCController(Controller):
 
     def solver_success_rate(self) -> float:
         return float(self.native_controller.solver_success_rate())
+
+    def last_solver_status(self) -> str:
+        return str(self.native_controller.last_solver_status())
 
     def predicted_horizon_xy(self) -> np.ndarray:
         horizon = np.asarray(
