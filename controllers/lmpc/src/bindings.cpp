@@ -71,8 +71,23 @@ PYBIND11_MODULE(lmpc_native, m) {
       .def_readwrite("max_drive_force", &lmpc::LmpcConfig::max_drive_force)
       .def_readwrite("max_brake_force", &lmpc::LmpcConfig::max_brake_force)
       .def_readwrite("max_steer", &lmpc::LmpcConfig::max_steer)
+      .def_readwrite("max_steer_rate", &lmpc::LmpcConfig::max_steer_rate)
+      .def_readwrite("low_speed_steer_zero_below",
+                     &lmpc::LmpcConfig::low_speed_steer_zero_below)
+      .def_readwrite("low_speed_steer_restore_at",
+                     &lmpc::LmpcConfig::low_speed_steer_restore_at)
       .def_readwrite("wheelbase", &lmpc::LmpcConfig::wheelbase)
       .def_readwrite("track_length", &lmpc::LmpcConfig::track_length)
+      .def_readwrite("max_speed", &lmpc::LmpcConfig::max_speed)
+      .def_readwrite("lateral_accel_limit",
+                     &lmpc::LmpcConfig::lateral_accel_limit)
+      .def_readwrite("corner_speed_safety_factor",
+                     &lmpc::LmpcConfig::corner_speed_safety_factor)
+      .def_readwrite("min_corner_speed", &lmpc::LmpcConfig::min_corner_speed)
+      .def_readwrite("fallback_lateral_gain",
+                     &lmpc::LmpcConfig::fallback_lateral_gain)
+      .def_readwrite("fallback_heading_gain",
+                     &lmpc::LmpcConfig::fallback_heading_gain)
       .def_readwrite("linearization_speed_floor",
                      &lmpc::LmpcConfig::linearization_speed_floor)
       .def_readwrite("max_lap_stored", &lmpc::LmpcConfig::max_lap_stored)
@@ -88,6 +103,11 @@ PYBIND11_MODULE(lmpc_native, m) {
                      &lmpc::LmpcConfig::terminal_lateral_weight)
       .def_readwrite("terminal_heading_weight",
                      &lmpc::LmpcConfig::terminal_heading_weight)
+      .def_readwrite("terminal_slack_position_weight",
+                     &lmpc::LmpcConfig::terminal_slack_position_weight)
+      .def_readwrite("boundary_margin", &lmpc::LmpcConfig::boundary_margin)
+      .def_readwrite("boundary_slack_weight",
+                     &lmpc::LmpcConfig::boundary_slack_weight)
       .def_readwrite("input_weight_lon", &lmpc::LmpcConfig::input_weight_lon)
       .def_readwrite("input_weight_steer",
                      &lmpc::LmpcConfig::input_weight_steer)

@@ -26,7 +26,18 @@ namespace base = ::lmpc::vehicle_model::base_vehicle_model;
 namespace rt = ::lmpc::vehicle_model::racing_trajectory;
 namespace st = ::lmpc::vehicle_model::single_track_planar_model;
 
-constexpr double kTerminalSlackPenalty = 1.0e4;
+// Upstream (racing_mpc.cpp's build_lmpc_cost) penalizes the terminal
+// convex-hull slack PER-STATE (`convex_hull_slack = [40,40,4,40,40,4]` for
+// BARC), not with one uniform scalar -- position/velocity states (s, e_y,
+// v_x, v_y) are penalized ~10x more strictly than heading/yaw-rate states
+// (e_psi, omega). We do NOT copy BARC's raw numbers: those are sized
+// against BARC's own scale_x_ (s~2000, v_x~80, ...), which -- like their
+// scale_x_ itself -- is a poor match for our car's real magnitudes (same
+// reason our own scale_x_ is config-derived rather than copied from
+// upstream). Instead this ratio (position/velocity : heading/yaw-rate)
+// is the portable, paper-faithful part; the ABSOLUTE per-state weight is
+// derived from our own scale_x_ in the ctor (see terminal_slack_weight_).
+constexpr double kTerminalSlackHeadingRatio = 0.1;
 constexpr double kVehicleMass = 3.47;
 // Tiny ridge on the safe-set multipliers. The terminal constraint
 // xN == ss_x*lambda + slack is rank-deficient whenever safe-set columns repeat
@@ -70,7 +81,7 @@ make_base_config(const LmpcConfig &config) {
   rear_brake->piston_area = 0.0050543317;
 
   auto steer = std::make_shared<base::SteerConfig>();
-  steer->max_steer_rate = 10.0;
+  steer->max_steer_rate = config.max_steer_rate;
   steer->max_steer = config.max_steer;
   steer->turn_left_bias = 0.0;
 
@@ -118,7 +129,7 @@ make_single_track_config(const LmpcConfig &config) {
   model_config->Fb_max = config.max_brake_force;
   model_config->Td = 0.1;
   model_config->Tb = 0.1;
-  model_config->v_max = std::max(config.target_speed * 2.0, 5.0);
+  model_config->v_max = config.max_speed;
   model_config->P_max = 100.0;
   model_config->mu = 1.0;
   model_config->simplify_lon_control = true;
@@ -143,7 +154,7 @@ public:
     // for a full-scale race car; ours are derived from the config so they match
     // the F1TENTH ranges (e.g. lon force caps at max_drive_force/1000 kN --
     // upstream's 10 kN scale would make it ~1e-4, worse than unscaled).
-    const double v_max = std::max(config_.target_speed * 2.0, 5.0);
+    const double v_max = config_.max_speed;
     scale_x_ = casadi::DM{config_.track_length,
                           std::max(config_.track_half_width, 1.0),
                           0.5,
@@ -153,6 +164,23 @@ public:
     scale_u_ = casadi::DM{
         std::max(config_.max_drive_force, -config_.max_brake_force) / 1000.0,
         config_.max_steer};
+    // Per-state terminal-slack weight, ported from upstream's
+    // convex_hull_slack STRUCTURE (see kTerminalSlackHeadingRatio's
+    // comment): weight_i = terminal_slack_position_weight / scale_x_i^2,
+    // further scaled by kTerminalSlackHeadingRatio for heading/yaw-rate
+    // states. Normalizing by our OWN scale_x_ (not copying BARC's raw
+    // numbers) means a slack of "one full scale unit" costs the same
+    // relative penalty on every state, matching how scale_x_ is already
+    // used to condition the rest of the QP.
+    terminal_slack_weight_ = casadi::DM::zeros(model_.nx(), 1);
+    for (casadi_int i = 0; i < model_.nx(); ++i) {
+      const double ratio = (i == st::XIndex::YAW || i == st::XIndex::VYAW)
+                               ? kTerminalSlackHeadingRatio
+                               : 1.0;
+      const double scale = static_cast<double>(scale_x_(i));
+      terminal_slack_weight_(i) =
+          config_.terminal_slack_position_weight * ratio / (scale * scale);
+    }
     build_solver();
     reset();
   }
@@ -245,9 +273,35 @@ public:
     using casadi::Slice;
 
     const auto N = static_cast<casadi_int>(config_.horizon);
-    const DM x0 = DM{current_state_.s,     current_state_.e_y,
-                     current_state_.e_psi, std::max(current_state_.v_x, 0.05),
-                     current_state_.v_y,   current_state_.omega};
+    DM x0 = DM{current_state_.s,     current_state_.e_y,
+               current_state_.e_psi, std::max(current_state_.v_x, 0.05),
+               current_state_.v_y,   current_state_.omega};
+    if (solved_ && config_.track_length > 0.0) {
+      // CenterlineTrack::project() always wraps s to [0, track_length), but
+      // last_x_ (the previous solve, integrated via s += v*dt with no
+      // wraparound) does not. Without this, the instant a lap completes
+      // and x0.s snaps from ~track_length back to ~0, ref(:,0)=x0 (~0) and
+      // ref(:,1..)=last_x_(:,1..) (~track_length, still the OLD unwrapped
+      // value) differ by a full track_length in a single stage -- a huge
+      // discontinuity fed directly into both the A/B/C linearization
+      // reference and the solver's initial guess. Measured consequence:
+      // the QP became numerically degenerate immediately after the car
+      // reached s~track_length (OSQP reporting "problem non convex", the
+      // simulator's own reported omega diverging into the trillions over
+      // the next several steps). Fix: shift x0.s by whichever multiple of
+      // track_length brings it closest to the warm start's own
+      // continuation, resolving the periodic coordinate's ambiguity before
+      // it ever reaches the QP -- not a defensive clamp on corrupted data,
+      // a correct alignment of a genuinely multi-valued (mod track_length)
+      // quantity.
+      const double reference_s =
+          static_cast<double>(last_x_(st::XIndex::PX, 1));
+      double aligned_s = static_cast<double>(x0(st::XIndex::PX));
+      aligned_s +=
+          std::round((reference_s - aligned_s) / config_.track_length) *
+          config_.track_length;
+      x0(st::XIndex::PX) = aligned_s;
+    }
 
     DM x_init = DM::zeros(model_.nx(), N);
     x_init(Slice(), 0) = x0;
@@ -315,6 +369,7 @@ public:
       opti_.set_value(u_prev_param_, previous_native_u_);
       opti_.set_value(left_bound_, current_reference_.left_bound);
       opti_.set_value(right_bound_, current_reference_.right_bound);
+      opti_.set_value(vx_bound_, vx_bound_value_);
       for (casadi_int i = 0; i < N - 1; ++i) {
         opti_.set_value(A_params_[i], A_values_[i]);
         opti_.set_value(B_params_[i], B_values_[i]);
@@ -344,7 +399,7 @@ public:
       // the permanent fix is variable scaling -- task #7.)
       const double kMaxLateral = 2.0 * std::max(current_reference_.left_bound,
                                                 current_reference_.right_bound);
-      const double kMaxSpeed = 3.0 * std::max(config_.target_speed * 2.0, 5.0);
+      const double kMaxSpeed = 3.0 * config_.max_speed;
       const double max_abs_ey = static_cast<double>(
           casadi::DM::mmax(casadi::DM::abs(sol_x(st::XIndex::PY, Slice()))));
       const double max_vx = static_cast<double>(
@@ -360,13 +415,14 @@ public:
       last_u_ = sol_u;
       store_predicted_horizon(last_x_);
       solved_ = true;
-      previous_command_ = command_from_solution(last_x_, last_u_);
+      previous_command_ =
+          rate_limit_steering(command_from_solution(last_x_, last_u_));
       previous_native_u_ = command_native_u(previous_command_);
       solver_success_count_++;
     } catch (const std::exception &e) {
       solved_ = false;
       last_solver_status_ = e.what();
-      previous_command_ = fallback_command();
+      previous_command_ = rate_limit_steering(fallback_command());
       previous_native_u_ = command_native_u(previous_command_);
     }
     solver_attempt_count_++;
@@ -460,10 +516,27 @@ private:
     u_prev_param_ = opti_.parameter(model_.nu(), 1);
     left_bound_ = opti_.parameter(1, 1);
     right_bound_ = opti_.parameter(1, 1);
+    // Per-stage v_x upper bound (index i = stage i for i in [0, N-2], index
+    // N-1 = terminal), evaluated fresh every solve from local curvature --
+    // see LmpcConfig::lateral_accel_limit for why this replaced a flat cap.
+    vx_bound_ = opti_.parameter(1, N);
     ss_x_ = opti_.parameter(model_.nx(), config_.reg_max_points);
     ss_costs_ = opti_.parameter(1, config_.reg_max_points);
     lambda_ = opti_.variable(config_.reg_max_points, 1);
     terminal_slack_ = opti_.variable(model_.nx(), 1);
+    boundary_slack_ = opti_.variable(1);
+
+    // Shrink the raw corridor by a fixed margin (safety pad + half the
+    // vehicle body width) up front; boundary_slack_ then relaxes that same
+    // shrunk corridor back out, uniformly across every stage AND the
+    // terminal state, whenever the plan needs more room than the margin
+    // leaves. This is a plain double baked into the constraint at build
+    // time (matches upstream racing_mpc.cpp's build_boundary_constraint),
+    // not a runtime parameter -- neither the margin nor the vehicle width
+    // change after construction.
+    const double boundary_margin =
+        config_.boundary_margin +
+        0.5 * model_.get_base_config().chassis_config->b;
 
     MX cost = MX::zeros(1);
     // X_/U_ are SCALED decision variables (see the ctor). All constraints and
@@ -481,6 +554,24 @@ private:
       opti_.subject_to(xip1 == casadi::MX::mtimes({A_params_[i], xi}) +
                                    casadi::MX::mtimes({B_params_[i], ui}) +
                                    C_params_[i]);
+
+      // Explicit v_x rate limit, sized from the vehicle's own force limits
+      // (kVehicleMass, max_drive_force/max_brake_force -- already used for
+      // the same physical meaning in command_native_u). The dynamics
+      // equality above is satisfied by construction, but it constrains the
+      // LINEARIZED model, which can be inaccurate away from the
+      // linearization point -- diagnosed via direct instrumentation of the
+      // solved plan's own s-progression: consecutive stages implied
+      // accelerations up to ~69 m/s^2 (vs. this vehicle's actual ~1.4 m/s^2
+      // accel / ~2.9 m/s^2 decel capability), i.e. the QP was finding
+      // solutions the real vehicle cannot execute. This bound is a hard
+      // physical fact independent of the linearization's accuracy, so it
+      // directly rules those solutions out rather than hoping a better
+      // reference point fixes the approximation.
+      opti_.subject_to(
+          opti_.bounded((config_.max_brake_force / kVehicleMass) * config_.dt,
+                        xip1(st::XIndex::VX) - xi(st::XIndex::VX),
+                        (config_.max_drive_force / kVehicleMass) * config_.dt));
 
       // Paper eq. (4a) stage cost: the minimum-time indicator 1_F(x_t) (= 1 for
       // every not-yet-finished step) plus input and control-rate penalties. The
@@ -508,20 +599,25 @@ private:
       opti_.subject_to(opti_.bounded(-config_.max_steer,
                                      ui(st::UIndexSimple::STEER_SIMPLE),
                                      config_.max_steer));
-      opti_.subject_to(xi(st::XIndex::PY) >= -right_bound_);
-      opti_.subject_to(xi(st::XIndex::PY) <= left_bound_);
-      opti_.subject_to(opti_.bounded(
-          0.0, xi(st::XIndex::VX), std::max(config_.target_speed * 2.0, 5.0)));
+      opti_.subject_to(
+          opti_.bounded(-(right_bound_ - boundary_margin) - boundary_slack_,
+                        xi(st::XIndex::PY),
+                        (left_bound_ - boundary_margin) + boundary_slack_));
+      opti_.subject_to(opti_.bounded(0.0, xi(st::XIndex::VX), vx_bound_(i)));
     }
 
     const auto xN = X_(Slice(), N - 1) * scale_x_;
-    // The terminal state must also respect the track corridor and speed bounds.
-    // The stage loop above only constrains x_0..x_{N-2}; leaving x_N bounded
-    // solely by the (slacked) safe-set constraint let its e_y drift off-track.
-    opti_.subject_to(xN(st::XIndex::PY) >= -right_bound_);
-    opti_.subject_to(xN(st::XIndex::PY) <= left_bound_);
-    opti_.subject_to(opti_.bounded(0.0, xN(st::XIndex::VX),
-                                   std::max(config_.target_speed * 2.0, 5.0)));
+    // The terminal state must also respect the track corridor and speed
+    // bounds. The stage loop above only constrains x_0..x_{N-2}; leaving x_N
+    // bounded solely by the (slacked) safe-set constraint let its e_y drift
+    // off-track. Shares the same boundary_slack_ as the stage loop -- one
+    // relaxation covers the whole horizon, matching upstream.
+    opti_.subject_to(opti_.bounded(
+        -(right_bound_ - boundary_margin) - boundary_slack_, xN(st::XIndex::PY),
+        (left_bound_ - boundary_margin) + boundary_slack_));
+    opti_.subject_to(opti_.bounded(0.0, xN(st::XIndex::VX), vx_bound_(N - 1)));
+    opti_.subject_to(boundary_slack_ >= 0.0);
+    cost += config_.boundary_slack_weight * boundary_slack_ * boundary_slack_;
     opti_.subject_to(lambda_ >= 0.0);
     opti_.subject_to(casadi::MX::sum1(lambda_) == 1.0);
     opti_.subject_to(xN ==
@@ -529,7 +625,9 @@ private:
     cost +=
         config_.safe_set_cost_weight * casadi::MX::mtimes({ss_costs_, lambda_});
     cost += kLambdaRidge * casadi::MX::sumsqr(lambda_);
-    cost += kTerminalSlackPenalty * casadi::MX::sumsqr(terminal_slack_);
+    cost += casadi::MX::mtimes({terminal_slack_.T(),
+                                casadi::MX::diag(terminal_slack_weight_),
+                                terminal_slack_});
     cost += config_.terminal_lateral_weight * xN(st::XIndex::PY) *
             xN(st::XIndex::PY);
     cost += config_.terminal_heading_weight * xN(st::XIndex::YAW) *
@@ -537,21 +635,38 @@ private:
     opti_.minimize(cost);
 
     // The FHOCP is a convex QP (affine A/B/C dynamics, convex quadratic cost,
-    // linear constraints), so it is solved directly as a conic QP with qrqp.
-    // Wrapping it in an SQP (sqpmethod) only adds outer-loop machinery around a
-    // single QP solve and is ~7x slower for identical accuracy. error_on_fail
-    // keeps a non-converged QP from dumping to the console; a max-iteration
-    // limit is reported as SOLVER_RET_LIMITED and accepted by solve_limited().
-    const auto solver_opts =
-        casadi::Dict{{"print_time", false},
-                     {"print_iter", false},
-                     {"print_header", false},
-                     {"print_info", false},
-                     {"error_on_fail", false},
-                     {"max_iter", config_.max_iter},
-                     {"constr_viol_tol", config_.tolerance},
-                     {"dual_inf_tol", config_.tolerance}};
-    opti_.solver("qrqp", solver_opts);
+    // linear constraints), so it is solved directly as a conic QP rather than
+    // wrapping it in an SQP (sqpmethod adds outer-loop machinery around a
+    // single QP solve for ~7x the cost, no accuracy gain here).
+    //
+    // Solver: OSQP, matching upstream racing_mpc.cpp's fast/conic-mode choice
+    // (not qrqp, CasADi's built-in active-set solver). qrqp was measured to
+    // report status "success" while returning finite-but-physically-invalid
+    // iterates (e.g. e_y reaching 5e10 inside a 1.5 m corridor) on ~13% of
+    // solves even after variable scaling -- OSQP's ADMM iteration is far more
+    // robust on an imperfectly-scaled QP, which is also why upstream tolerates
+    // running the *same* full-scale-car scale_u on their 1/10-scale BARC
+    // config without issue. `polish: true` mirrors upstream (a post-solve
+    // active-set pass that tightens the ADMM solution).
+    //
+    // Deliberately NOT passing config_.max_iter/config_.tolerance through
+    // here (unlike qrqp): those were tuned for qrqp's active-set iteration
+    // count and constr_viol_tol/dual_inf_tol, which do not carry over to an
+    // ADMM solver. Worse, CasADi's osqp interface maps OSQP_MAX_ITER_REACHED
+    // to SOLVER_RET_INFEASIBLE, not SOLVER_RET_LIMITED -- so unlike qrqp,
+    // solve_limited()'s accept-on-iteration-limit path NEVER applies to
+    // OSQP; hitting the cap is always a hard failure that throws. Measured
+    // directly: with max_iter=100 (qrqp's tuned value) and eps=1e-6 (qrqp's
+    // tuned tolerance), OSQP hit the cap on >90% of solves, since ADMM
+    // typically needs hundreds-to-thousands of iterations for that tight a
+    // tolerance on this QP size. Leaving these unset uses OSQP's own
+    // defaults (max_iter=4000, eps_abs=eps_rel=1e-3), identical to what
+    // upstream relies on (it does not override them either).
+    const auto solver_opts = casadi::Dict{
+        {"print_time", false},
+        {"error_on_fail", false},
+        {"osqp", casadi::Dict{{"polish", true}, {"verbose", false}}}};
+    opti_.solver("osqp", solver_opts);
   }
 
   LmpcControlCommand command_from_solution(const casadi::DM &x,
@@ -571,20 +686,67 @@ private:
         static_cast<casadi_int>(config_.command_preview_steps), x.size2() - 2);
     const double ds = static_cast<double>(x(st::XIndex::PX, preview + 1)) -
                       static_cast<double>(x(st::XIndex::PX, preview));
-    const double velocity =
-        clamp(ds / config_.dt, 0.0, std::max(config_.target_speed * 2.0, 5.0));
+    const double velocity = clamp(ds / config_.dt, 0.0, config_.max_speed);
     return LmpcControlCommand{steer, velocity};
   }
 
   LmpcControlCommand fallback_command() const {
     const double feedforward =
         std::atan(config_.wheelbase * current_reference_.curvature);
-    const double steer = clamp(feedforward - 0.6 * current_state_.e_y -
-                                   1.2 * current_state_.e_psi,
-                               -config_.max_steer, config_.max_steer);
-    const double velocity = clamp(current_reference_.target_speed, 0.0,
-                                  std::max(config_.target_speed, 1.0));
+    // Standard Stanley control law (Thrun et al., DARPA Grand Challenge):
+    // e_psi enters directly, e_y enters through atan2(k*e_y, v) --
+    // naturally speed-normalized, so the lateral correction tapers off at
+    // high speed instead of applying a fixed gain regardless of speed (see
+    // LmpcConfig::fallback_lateral_gain for why this replaced a fixed-gain
+    // law that was measured inducing a real vehicle spin).
+    const double v_for_gain = std::max(current_state_.v_x, 1.0);
+    const double lateral_term = std::atan2(
+        config_.fallback_lateral_gain * current_state_.e_y, v_for_gain);
+    const double steer =
+        clamp(feedforward - lateral_term -
+                  config_.fallback_heading_gain * current_state_.e_psi,
+              -config_.max_steer, config_.max_steer);
+    // A run of solver failures means the plan can no longer be trusted --
+    // treat that as a signal to shed speed and stabilize rather than
+    // holding cruising speed while fighting a heading/lateral error with
+    // steering alone. Measured: holding target_speed (~7 m/s) here while
+    // fallback ran for an extended stretch was part of what let a solver
+    // failure cascade turn into a genuine spin. But the target must clear
+    // low_speed_steer_restore_at, or fallback drives dead straight
+    // forever: steering stays suppressed (see rate_limit_steering) below
+    // that speed, and target_speed=min_corner_speed alone can leave the
+    // car permanently under it (measured: car cruised at 1.0 m/s with
+    // steer pinned to 0 for 200+ steps, drifting off track since it could
+    // never turn).
+    const double velocity = clamp(
+        std::max(config_.min_corner_speed, config_.low_speed_steer_restore_at),
+        0.0, config_.max_speed);
     return LmpcControlCommand{steer, velocity};
+  }
+
+  // Finalizes whatever produced `raw` (the primary solve or
+  // fallback_command()) into the actual output command: (1) tapers
+  // steering toward 0 while v_x is below low_speed_steer_suppress_threshold
+  // -- works around a confirmed F110 Gym simulator bug at its kinematic/
+  // dynamic model switch (see LmpcConfig::low_speed_steer_suppress_threshold);
+  // (2) rate-limits the (possibly-suppressed) steering using
+  // previous_command_.steering (this call's "last commanded" value, not
+  // yet overwritten) as the reference -- the primary solve's
+  // control_rate_weight is only a soft cost, and fallback_command() had no
+  // rate limiting at all (see LmpcConfig::max_steer_rate).
+  LmpcControlCommand rate_limit_steering(const LmpcControlCommand &raw) const {
+    const double suppress_scale =
+        clamp((current_state_.v_x - config_.low_speed_steer_zero_below) /
+                  (config_.low_speed_steer_restore_at -
+                   config_.low_speed_steer_zero_below),
+              0.0, 1.0);
+    const double suppressed_steer = raw.steering * suppress_scale;
+    const double max_delta = config_.max_steer_rate * config_.dt;
+    const double delta = clamp(suppressed_steer - previous_command_.steering,
+                               -max_delta, max_delta);
+    return LmpcControlCommand{clamp(previous_command_.steering + delta,
+                                    -config_.max_steer, config_.max_steer),
+                              raw.velocity};
   }
 
   casadi::DM command_native_u(const LmpcControlCommand &command) const {
@@ -656,6 +818,19 @@ private:
     has_recorded_sample_ = true;
   }
 
+  // Tire lateral-acceleration-limited corner speed, the same formula
+  // scripts/generate_lmpc_trajectory.py uses to build the reference/seed
+  // speed profile (v = sqrt(ay_limit / |kappa|)) -- see
+  // LmpcConfig::lateral_accel_limit. corner_speed_safety_factor derates the
+  // theoretical grip for the QP bound only (see its doc comment).
+  double corner_speed_bound(double curvature) const {
+    constexpr double kCurvatureEps = 1.0e-6;
+    const double v = std::sqrt(
+        (config_.lateral_accel_limit * config_.corner_speed_safety_factor) /
+        (std::abs(curvature) + kCurvatureEps));
+    return clamp(v, config_.min_corner_speed, config_.max_speed);
+  }
+
   void set_dynamics_parameters(const casadi::DM &x_ref_mat,
                                const casadi::DM &u_ref_mat) {
     using casadi::Slice;
@@ -666,6 +841,8 @@ private:
     A_values_.reserve(config_.horizon - 1);
     B_values_.reserve(config_.horizon - 1);
     C_values_.reserve(config_.horizon - 1);
+    vx_bound_value_ =
+        casadi::DM::zeros(1, static_cast<casadi_int>(config_.horizon));
     for (casadi_int i = 0; i < static_cast<casadi_int>(config_.horizon - 1);
          ++i) {
       casadi::DM dA = casadi::DM::zeros(model_.nx(), model_.nx());
@@ -698,7 +875,13 @@ private:
       if (i == 0) {
         store_error_model(A, B, C);
       }
+      vx_bound_value_(i) = corner_speed_bound(curvature);
     }
+    const casadi_int terminal_index =
+        static_cast<casadi_int>(config_.horizon - 1);
+    const double terminal_curvature = curvature_at_s(
+        static_cast<double>(x_ref_mat(st::XIndex::PX, terminal_index)));
+    vx_bound_value_(terminal_index) = corner_speed_bound(terminal_curvature);
   }
 
   bool should_update_regression(casadi_int horizon_index) const {
@@ -831,6 +1014,7 @@ private:
   // Per-variable scaling factors (physical = scaled * factor); see the ctor.
   casadi::DM scale_x_;
   casadi::DM scale_u_;
+  casadi::DM terminal_slack_weight_;
   casadi::Opti opti_;
   casadi::MX X_;
   casadi::MX U_;
@@ -840,6 +1024,8 @@ private:
   casadi::MX u_prev_param_;
   casadi::MX left_bound_;
   casadi::MX right_bound_;
+  casadi::MX vx_bound_;
+  casadi::DM vx_bound_value_;
   std::vector<casadi::MX> A_params_;
   std::vector<casadi::MX> B_params_;
   std::vector<casadi::MX> C_params_;
@@ -847,6 +1033,7 @@ private:
   casadi::MX ss_costs_;
   casadi::MX lambda_;
   casadi::MX terminal_slack_;
+  casadi::MX boundary_slack_;
   casadi::DM last_x_;
   casadi::DM last_u_;
   casadi::DM previous_native_u_;

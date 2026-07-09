@@ -16,6 +16,7 @@
 [submodule "thirdparty/casadi"]
 	path = thirdparty/casadi
 	url = git@github.com:casadi/casadi
+	ignore = all
 [submodule "thirdparty/cgal"]
 	path = thirdparty/cgal
 	url = git@github.com:cgal/cgal

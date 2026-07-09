@@ -94,6 +94,28 @@ class LMPCController(Controller):
                 )
         else:
             native_config.target_speed = target_speed
+        # Flat hard v_max cap, deliberately DISTINCT from target_speed above:
+        # target_speed sizes the average-case operating envelope (QP scaling,
+        # etc.); max_speed is the safety cap enforced as a box bound on every
+        # stage's v_x in the FHOCP -- matching upstream racing_mpc.cpp's
+        # LMPC-mode behavior, where the ONLY explicit speed defense is a flat
+        # v_max (their BARC config hardcodes 3.0 m/s); curvature-aware
+        # cornering speed is NOT enforced inside the FHOCP itself, it comes
+        # entirely from the safe set's terminal cost-to-go over successive
+        # laps. Sized to the profile's MAX (straightaway speed), not its min:
+        # our seed lap (D^0) already has v_x correctly varying 2.5-10 m/s by
+        # curvature (unlike upstream's from-scratch BARC bootstrap, we start
+        # with a populated, curvature-aware safe set). Capping max_speed at
+        # the tightest corner's speed forces xN(VX) below nearly every
+        # safe-set neighbor's recorded v_x, so the terminal equality
+        # constraint (xN == ss_x*lambda + terminal_slack_) has to absorb that
+        # gap via terminal_slack_ on almost every solve -- measured this
+        # collapsing solver_success to ~19% (mostly fallback_command()
+        # driving, not the actual LMPC plan). Using the max keeps the hard
+        # bound from fighting the seed data; actual corner slowdown is left
+        # to the terminal cost-to-go, which already encodes it correctly.
+        if self.speed_profile is not None:
+            native_config.max_speed = max(float(np.max(self.speed_profile)), 1.0)
         native_config.dt = dt
         if horizon is not None:
             native_config.horizon = horizon

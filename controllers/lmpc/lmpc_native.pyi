@@ -60,8 +60,17 @@ class LmpcConfig:
     max_drive_force: float
     max_brake_force: float
     max_steer: float
+    max_steer_rate: float
+    low_speed_steer_zero_below: float
+    low_speed_steer_restore_at: float
     wheelbase: float
     track_length: float
+    max_speed: float
+    lateral_accel_limit: float
+    corner_speed_safety_factor: float
+    min_corner_speed: float
+    fallback_lateral_gain: float
+    fallback_heading_gain: float
     linearization_speed_floor: float
     max_lap_stored: int
     reg_dist_max: float
@@ -72,6 +81,9 @@ class LmpcConfig:
     heading_weight: float
     terminal_lateral_weight: float
     terminal_heading_weight: float
+    terminal_slack_position_weight: float
+    boundary_margin: float
+    boundary_slack_weight: float
     input_weight_lon: float
     input_weight_steer: float
     control_rate_weight: float

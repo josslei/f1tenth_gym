@@ -42,6 +42,7 @@ file(GLOB LMPC_BOOST_INCLUDE_DIRS CONFIGURE_DEPENDS
 
 find_package(Python REQUIRED COMPONENTS Interpreter Development)
 find_package(casadi CONFIG QUIET
+  NO_CMAKE_PACKAGE_REGISTRY
   HINTS
     "${LMPC_CASADI_SOURCE_DIR}/build"
     "${LMPC_CASADI_SOURCE_DIR}/build/casadi"
@@ -52,6 +53,8 @@ if(NOT TARGET casadi AND NOT TARGET casadi::casadi)
   set(WITH_BUILD_REQUIRED OFF CACHE BOOL "Do not build Fortran-based CasADi dependencies" FORCE)
   set(WITH_BUILD_IPOPT OFF CACHE BOOL "Do not build IPOPT from source" FORCE)
   set(WITH_QPOASES OFF CACHE BOOL "Do not require LAPACK-backed qpOASES for Gym MPC" FORCE)
+  set(WITH_OSQP ON CACHE BOOL "Enable the OSQP conic solver for LMPC (matches upstream racing_mpc.cpp; more robust than qrqp on the unscaled/ill-conditioned FHOCP)" FORCE)
+  set(WITH_BUILD_OSQP ON CACHE BOOL "Build OSQP from source for LMPC (no system package, matches the pre-staged osqp CMake-policy patch below)" FORCE)
   set(WITH_PYTHON OFF CACHE BOOL "Do not build CasADi Python frontend here" FORCE)
   set(WITH_EXAMPLES OFF CACHE BOOL "Do not build CasADi examples here" FORCE)
   set(WITH_DOC OFF CACHE BOOL "Do not build CasADi docs here" FORCE)
@@ -141,7 +144,7 @@ set_target_properties(lmpc_native PROPERTIES
 )
 
 set(LMPC_CASADI_PLUGIN_TARGETS)
-foreach(plugin_target IN ITEMS casadi_nlpsol_sqpmethod casadi_conic_qrqp)
+foreach(plugin_target IN ITEMS casadi_nlpsol_sqpmethod casadi_conic_qrqp casadi_conic_osqp)
   if(TARGET ${plugin_target})
     list(APPEND LMPC_CASADI_PLUGIN_TARGETS ${plugin_target})
   endif()

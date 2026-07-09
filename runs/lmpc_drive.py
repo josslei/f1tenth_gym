@@ -34,12 +34,17 @@ DIAGNOSTIC_INTERVAL_STEPS = 100
 SIM_DT = 0.025
 
 # --- LMPC tuning: read here in Python, passed through to the C++ backend ---
-# Halved from 150 for now; lengthen again once a seed lap gives the terminal
-# cost-to-go that lets a short horizon stay on the (sub)optimal line.
+# Tried 120 (3.0s, sized for a full braking maneuver -- see git history /
+# recom.md) to test whether insufficient lookahead was why the car crashes
+# into a corner. Measured: distance 38.43m -> 36.42m (no improvement, within
+# noise) and the crash happened at nearly the SAME track location (s~41 vs
+# s~42) regardless of horizon length, while solve time got meaningfully
+# worse (mean 80ms->118ms, p95 132ms->218ms). Reverted to 75 -- lookahead
+# was not the bottleneck; something specific to that track location is.
 HORIZON_STEPS = 75
 # qrqp active-set iteration cap. Cheap now (convex QP converges fast), but
 # load-bearing once the safe set makes the terminal QP degenerate.
-SOLVER_MAX_ITER = 1000
+SOLVER_MAX_ITER = 100
 # qrqp primal/dual feasibility tolerances (constr_viol_tol / dual_inf_tol).
 SOLVER_TOLERANCE = 1e-6
 # Terminal safe-set size; shrink for speed after a seed lap exists.
