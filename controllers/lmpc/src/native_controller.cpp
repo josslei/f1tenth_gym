@@ -133,6 +133,26 @@ public:
       : config_(config),
         model_(make_base_config(config), make_single_track_config(config)),
         safe_set_(std::make_unique<rt::SafeSetManager>(config.max_lap_stored)) {
+    // Variable scaling, ported from upstream racing_mpc.cpp (scale_x_/scale_u_
+    // there): the Opti decision variables X_/U_ live in scaled units and every
+    // physical use multiplies by these factors, so each variable is O(1) for
+    // the QP. Without this the raw QP mixes s ~ 1e2, v ~ 1e1, e_psi ~ 1e-1 and
+    // lon-force ~ 1e-3 (kN) in one problem, and qrqp's factorization returns
+    // non-unique/garbage iterates from near-identical inputs (the horizon
+    // "wiggle"). Upstream's constants {2000,10,0.1,80,2,2}/{10,0.3} are sized
+    // for a full-scale race car; ours are derived from the config so they match
+    // the F1TENTH ranges (e.g. lon force caps at max_drive_force/1000 kN --
+    // upstream's 10 kN scale would make it ~1e-4, worse than unscaled).
+    const double v_max = std::max(config_.target_speed * 2.0, 5.0);
+    scale_x_ = casadi::DM{config_.track_length,
+                          std::max(config_.track_half_width, 1.0),
+                          0.5,
+                          v_max,
+                          2.0,
+                          2.0};
+    scale_u_ = casadi::DM{
+        std::max(config_.max_drive_force, -config_.max_brake_force) / 1000.0,
+        config_.max_steer};
     build_solver();
     reset();
   }
@@ -302,13 +322,17 @@ public:
       }
       opti_.set_value(ss_x_, ss_x_value_);
       opti_.set_value(ss_costs_, ss_costs_value_);
-      opti_.set_initial(X_, ref);
-      opti_.set_initial(U_, u_ws);
+      // ref/u_ws are physical; setting the initial on the scaled expression
+      // lets Opti invert the scaling (upstream does the same). Solutions are
+      // scaled back to physical units immediately, so everything outside the
+      // Opti object stays in physical units.
+      opti_.set_initial(X_ * scale_x_, ref);
+      opti_.set_initial(U_ * scale_u_, u_ws);
 
       sol_ = std::make_shared<casadi::OptiSol>(opti_.solve_limited());
       last_solver_status_ = opti_.return_status();
-      const casadi::DM sol_x = sol_->value(X_);
-      const casadi::DM sol_u = sol_->value(U_);
+      const casadi::DM sol_x = sol_->value(X_) * scale_x_;
+      const casadi::DM sol_u = sol_->value(U_) * scale_u_;
       // qrqp can report "success" yet return a garbage iterate on the
       // ill-conditioned dynamic-model QP: either non-finite (NaN/Inf) OR
       // exploding-but-finite (e_y seen reaching 5e10 while the corridor is
@@ -442,15 +466,18 @@ private:
     terminal_slack_ = opti_.variable(model_.nx(), 1);
 
     MX cost = MX::zeros(1);
-    opti_.subject_to(X_(Slice(), 0) == x0_);
+    // X_/U_ are SCALED decision variables (see the ctor). All constraints and
+    // costs below are written on the physical expressions xi/ui/xN obtained by
+    // multiplying back, exactly like upstream racing_mpc.cpp.
+    opti_.subject_to(X_(Slice(), 0) * scale_x_ == x0_);
 
     for (casadi_int i = 0; i < N - 1; ++i) {
       A_params_.push_back(opti_.parameter(model_.nx(), model_.nx()));
       B_params_.push_back(opti_.parameter(model_.nx(), model_.nu()));
       C_params_.push_back(opti_.parameter(model_.nx(), 1));
-      const auto xi = X_(Slice(), i);
-      const auto xip1 = X_(Slice(), i + 1);
-      const auto ui = U_(Slice(), i);
+      const auto xi = X_(Slice(), i) * scale_x_;
+      const auto xip1 = X_(Slice(), i + 1) * scale_x_;
+      const auto ui = U_(Slice(), i) * scale_u_;
       opti_.subject_to(xip1 == casadi::MX::mtimes({A_params_[i], xi}) +
                                    casadi::MX::mtimes({B_params_[i], ui}) +
                                    C_params_[i]);
@@ -470,7 +497,7 @@ private:
       if (i == 0) {
         u_prev_i = u_prev_param_;
       } else {
-        u_prev_i = U_(Slice(), i - 1);
+        u_prev_i = U_(Slice(), i - 1) * scale_u_;
       }
       const auto du = ui - u_prev_i;
       cost += config_.control_rate_weight * casadi::MX::sumsqr(du);
@@ -487,7 +514,7 @@ private:
           0.0, xi(st::XIndex::VX), std::max(config_.target_speed * 2.0, 5.0)));
     }
 
-    const auto xN = X_(Slice(), N - 1);
+    const auto xN = X_(Slice(), N - 1) * scale_x_;
     // The terminal state must also respect the track corridor and speed bounds.
     // The stage loop above only constrains x_0..x_{N-2}; leaving x_N bounded
     // solely by the (slacked) safe-set constraint let its e_y drift off-track.
@@ -784,12 +811,13 @@ private:
           ss_x = ss_x(Slice(), Slice(0, num_points));
           ss_costs = ss_costs(Slice(), Slice(0, num_points));
         }
-        // NOTE: upstream racing_mpc normalizes here (ss_j - ss_j[0]) to keep
-        // the terminal cost-to-go well scaled, but that only works together
-        // with its variable scaling (scale_x/scale_u). Without scaling,
-        // normalizing shrinks the cost-to-go pull below the input penalties and
-        // the car freezes; raw J drives but is large and ill-conditions qrqp.
-        // Proper fix is to port the variable scaling (see task #7).
+        // Normalize the cost-to-go locally (ss_j - ss_j[0]), matching upstream
+        // racing_mpc.cpp. J is absolute steps-to-finish (O(1e2-1e3)); only the
+        // DIFFERENCES between candidate terminal points matter for picking
+        // lambda, so shifting to a relative cost keeps the terminal term the
+        // same order as the rest of the (now variable-scaled) QP without
+        // changing the optimizer's preference among safe-set points.
+        ss_costs = ss_costs - ss_costs(0);
       }
     }
 
@@ -800,6 +828,9 @@ private:
   LmpcConfig config_;
   st::SingleTrackPlanarModel model_;
   std::unique_ptr<rt::SafeSetManager> safe_set_;
+  // Per-variable scaling factors (physical = scaled * factor); see the ctor.
+  casadi::DM scale_x_;
+  casadi::DM scale_u_;
   casadi::Opti opti_;
   casadi::MX X_;
   casadi::MX U_;
