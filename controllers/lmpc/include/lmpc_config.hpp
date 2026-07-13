@@ -6,14 +6,12 @@
 
 #include "dynamics/common.hpp"
 
-namespace lmpc
-{
+namespace lmpc {
 
 // Tunables settable from Python at construction time (LMPCController's
 // pybind11 binding). Every symbol here is traceable to a section of
 // controllers/lmpc/DESIGN.md -- see the per-field comments.
-struct LmpcConfig
-{
+struct LmpcConfig {
   // Must match the simulator's own control period -- the ATV/discretized
   // dynamics are linearized at this dt, so a mismatch against what the sim
   // actually steps at corrupts the linearization from the first solve.
@@ -71,6 +69,34 @@ struct LmpcConfig
   double c_u = 0.01;
   double c_du = 0.1;
 
+  // Penalty on normalized terminal safe-set mismatch. Dynamic-state mismatch
+  // is penalized less than epsi/s/ey mismatch in LMPCController.
+  double terminal_slack_weight = 100.0;
+
+  // v_max: SCALING REFERENCE ONLY (see scale_x below), NOT a hard QP bound
+  // -- DESIGN.md SS3 pins X's box constraint to ey alone; this does not
+  // add a vx constraint. Default mirrors
+  // gym/f110_gym/envs/f110_env.py's DEFAULT_PARAMS.
+  double v_max = 20.0;
+
+  // DESIGN.md's open item: variable scaling. The QP's decision vector mixes
+  // wildly different physical magnitudes (s up to ~164m, vx O(1-20), ey
+  // O(1), a O(1-9.5), delta O(0.1)) in one KKT system -- qrqp solves this
+  // reliably only once every variable is normalized to O(1). scale_x/scale_u
+  // are derived from THIS vehicle/track's own limits (v_max above, ey_max,
+  // a_max, delta_max, and the loaded Track's own length -- computed in
+  // LMPCController's constructor, not stored here since Track isn't built
+  // yet at LmpcConfig construction time), NOT copied from the prior port's
+  // BARC-specific constants (that mismatch was flagged there as a real
+  // bug). scale_x's vy/omega/epsi entries (2.0/2.0/0.5, StateIndex order)
+  // are the one exception: reused as-is from that prior, empirically-
+  // validated port, since they were reasonable order-of-magnitude defaults
+  // rather than vehicle-specific derivations in the first place, and
+  // deriving fresh values for them would be guessing, not improving.
+  double scale_x_vy = 2.0;
+  double scale_x_omega = 2.0;
+  double scale_x_epsi = 0.5;
+
   // DESIGN.md SS7: qrqp for correctness-first bring-up.
   std::string solver_name = "qrqp";
 
@@ -89,6 +115,6 @@ struct LmpcConfig
   double linearization_speed_floor = 1.0;
 };
 
-}  // namespace lmpc
+} // namespace lmpc
 
-#endif  // LMPC__LMPC_CONFIG_HPP_
+#endif // LMPC__LMPC_CONFIG_HPP_

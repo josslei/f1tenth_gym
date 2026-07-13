@@ -1,9 +1,22 @@
-"""Drive one lap with the Stanley controller and record it as an LMPC D^0 seed.
+"""Drive one lap with the Pure Pursuit controller and record it as an LMPC D^0 seed.
 
 Headless by default -- this only needs to run once per track to produce a CSV
 of (x_k, u_k, J_k) samples in the native LMPC state/control convention pinned
 in controllers/lmpc/DESIGN.md SS1: x = [vx, vy, omega, epsi, s, ey], u = [a,
 delta]. Pass --visualize to watch the drive in the pyglet viewer.
+
+Pure Pursuit, not Stanley: Stanley's heading-error feedback term reacts
+sharply to instantaneous heading error, and at this map's SIM_TIMESTEP
+(0.025s, 2.5x coarser than this project's earlier 0.01s work) that reaction
+had time to develop into a genuine tire-slip spin-out before the next
+correction arrived -- confirmed directly against raw simulator pose (yaw
+diverging ~45 degrees from the path heading within ~0.3s while steering sat
+pinned at its bound), not fixed by retuning Stanley's own gain in either
+direction (lower gain made cross-track error worse, matching a classic
+"too sluggish to keep up with curvature" failure, not a stability fix).
+Pure Pursuit's geometric "aim at a point ahead" law has no heading-error
+term to react sharply in the first place. The recorded lap starts from rest
+so D^0 contains the LMPC run's actual initial condition.
 """
 
 from __future__ import annotations
@@ -18,7 +31,7 @@ import numpy as np
 
 import f110_gym  # noqa: F401 - registers f110-v0
 from controllers.controller_base import VehicleState
-from controllers.stanley import Stanley
+from controllers.pure_pursuit import DynamicLookaheadDistance, PurePursuit
 from utils.waypoint_utils import cumulative_arc_lengths, nearest_waypoint_index
 from utils.waypoint_view import initial_pose_from_waypoints
 
@@ -31,6 +44,15 @@ MAP = "maps/custom/f110_gym_10/f110_gym_map"
 WAYPOINTS_CSV = "maps/custom/f110_gym_10/f110_gym_centerline.csv"
 OUTPUT_CSV = "outputs/lmpc_seed_laps/f110_gym_10_seed_lap.csv"
 
+# gym/f110_gym/envs/f110_env.py's F110Env defaults timestep to 0.01 unless a
+# caller overrides it -- explicit here rather than editing that vendored
+# default (CLAUDE.md: treat gym/ as a black box). 0.025 is the value
+# controllers/lmpc/DESIGN.md's N=75 horizon was originally pinned alongside;
+# must match runs/lmpc_drive.py's own SIM_TIMESTEP, or this seed lap's own
+# recorded states/costs-to-go don't correspond to what the controller runs
+# at.
+SIM_TIMESTEP = 0.025
+
 # Raw centerline CSVs have no speed column -- constant, comfortably above
 # LOW_SPEED_STEER_RESTORE_AT so cruise never re-enters the launch guard's
 # ramp band, and conservative for this track's tight ~1.5m half-width.
@@ -40,7 +62,13 @@ ZOOM = 1.0
 WINDOW_WIDTH = 1000
 WINDOW_HEIGHT = 800
 
-STANLEY_K = 5.0
+# Pure Pursuit lookahead policy -- same values as runs/waypoint_drive.py's
+# own DynamicLookaheadDistance, already validated there rather than guessed
+# fresh here. At a near-constant SEED_LAP_SPEED (3.5 m/s), this settles to
+# very close to MAX_LOOKAHEAD most of the lap.
+MIN_LOOKAHEAD = 2.0
+MAX_LOOKAHEAD = 4.0
+LOOKAHEAD_RATIO = 8.0
 
 # F110 Gym's dynamic single-track model (gym/f110_gym/envs/dynamic_models.py,
 # vehicle_dynamics_st) switches to a kinematic model below |v| < 0.5 m/s, and
@@ -91,26 +119,32 @@ class LaunchSteeringGuard:
         return steer * ramp
 
 
-def load_centerline_waypoints(csv_path: str, speed: float) -> np.ndarray:
-    """Build Stanley/project_frenet-compatible waypoints from a raw centerline CSV.
+def load_centerline_waypoints(
+    csv_path: str, speed: float
+) -> tuple[np.ndarray, np.ndarray]:
+    """Build PurePursuit waypoints and a project_frenet heading reference.
 
     Raw centerline CSVs (scripts/generate_centerline.py's format: x_m, y_m,
     w_tr_right_m, w_tr_left_m) have no heading or speed column. Heading is
-    the finite-difference tangent between consecutive closed-loop points,
-    stored offset by -pi/2 to match the same on-disk convention the raceline
-    CSVs use -- both controllers/stanley.py and project_frenet() below
-    unconditionally add +pi/2 back to recover the true heading, so storing
-    it pre-offset here keeps this a drop-in match for what Stanley.from_csv
-    would have loaded, no special-casing needed downstream. Speed is
-    constant (SEED_LAP_SPEED), matching the paper's own D^0 recipe: a
-    simple low-speed center-line tracking pass, not an optimized profile.
+    the finite-difference tangent between consecutive closed-loop points --
+    PurePursuit itself doesn't need heading (its waypoints are [x, y, speed],
+    controllers/pure_pursuit.py's PurePursuit.__init__), but project_frenet()
+    below still does for epsi, so it's returned separately here rather than
+    folded into the waypoints array. Stored offset by -pi/2 to match the same
+    on-disk convention the raceline CSVs use -- project_frenet() adds +pi/2
+    back, matching the discovered convention from this project's earlier
+    Stanley-based version. Speed is constant (SEED_LAP_SPEED), matching the
+    paper's own D^0 recipe: a simple low-speed center-line tracking pass,
+    not an optimized profile.
+
+    Returns (pursuit_waypoints [x, y, speed], path_psi [stored, -pi/2 offset]).
     """
     xy = np.loadtxt(csv_path, delimiter=",", skiprows=1, dtype=np.float64)[:, :2]
     next_xy = np.roll(xy, -1, axis=0)
     heading = np.arctan2(next_xy[:, 1] - xy[:, 1], next_xy[:, 0] - xy[:, 0])
     psi_stored = heading - np.pi / 2
     vx = np.full(xy.shape[0], speed, dtype=np.float64)
-    return np.column_stack([xy, psi_stored, vx])
+    return np.column_stack([xy, vx]), psi_stored
 
 
 def wrap_angle(angle: float) -> float:
@@ -123,13 +157,20 @@ def project_frenet(
     path_psi: np.ndarray,
     path_s: np.ndarray,
     last_idx: int,
+    search_window: int,
 ) -> tuple[float, float, float, int]:
     """Project a global (x, y) onto the reference path.
 
     Returns (s, ey, path_heading, nearest_idx). ey is positive to the left of
-    the path direction (tangent rotated +90 degrees).
+    the path direction (tangent rotated +90 degrees). search_window should be
+    the driving controller's own instance value (derived from this same
+    path's actual spacing, controllers/pure_pursuit.py's comment has the
+    rationale) -- a fixed index count here would silently become physically
+    too narrow on a densely-sampled path and lose track.
     """
-    idx = nearest_waypoint_index(path_xy, position, last_idx, search_window=200)
+    idx = nearest_waypoint_index(
+        path_xy, position, last_idx, search_window=search_window
+    )
     # The raceline CSV's psi_rad column is offset -90 degrees from the
     # direction of travel -- controllers/stanley.py's own control law adds
     # this same +pi/2 to get its heading reference (psi_path); matching it
@@ -144,15 +185,22 @@ def project_frenet(
 
 
 def main(visualize: bool = False) -> None:
-    env = gym.make("f110-v0", map=MAP, num_agents=1)
+    env = gym.make("f110-v0", map=MAP, num_agents=1, timestep=SIM_TIMESTEP)
     f110_env: Any = env.unwrapped
     ego_idx = 0
     dt = float(f110_env.timestep)
 
-    waypoints = load_centerline_waypoints(WAYPOINTS_CSV, SEED_LAP_SPEED)
-    controller = Stanley(waypoints, l_f=float(f110_env.params["lf"]), k=STANLEY_K)
+    pursuit_waypoints, path_psi = load_centerline_waypoints(
+        WAYPOINTS_CSV, SEED_LAP_SPEED
+    )
+    wheelbase = float(f110_env.params["lf"] + f110_env.params["lr"])
+    lookahead_policy = DynamicLookaheadDistance(
+        MIN_LOOKAHEAD, MAX_LOOKAHEAD, LOOKAHEAD_RATIO
+    )
+    controller = PurePursuit(
+        pursuit_waypoints, lookahead=lookahead_policy, wheelbase=wheelbase
+    )
     path_xy = controller.waypoints[:, :2]
-    path_psi = controller.waypoints[:, 2]
     path_s = cumulative_arc_lengths(path_xy)
 
     initial_pose = initial_pose_from_waypoints(path_xy)
@@ -192,7 +240,9 @@ def main(visualize: bool = False) -> None:
         cmd = controller.control()
         steer = steering_guard.apply(cmd.steering, state.speed)
 
-        raw_state = f110_env.sim.agents[ego_idx].state  # [x, y, delta, v, psi, yaw_rate, beta]
+        raw_state = f110_env.sim.agents[
+            ego_idx
+        ].state  # [x,y,delta,v,psi,yaw_rate,beta]
         v = float(raw_state[3])
         beta = float(raw_state[6])
         vx = v * np.cos(beta)
@@ -201,13 +251,21 @@ def main(visualize: bool = False) -> None:
 
         position = np.array([state.x, state.y])
         s, ey, path_heading, last_idx = project_frenet(
-            position, path_xy, path_psi, path_s, last_idx
+            position, path_xy, path_psi, path_s, last_idx, controller.search_window
         )
         epsi = wrap_angle(state.yaw - path_heading)
 
         samples.append(
-            {"vx": vx, "vy": vy, "omega": omega, "epsi": epsi, "s": s, "ey": ey,
-             "t": t, "delta": steer}
+            {
+                "vx": vx,
+                "vy": vy,
+                "omega": omega,
+                "epsi": epsi,
+                "s": s,
+                "ey": ey,
+                "t": t,
+                "delta": steer,
+            }
         )
 
         action = np.array([[steer, cmd.velocity]], dtype=np.float64)
@@ -235,10 +293,14 @@ def main(visualize: bool = False) -> None:
         )
 
     write_seed_lap_csv(samples, dt, OUTPUT_CSV)
-    print(f"Wrote {len(samples)} samples ({len(samples) - 1} transitions) to {OUTPUT_CSV}")
+    print(
+        f"Wrote {len(samples)} samples ({len(samples) - 1} transitions) to {OUTPUT_CSV}"
+    )
 
 
-def write_seed_lap_csv(samples: list[dict[str, float]], dt: float, output_path: str) -> None:
+def write_seed_lap_csv(
+    samples: list[dict[str, float]], dt: float, output_path: str
+) -> None:
     """Write (x_k, u_k, J_k) samples -- see controllers/lmpc/DESIGN.md SS2/SS5.
 
     T = len(samples) - 1 transitions were driven. Every k in [0, T] gets a
@@ -254,7 +316,9 @@ def write_seed_lap_csv(samples: list[dict[str, float]], dt: float, output_path: 
 
     with out_path.open("w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["vx", "vy", "omega", "epsi", "s", "ey", "t", "a", "delta", "J"])
+        writer.writerow(
+            ["vx", "vy", "omega", "epsi", "s", "ey", "t", "a", "delta", "J"]
+        )
         for k, sample in enumerate(samples):
             is_last = k == total_steps
             if is_last:
@@ -264,20 +328,29 @@ def write_seed_lap_csv(samples: list[dict[str, float]], dt: float, output_path: 
                 # Realized acceleration, not the controller's intended one --
                 # the actual measured transition is what the paper's error
                 # regression (DESIGN.md SS5) needs, not the velocity setpoint
-                # Stanley requested.
+                # the controller requested.
                 a_k = (samples[k + 1]["vx"] - sample["vx"]) / dt
                 delta_k = sample["delta"]
             writer.writerow(
                 [
-                    sample["vx"], sample["vy"], sample["omega"], sample["epsi"],
-                    sample["s"], sample["ey"], sample["t"], a_k, delta_k,
+                    sample["vx"],
+                    sample["vy"],
+                    sample["omega"],
+                    sample["epsi"],
+                    sample["s"],
+                    sample["ey"],
+                    sample["t"],
+                    a_k,
+                    delta_k,
                     total_steps - k,
                 ]
             )
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Drive and record an LMPC D^0 seed lap")
+    parser = argparse.ArgumentParser(
+        description="Drive and record an LMPC D^0 seed lap"
+    )
     parser.add_argument(
         "--visualize", action="store_true", help="Show the drive in the pyglet viewer"
     )

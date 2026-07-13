@@ -4,8 +4,7 @@
 #include <string>
 #include <vector>
 
-namespace lmpc
-{
+namespace lmpc {
 
 // The one piece of track geometry the FHOCP needs at every horizon stage:
 // curvature as a function of arclength s (the kappa argument threaded
@@ -29,23 +28,22 @@ namespace lmpc
 // Curvature is then the turn rate of that heading per unit arclength,
 // finite-differenced at each sample and linearly interpolated between
 // samples for an arbitrary query s.
-class Track
-{
+class Track {
 public:
-  explicit Track(const std::string & centerline_csv_path);
+  explicit Track(const std::string &centerline_csv_path);
 
   // Total arclength spanned by the loaded centerline (open path, one lap).
-  double length() const {return s_.back();}
+  double length() const { return s_.back(); }
 
   // Curvature at arclength s (positive = left turn), s clamped to
   // [0, length()] -- see class comment for why this is not periodic.
   double curvature(double s) const;
 
 private:
-  std::vector<double> s_;       // cumulative arclength per sample, size N, s_[0]=0
-  std::vector<double> kappa_;   // curvature per sample, size N
+  std::vector<double> s_; // cumulative arclength per sample, size N, s_[0]=0
+  std::vector<double> kappa_; // curvature per sample, size N
 };
 
-}  // namespace lmpc
+} // namespace lmpc
 
-#endif  // LMPC__TRACK_HPP_
+#endif // LMPC__TRACK_HPP_

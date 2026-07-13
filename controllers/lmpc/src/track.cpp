@@ -6,25 +6,22 @@
 #include <sstream>
 #include <stdexcept>
 
-namespace lmpc
-{
+namespace lmpc {
 
-namespace
-{
+namespace {
 
-double wrap_angle(double angle)
-{
+double wrap_angle(double angle) {
   return std::atan2(std::sin(angle), std::cos(angle));
 }
 
 // Parses "x_m, y_m, w_tr_right_m, w_tr_left_m" rows, skipping the leading
 // "#"-commented header -- the same format scripts/generate_centerline.py
 // writes and scripts/lmpc_collect_seed_lap.py reads with np.loadtxt.
-std::vector<std::pair<double, double>> load_xy(const std::string & csv_path)
-{
+std::vector<std::pair<double, double>> load_xy(const std::string &csv_path) {
   std::ifstream file(csv_path);
   if (!file.is_open()) {
-    throw std::runtime_error("Track: could not open centerline CSV: " + csv_path);
+    throw std::runtime_error("Track: could not open centerline CSV: " +
+                             csv_path);
   }
 
   std::vector<std::pair<double, double>> xy;
@@ -42,16 +39,17 @@ std::vector<std::pair<double, double>> load_xy(const std::string & csv_path)
     xy.emplace_back(x, y);
   }
   if (xy.size() < 2) {
-    throw std::runtime_error("Track: centerline CSV has fewer than 2 points: " + csv_path);
+    throw std::runtime_error("Track: centerline CSV has fewer than 2 points: " +
+                             csv_path);
   }
   return xy;
 }
 
-}  // namespace
+} // namespace
 
-Track::Track(const std::string & centerline_csv_path)
-{
-  const std::vector<std::pair<double, double>> xy = load_xy(centerline_csv_path);
+Track::Track(const std::string &centerline_csv_path) {
+  const std::vector<std::pair<double, double>> xy =
+      load_xy(centerline_csv_path);
   const std::size_t n = xy.size();
 
   // Open (non-periodic) cumulative arclength -- matches
@@ -65,9 +63,7 @@ Track::Track(const std::string & centerline_csv_path)
   }
 
   // Forward-difference heading at every sample, wrapping the last sample to
-  // the first -- matches load_centerline_waypoints()'s use of
-  // np.roll(xy, -1): the CSV describes one closed loop, so this final
-  // segment is the true closing tangent.
+  // the first -- matches load_centerline_waypoints()'s use of np.roll.
   std::vector<double> heading(n);
   for (std::size_t i = 0; i < n; ++i) {
     const std::size_t next = (i + 1) % n;
@@ -76,23 +72,18 @@ Track::Track(const std::string & centerline_csv_path)
     heading[i] = std::atan2(dy, dx);
   }
 
-  // Discrete curvature at each sample: turn rate between the incoming and
-  // outgoing heading, divided by the local arclength step. Endpoints reuse
-  // their single available neighbor (one-sided difference) since s_ itself
-  // is not periodic (class comment in track.hpp).
+  // Discrete curvature at each sample using adjacent headings.
   kappa_.resize(n);
   for (std::size_t i = 0; i < n; ++i) {
     const std::size_t prev = (i == 0) ? 0 : i - 1;
-    const std::size_t next = (i + 1) % n;
     const double dtheta = wrap_angle(heading[i] - heading[prev]);
-    const double ds = (i == 0) ? (s_[1] - s_[0]) : (s_[std::min(i + 1, n - 1)] - s_[prev]);
+    const double ds =
+        (i == 0) ? (s_[1] - s_[0]) : (s_[std::min(i + 1, n - 1)] - s_[prev]);
     kappa_[i] = (ds > 1e-9) ? (dtheta / ds) : 0.0;
-    (void)next;
   }
 }
 
-double Track::curvature(double s) const
-{
+double Track::curvature(double s) const {
   s = std::clamp(s, s_.front(), s_.back());
 
   // Binary search for the bracketing segment, then linearly interpolate.
@@ -106,4 +97,4 @@ double Track::curvature(double s) const
   return kappa_[lo] + t * (kappa_[hi] - kappa_[lo]);
 }
 
-}  // namespace lmpc
+} // namespace lmpc

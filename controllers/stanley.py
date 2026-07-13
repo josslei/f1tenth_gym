@@ -8,7 +8,16 @@ from utils.waypoint_utils import _nearest_waypoint_index
 
 DELTA_MAX: float = 0.4189
 DEFAULT_K: float = 1
-SEARCH_WINDOW: int = 200
+# A fixed INDEX-count window (the old SEARCH_WINDOW=200 constant) silently
+# becomes physically narrower as waypoint density increases -- measured
+# directly: 200 points covered ~20m at a ~0.10m-spaced centerline, but only
+# ~4m once that same centerline was regenerated at ~0.02m spacing (5x
+# denser), causing nearest_waypoint_index's search to lose track and the
+# whole closed loop to diverge. Deriving the window from each Stanley
+# instance's own actual waypoint spacing (below) keeps the PHYSICAL search
+# radius constant regardless of how densely any given track's waypoints
+# happen to be sampled.
+SEARCH_WINDOW_METERS: float = 20.0
 V_SOFT: float = 1.0
 
 
@@ -27,6 +36,19 @@ class Stanley(Controller):
         self.num_waypoints = waypoints.shape[0]
         if self.num_waypoints == 0:
             raise ValueError("waypoints must not be empty")
+
+        # SEARCH_WINDOW_METERS's comment has the rationale: derived from
+        # THIS instance's own waypoint spacing, not a fixed index count, so
+        # the actual physical search radius stays ~SEARCH_WINDOW_METERS
+        # regardless of how densely these particular waypoints are sampled.
+        if self.num_waypoints >= 2:
+            xy = waypoints[:, :2]
+            avg_spacing = float(np.linalg.norm(np.diff(xy, axis=0), axis=1).mean())
+        else:
+            avg_spacing = 1.0
+        self.search_window = max(
+            10, int(round(SEARCH_WINDOW_METERS / max(avg_spacing, 1e-6)))
+        )
 
     @classmethod
     def from_csv(
@@ -63,6 +85,7 @@ class Stanley(Controller):
             self.l_f,
             self.k,
             -1 if self.last_idx is None else self.last_idx,
+            self.search_window,
         )
         return ControlCommand(steering=steer, velocity=vel)
 
@@ -79,6 +102,7 @@ def _stanley_control(
     l_f: float,
     k: float,
     last_idx: int,
+    search_window: int,
 ) -> tuple[float, float, int]:
     """Full Stanley control law. Returns (steering, velocity, new_index)."""
     # Front axle position
@@ -88,7 +112,7 @@ def _stanley_control(
     p_f_y = y + l_f * sin_psi
 
     p_f = np.array([p_f_x, p_f_y], dtype=np.float64)
-    s_star = _nearest_waypoint_index(waypoints_xy, p_f, last_idx, SEARCH_WINDOW)
+    s_star = _nearest_waypoint_index(waypoints_xy, p_f, last_idx, search_window)
 
     # Signed distance from front axle to path tangent
     # d = p^* - p_f

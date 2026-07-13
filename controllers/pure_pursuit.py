@@ -8,7 +8,13 @@ from .controller_base import Controller, VehicleState, ControlCommand
 from utils.waypoint_utils import nearest_waypoint_index
 
 
-SEARCH_WINDOW: int = 200
+# A fixed INDEX-count window silently becomes physically narrower as
+# waypoint density increases (same issue found and fixed in
+# controllers/stanley.py -- see that module's comment for the measured
+# before/after). Kept as a physical-distance target here too; PurePursuit
+# derives its own instance-level index count from actual waypoint spacing
+# in __init__ instead of using this as a raw index count directly.
+SEARCH_WINDOW_METERS: float = 20.0
 
 
 class LookaheadPolicy(ABC):
@@ -72,6 +78,17 @@ class PurePursuit(Controller):
         if self.num_waypoints == 0:
             raise ValueError("waypoints must not be empty")
 
+        # SEARCH_WINDOW_METERS's comment has the rationale.
+        if self.num_waypoints >= 2:
+            avg_spacing = float(
+                np.linalg.norm(np.diff(waypoints[:, :2], axis=0), axis=1).mean()
+            )
+        else:
+            avg_spacing = 1.0
+        self.search_window = max(
+            10, int(round(SEARCH_WINDOW_METERS / max(avg_spacing, 1e-6)))
+        )
+
     @classmethod
     def from_csv(
         cls, csv_path: str | Path, lookahead: float | LookaheadPolicy, wheelbase: float
@@ -115,7 +132,7 @@ class PurePursuit(Controller):
             (self.vehicle_state.x, self.vehicle_state.y), dtype=np.float64
         )
         start_idx = nearest_waypoint_index(
-            self.waypoints[:, :2], position, self.last_idx, SEARCH_WINDOW
+            self.waypoints[:, :2], position, self.last_idx, self.search_window
         )
         target_speed = float(self.waypoints[start_idx, 2])
         lookahead = self.lookahead_policy(self.vehicle_state.speed)

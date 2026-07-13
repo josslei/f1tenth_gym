@@ -30,8 +30,6 @@ find_package(casadi CONFIG QUIET
 if(NOT TARGET casadi AND NOT TARGET casadi::casadi)
   # DESIGN.md SS7: qrqp is CasADi's own built-in dense active-set QP
   # solver -- part of casadi core, no external plugin/build flag needed.
-  # Revisit these WITH_* flags if a later solver choice (OSQP/qpOASES/
-  # HPIPM) needs one.
   set(WITH_IPOPT OFF CACHE BOOL "Do not require IPOPT for the initial LMPC build" FORCE)
   set(WITH_BUILD_REQUIRED OFF CACHE BOOL "Do not build Fortran-based CasADi dependencies" FORCE)
   set(WITH_BUILD_IPOPT OFF CACHE BOOL "Do not build IPOPT from source" FORCE)
@@ -106,8 +104,7 @@ set_target_properties(lmpc_native PROPERTIES
 # libcasadi itself -- and add_subdirectory(casadi ... EXCLUDE_FROM_ALL)
 # means plugin targets aren't built by a plain `cmake --build .` unless
 # something depends on them. DESIGN.md SS7 pins qrqp for correctness-first
-# bring-up, so it's the one plugin required here; add more to this list
-# (and PLUGIN_TARGETS below) if SS7's later solver choices are enabled.
+# bring-up, so it's the one plugin required here.
 set(LMPC_PLUGIN_TARGETS casadi_conic_qrqp)
 foreach(plugin_target ${LMPC_PLUGIN_TARGETS})
   add_dependencies(lmpc_native ${plugin_target})

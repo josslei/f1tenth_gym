@@ -6,23 +6,11 @@ Error Dynamics Regression for Autonomous Racing") and `ref/Racing-LMPC-ROS2/lmpc
 This is the source of truth for symbol ordering and index conventions — code
 should mirror it exactly (named constants/enums, not magic indices).
 
-Status: conventions pinned. The "dummy A^e/B^e/C^e" first pass (§8) is fully
-wired end-to-end: nominal dynamics models (`include/dynamics/`), the
-discretize+linearize utility (`include/linearization.hpp`), the D^0 safe-set
-loader/K-NN query (`include/safe_set.hpp`), the FHOCP QP builder/solver
-(`include/qp_builder.hpp`), the track curvature source (`include/track.hpp`),
-and `LMPCController::control()` itself all implemented and verified to run
-closed-loop against the real gym simulator (`f110_gym_10` map). At a short
-horizon (N=20) it sustains 100+ control steps of forward progress before
-qrqp genuinely fails to find a search direction; at the pinned horizon
-(N=75) qrqp frequently reports "success" on the very first solve while
-returning a control trajectory that violates its own box constraints -- a
-known finite-but-garbage-success failure mode of solving an UNSCALED QP,
-not a wiring bug (see the "Known limitation" note under Open items). A
-bounds/regularity guard in `QpBuilder::solve()` catches this and reports
-failure rather than silently applying a bad command. Error-dynamics
-regression (§5/§6) is not implemented -- this pass genuinely skips 3a/3b as
-designed.
+Status: conventions pinned. The "dummy A^e/B^e/C^e" first pass (§8) is wired
+end-to-end. The QP uses normalized state/control variables and normalized
+safe-set cost-to-go, a normalized terminal slack, and state-aware safe-set
+neighbors over `[vx, epsi, s, ey]`. Error-dynamics regression (§5/§6) is not
+implemented -- this pass genuinely skips 3a/3b as designed.
 
 ## 1. State and control vectors
 
@@ -82,29 +70,12 @@ not just `num_ss_pts_per_lap`/`max_lap_stored` copied verbatim with no
 annotation. This is so a future reader (or future us) can map the config
 knob back to the paper's symbol without re-deriving it from upstream again.
 
-### Pinned: D (adapted to our state ordering, §1)
+### Safe-set query metric
 
-Upstream's actual implementation of the `(x^i_k - x)^T D (x^i_k - x)`
-neighbor search (`safe_set.cpp`, `SSTrajectory::query(SSQuery)`) is **not** a
-general weighted distance — it builds a 2D nearest-neighbor search (a CGAL
-KD-tree) over exactly two state dimensions: `PX, PY` in their ordering
-(`XIndex::PX=0, PY=1`), i.e. `s` and `ey`. Every other state dimension
-(`yaw, vx, vy, vyaw`) is ignored for this query. In `D ⪰ 0` terms, that's
-`D = diag(1, 1, 0, 0, 0, 0)` in *their* index order.
-
-Translated to our own ordering (`x = [vx, vy, omega, epsi, s, ey]`, §1 —
-`IDX_S=4, IDX_EY=5`):
-
-```
-D = diag(0, 0, 0, 0, 1, 1)   # nonzero only at IDX_S, IDX_EY
-```
-
-i.e. `(x^i_k - x)^T D (x^i_k - x) = (s^i_k - s)² + (ey^i_k - ey)²` — the
-target-set/terminal-cost neighbor search is nearest-by-track-position only,
-same behavior as upstream, expressed against our own index convention. This
-reduces the safe-set query to a 2D nearest-neighbor problem (implementable
-as a direct search or a KD-tree — an implementation choice, not a design
-one, deferred until we're writing the actual query code).
+The terminal query uses normalized distance over `[vx, epsi, s, ey]`.
+Including speed and heading error avoids selecting points that are nearby on
+the track but cannot represent the predicted terminal dynamic state. The
+normalization uses the same per-state scales as the QP.
 
 ## 3. Online FHOCP (paper eq. 4a–4f)
 
@@ -113,14 +84,14 @@ At time `k` of lap `j`, using `D^{j-1}`:
 ```
 J_k^j(x_k, u_{k-1}, z̄_k; D^{j-1}) =
 
-  min_{x,u,λ}  Σ_{t=0}^{N-1} [ 1_F(x_t) + c_u‖u_t‖² + c_Δu‖u_t - u_{t-1}‖² ]
-               + J_N^{j-1}(x̄_{k+N}; D^{j-1})^T λ
+  min_{x,u,λ,e_N} Σ_{t=0}^{N-1} [ 1_F(x_t) + c_u‖u_t‖² + c_Δu‖u_t - u_{t-1}‖² ]
+                   + (J_N^{j-1}/J_scale)^T λ + ρ_N‖W_N e_N‖²
 
   s.t.  x_0 = x_k,  u_{-1} = u_{k-1}
         x_{t+1} = A(z̄_{k+t}; D^{j-1}) x_t + B(z̄_{k+t}; D^{j-1}) u_t + C(z̄_{k+t}; D^{j-1}),
                                                               t = 0,...,N-1
         x_t ∈ X,  u_t ∈ U,                                  t = 0,...,N
-        X^{j-1}(x̄_{k+N}; D^{j-1}) λ = x_N
+        X^{j-1}(x̄_{k+N}; D^{j-1}) λ + S_x e_N = x_N
         0 ≤ λ ≤ 1,  1^T λ = 1
 ```
 
@@ -133,16 +104,17 @@ never finishes mid-plan.
 
 ## 4. Translation into a solver-facing QP
 
-Decision vector: `w = (x_0,...,x_N, u_0,...,u_{N-1}, λ) ∈ R^{(N+1)n + Nm + q}`,
+Decision vector: `w = (x_0,...,x_N, u_0,...,u_{N-1}, λ, e_N)`,
 `n=6, m=2, q=KP`.
 
 ```
-Φ(w) = Σ_{t=0}^{N-1} [ 1_F(x_t) + c_u‖u_t‖² + c_Δu‖u_t - u_{t-1}‖² ] + J^T λ
+Φ(w) = Σ [ 1_F(x_t) + c_u‖u_t‖² + c_Δu‖u_t-u_{t-1}‖² ]
+       + (J/J_scale)^T λ + ρ_N‖W_N e_N‖²
 
 g_eq(w) = 0:
     x_0 - x_k = 0
     x_{t+1} - A_t x_t - B_t u_t - C_t = 0,   t = 0,...,N-1
-    X_ss λ - x_N = 0
+    X_ss λ + S_x e_N - x_N = 0
     1^T λ - 1 = 0
 
 g_ineq(w) ≤ 0:
@@ -154,8 +126,8 @@ per control step (nominal Jacobian + learned error correction, §6 below)
 *before* the solve, held fixed during it. Because the dynamics are affine and
 fixed at solve time, and the cost is quadratic, this is a genuine convex QP,
 not a general NLP. Solve with a conic backend through CasADi's `Opti` stack
-(`opti.solver('qrqp', ...)` for correctness-first bring-up, `'osqp'` with
-`polish=true` once it's working) — **not** `sqpmethod`. `sqpmethod` targets
+(`opti.solver('qrqp', ...)` for correctness-first bring-up) — **not**
+`sqpmethod`. `sqpmethod` targets
 general NLPs and re-linearizes internally, which is both redundant (we've
 already linearized) and was the exact cause of a "0% success" dead end in
 the previous C++ port.
@@ -266,11 +238,6 @@ against the vendored `thirdparty/casadi/CMakeLists.txt`:
 
 - **qrqp** — CasADi's built-in dense active-set QP solver. Always available,
   no plugin/build work. Correctness-first default for initial bring-up.
-- **OSQP** — sparse ADMM solver. Already known to build (`recom.md`:
-  `WITH_OSQP`/`WITH_BUILD_OSQP`, plus a corrupted vendored patch that had to
-  be rewritten). Robust to poor conditioning, but convergence to tight
-  tolerance is slow — previous port measured mean solve times of
-  ~60–120 ms at `N=75`, far over a 25 ms control period.
 - **qpOASES** — dense active-set solver, source vendored *inside* CasADi
   itself (`external_packages/qpOASES`); enabling it is just
   `WITH_LAPACK=ON` + `WITH_QPOASES=ON`, no external fetch, cheapest of the
@@ -279,7 +246,7 @@ against the vendored `thirdparty/casadi/CMakeLists.txt`:
   recursion, leaving only the ~150 control variables over the horizon, not
   the full ~650-variable multi-shooting problem). Fed the multi-shooting QP
   directly, it's an unstructured dense solver on a large sparse-structured
-  matrix — no guarantee it beats OSQP. Testing it fairly requires building
+  matrix — no guarantee it is competitive. Testing it fairly requires building
   the condensed `H`/`g` first, which is real (if fairly mechanical)
   implementation work, not just a solver-string swap. Worth doing anyway:
   the affine recursion needed to compute `A_t,B_t,C_t` already produces most
@@ -293,8 +260,7 @@ against the vendored `thirdparty/casadi/CMakeLists.txt`:
   the two — but needs two chained external builds not currently vendored
   anywhere in `thirdparty/` (`BLASFEO` via `WITH_BUILD_BLASFEO`, then
   `HPIPM` on top via `WITH_BUILD_HPIPM`, both `ExternalProject_Add` fetches
-  at configure time) — the same class of build risk OSQP already cost us
-  once, plausibly worse since it's two chained builds instead of one.
+  at configure time), with the added risk of two chained external builds.
 
 **Plan:** qrqp for correctness-first bring-up. Once the QP is verified
 correct, try qpOASES on a condensed formulation first (cheap to build, and
@@ -359,32 +325,68 @@ from the start means turning on regression later is additive (fill in
    (`src/lmpc_controller.cpp`): per-stage linearization loop, terminal
    safe-set query, QP solve, receding-horizon warm-start shift.
 
-**Known limitation (not yet fixed): unscaled-QP conditioning.** `qrqp` can
-report a solve as "success" while returning a control trajectory that
-violates its own box constraints (`QpBuilder::solve()`'s post-solve
-regularity/bounds guard catches this and reports failure instead of
-applying it) -- most reproducible on the very first solve of a run (rest
-state, coarsest linearization) and more frequent at the pinned N=75 than at
-a short test horizon (N=20 sustains 100+ closed-loop steps before a
-genuine, non-garbage solver failure). This is the exact failure class this
-project's memory documents at length from the prior (deleted) native LMPC
-port, always eventually traced back to the QP having no variable scaling
-(state/control magnitudes spanning very different orders -- `s` up to
-~164m, `vx` O(1-20), `ey` O(1) -- left as-is in the Hessian/constraint
-matrix). The "Overall variable-scaling convention" open item below is the
-anticipated fix; not applied yet since it is a substantial, separately-
-scoped body of tuning work, not part of getting the base mechanism wired.
+**Structural feasibility fixes.** State/control decisions are normalized by
+`QpScaling`, and the full original objective is divided by the largest loaded
+cost-to-go (including the control terms, preserving their tradeoff with
+`J_ss`). The
+terminal safe-set equality includes normalized slack, with lower relative
+penalties on `vy/omega`, a medium penalty on `vx`, and higher penalties on
+`epsi/s/ey`. The terminal neighbor query uses normalized
+`[vx, epsi, s, ey]` distance rather than position alone. Lambda retains the
+paper's simplex constraint without carrying all `K=32` weights: a single
+recorded lap is locally a one-dimensional demonstrated manifold, so the
+query selects a two-point line segment and `QpBuilder` uses the minimal
+barycentric coordinate `[1-alpha, alpha]`, `0<=alpha<=1`. No mask or lambda
+ridge is added. `QpBuilder` also eliminates the slack variable algebraically
+and penalizes the equivalent normalized terminal mismatch directly, avoiding
+six unnecessary variables and equalities.
+
+**`SIM_TIMESTEP` switched from an accidental 0.01 to the originally-
+intended 0.025 (2026-07-13)** -- `gym/f110_gym/envs/f110_env.py`'s
+`F110Env` defaults `timestep=0.01` and no caller was ever passing an
+explicit override, so every closed-loop measurement above (the 292/459-step
+numbers) was silently running at `dt=0.01`, not the `N=75`-paired `0.025`
+this project's own config default (`LmpcConfig::dt`) already assumed.
+Fixed by passing `timestep=0.025` explicitly at the two LMPC call sites
+(`runs/lmpc_drive.py`, `scripts/lmpc_collect_seed_lap.py`) rather than
+editing that vendored default (`CLAUDE.md`: treat `gym/` as a black box).
+
+This single change cascaded into two more real, previously-latent bugs,
+both found and fixed, not just the dt mismatch itself:
+- **Centerline waypoint spacing (~0.10m) was nearly equal to one control
+  step's travel distance (0.0875m at `dt=0.025`, 3.5 m/s)**, causing the
+  nearest-waypoint heading reference to jump almost every control step.
+  Regenerated the centerline at ~0.02m spacing
+  (`scripts/generate_centerline.py --target-spacing 0.02`, same winding
+  direction/enclosed area verified against the old file, just a different
+  arbitrary start point on the closed loop -- harmless, everything derives
+  `xy[0]` dynamically).
+- **A hardcoded `SEARCH_WINDOW=200` (an INDEX count, not a physical
+  distance) in `controllers/stanley.py`, `controllers/pure_pursuit.py`, and
+  `controllers/lmpc/lmpc.py`** silently became physically narrower as
+  waypoint density changed (~20m -> ~4m once the centerline above got 5x
+  denser), causing `nearest_waypoint_index` to lose track. Fixed by
+  deriving each instance's own window from its actual waypoint spacing
+  (`SEARCH_WINDOW_METERS=20.0` target, computed once in `__init__`).
+
+**Stanley replaced with Pure Pursuit for D^0 collection.** Even after both
+fixes above, Stanley genuinely spun out at one corner at `dt=0.025`
+(confirmed against raw simulator pose: yaw diverged ~45 degrees from the
+path heading within ~0.3s while steering sat pinned at its bound) --
+correction happens 2.5x less often than at the old `dt=0.01`, giving tire
+slip time to develop before Stanley's next correction arrives. Retuning
+Stanley's own gain did NOT fix it in either direction (lower gain measured
+WORSE cross-track error, a classic "too sluggish for the track's curvature"
+failure, not a stability fix). Pure Pursuit's geometric "aim at a point
+ahead" law has no heading-error feedback term to react sharply in the
+first place -- swapped in
+(`scripts/lmpc_collect_seed_lap.py`/`controllers/pure_pursuit.py`, same
+`DynamicLookaheadDistance` values `runs/waypoint_drive.py` already
+validated), and the resulting D^0 completes cleanly (`mean|ey|=0.018m`,
+no spin).
 
 ## Open items (not yet pinned)
 
-- Overall variable-scaling convention (`scale_x`, `scale_u`) — should be
-  fixed once, up front, given how much of the previous C++ port's pain
-  traced back to scaling being retrofitted late. (Note: upstream's own
-  `scale_x_`/`scale_u_` are hardcoded in `racing_mpc.cpp`'s constructor,
-  identical for BARC and full-scale IAC — `recom.md` already flagged this
-  as ill-fitting BARC's own force scale, so these are *not* to be copied
-  the way `K`/`P`/`Q` were; ours need deriving from our own vehicle's
-  physical limits.)
 - `h` (kernel bandwidth) and `ε` (ridge regularization) for the error
   regression — no upstream reference value exists at all (§6: upstream's
   regression path is never exercised), so these need to be picked and
