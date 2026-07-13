@@ -1,0 +1,285 @@
+"""Drive one lap with the Stanley controller and record it as an LMPC D^0 seed.
+
+Headless by default -- this only needs to run once per track to produce a CSV
+of (x_k, u_k, J_k) samples in the native LMPC state/control convention pinned
+in controllers/lmpc/DESIGN.md SS1: x = [vx, vy, omega, epsi, s, ey], u = [a,
+delta]. Pass --visualize to watch the drive in the pyglet viewer.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+from pathlib import Path
+from typing import Any
+
+import gymnasium as gym
+import numpy as np
+
+import f110_gym  # noqa: F401 - registers f110-v0
+from controllers.controller_base import VehicleState
+from controllers.stanley import Stanley
+from utils.waypoint_utils import cumulative_arc_lengths, nearest_waypoint_index
+from utils.waypoint_view import initial_pose_from_waypoints
+
+MAP = "maps/custom/f110_gym_10/f110_gym_map"
+# Raw geometric centerline (scripts/generate_centerline.py's output format:
+# x_m, y_m, w_tr_right_m, w_tr_left_m -- no heading/speed columns), not a
+# mintime-optimized raceline. This matches the paper's own D^0 recipe
+# (Section V-C / III: "closed-loop trajectories from a simple low-speed
+# center-line tracking controller"), not an optimized trajectory.
+WAYPOINTS_CSV = "maps/custom/f110_gym_10/f110_gym_centerline.csv"
+OUTPUT_CSV = "outputs/lmpc_seed_laps/f110_gym_10_seed_lap.csv"
+
+# Raw centerline CSVs have no speed column -- constant, comfortably above
+# LOW_SPEED_STEER_RESTORE_AT so cruise never re-enters the launch guard's
+# ramp band, and conservative for this track's tight ~1.5m half-width.
+SEED_LAP_SPEED = 3.5
+
+ZOOM = 1.0
+WINDOW_WIDTH = 1000
+WINDOW_HEIGHT = 800
+
+STANLEY_K = 5.0
+
+# F110 Gym's dynamic single-track model (gym/f110_gym/envs/dynamic_models.py,
+# vehicle_dynamics_st) switches to a kinematic model below |v| < 0.5 m/s, and
+# diverges if handed nonzero steering while crossing that switch. A soft taper
+# from rest was measured insufficient in earlier work on this controller; steer
+# must be held at exactly zero through the whole danger zone. Every lap starts
+# from rest, so this is unconditionally needed, not situational.
+LOW_SPEED_STEER_ZERO_BELOW = 2.0
+LOW_SPEED_STEER_RESTORE_AT = 3.0
+
+
+def obs_to_vehicle_state(obs: dict[str, Any], ego_idx: int) -> VehicleState:
+    return VehicleState(
+        x=float(obs["poses_x"][ego_idx]),
+        y=float(obs["poses_y"][ego_idx]),
+        yaw=float(obs["poses_theta"][ego_idx]),
+        speed=float(obs["linear_vels_x"][ego_idx]),
+    )
+
+
+class LaunchSteeringGuard:
+    """Suppress steering only through the one-time launch-from-rest crossing.
+
+    The gym's divergence risk (see module docstring) is specific to the
+    discrete kinematic/dynamic model switch at |v| < 0.5 m/s. This track's
+    minimum cornering speed (~2.5 m/s, from the raceline's curvature-limited
+    speed profile) never revisits that switch after launch, so the guard
+    latches open permanently once the restore speed is first reached instead
+    of re-suppressing every time speed dips during normal cornering later in
+    the lap -- a per-step clamp would throttle steering authority through
+    every tight corner on this track, not just the initial launch.
+    """
+
+    def __init__(self) -> None:
+        self._launched = False
+
+    def apply(self, steer: float, speed: float) -> float:
+        if self._launched:
+            return steer
+        if speed >= LOW_SPEED_STEER_RESTORE_AT:
+            self._launched = True
+            return steer
+        if speed <= LOW_SPEED_STEER_ZERO_BELOW:
+            return 0.0
+        ramp = (speed - LOW_SPEED_STEER_ZERO_BELOW) / (
+            LOW_SPEED_STEER_RESTORE_AT - LOW_SPEED_STEER_ZERO_BELOW
+        )
+        return steer * ramp
+
+
+def load_centerline_waypoints(csv_path: str, speed: float) -> np.ndarray:
+    """Build Stanley/project_frenet-compatible waypoints from a raw centerline CSV.
+
+    Raw centerline CSVs (scripts/generate_centerline.py's format: x_m, y_m,
+    w_tr_right_m, w_tr_left_m) have no heading or speed column. Heading is
+    the finite-difference tangent between consecutive closed-loop points,
+    stored offset by -pi/2 to match the same on-disk convention the raceline
+    CSVs use -- both controllers/stanley.py and project_frenet() below
+    unconditionally add +pi/2 back to recover the true heading, so storing
+    it pre-offset here keeps this a drop-in match for what Stanley.from_csv
+    would have loaded, no special-casing needed downstream. Speed is
+    constant (SEED_LAP_SPEED), matching the paper's own D^0 recipe: a
+    simple low-speed center-line tracking pass, not an optimized profile.
+    """
+    xy = np.loadtxt(csv_path, delimiter=",", skiprows=1, dtype=np.float64)[:, :2]
+    next_xy = np.roll(xy, -1, axis=0)
+    heading = np.arctan2(next_xy[:, 1] - xy[:, 1], next_xy[:, 0] - xy[:, 0])
+    psi_stored = heading - np.pi / 2
+    vx = np.full(xy.shape[0], speed, dtype=np.float64)
+    return np.column_stack([xy, psi_stored, vx])
+
+
+def wrap_angle(angle: float) -> float:
+    return float(np.arctan2(np.sin(angle), np.cos(angle)))
+
+
+def project_frenet(
+    position: np.ndarray,
+    path_xy: np.ndarray,
+    path_psi: np.ndarray,
+    path_s: np.ndarray,
+    last_idx: int,
+) -> tuple[float, float, float, int]:
+    """Project a global (x, y) onto the reference path.
+
+    Returns (s, ey, path_heading, nearest_idx). ey is positive to the left of
+    the path direction (tangent rotated +90 degrees).
+    """
+    idx = nearest_waypoint_index(path_xy, position, last_idx, search_window=200)
+    # The raceline CSV's psi_rad column is offset -90 degrees from the
+    # direction of travel -- controllers/stanley.py's own control law adds
+    # this same +pi/2 to get its heading reference (psi_path); matching it
+    # here so epsi is actually a small heading error, not a constant ~pi/2.
+    heading = float(path_psi[idx]) + np.pi / 2
+    tangent = np.array([np.cos(heading), np.sin(heading)])
+    normal = np.array([-np.sin(heading), np.cos(heading)])
+    delta = position - path_xy[idx]
+    s = float(path_s[idx] + np.dot(delta, tangent))
+    ey = float(np.dot(delta, normal))
+    return s, ey, heading, idx
+
+
+def main(visualize: bool = False) -> None:
+    env = gym.make("f110-v0", map=MAP, num_agents=1)
+    f110_env: Any = env.unwrapped
+    ego_idx = 0
+    dt = float(f110_env.timestep)
+
+    waypoints = load_centerline_waypoints(WAYPOINTS_CSV, SEED_LAP_SPEED)
+    controller = Stanley(waypoints, l_f=float(f110_env.params["lf"]), k=STANLEY_K)
+    path_xy = controller.waypoints[:, :2]
+    path_psi = controller.waypoints[:, 2]
+    path_s = cumulative_arc_lengths(path_xy)
+
+    initial_pose = initial_pose_from_waypoints(path_xy)
+    obs, _info = env.reset(options={"poses": initial_pose})
+
+    viewer = None
+    if visualize:
+        # Imported lazily so headless runs (the default) don't need pyglet.
+        from f110_gym.viewer import F110Viewer
+        from utils.waypoint_view import WaypointOverlay
+
+        waypoint_overlay = WaypointOverlay(path_xy)
+        viewer = F110Viewer.from_env(
+            f110_env,
+            width=WINDOW_WIDTH,
+            height=WINDOW_HEIGHT,
+            target_fps=60.0,
+            initial_zoom=ZOOM,
+            callbacks=[waypoint_overlay],
+        )
+        viewer.update(obs)
+        viewer.render()
+
+    # vx, vy are the body-frame velocity components the paper's dynamic
+    # bicycle model needs (Section II). The gym's public obs dict hardcodes
+    # linear_vels_y to 0.0 (gym/f110_gym/envs/base_classes.py) regardless of
+    # actual slip, so vy has to be reconstructed from the raw simulator state
+    # (index 6: slip angle beta) instead: vx = v*cos(beta), vy = v*sin(beta).
+    last_idx = -1
+    t = 0.0
+    samples: list[dict[str, float]] = []
+    steering_guard = LaunchSteeringGuard()
+
+    while True:
+        state = obs_to_vehicle_state(obs, ego_idx)
+        controller.update(state)
+        cmd = controller.control()
+        steer = steering_guard.apply(cmd.steering, state.speed)
+
+        raw_state = f110_env.sim.agents[ego_idx].state  # [x, y, delta, v, psi, yaw_rate, beta]
+        v = float(raw_state[3])
+        beta = float(raw_state[6])
+        vx = v * np.cos(beta)
+        vy = v * np.sin(beta)
+        omega = float(raw_state[5])
+
+        position = np.array([state.x, state.y])
+        s, ey, path_heading, last_idx = project_frenet(
+            position, path_xy, path_psi, path_s, last_idx
+        )
+        epsi = wrap_angle(state.yaw - path_heading)
+
+        samples.append(
+            {"vx": vx, "vy": vy, "omega": omega, "epsi": epsi, "s": s, "ey": ey,
+             "t": t, "delta": steer}
+        )
+
+        action = np.array([[steer, cmd.velocity]], dtype=np.float64)
+        obs, _reward, terminated, truncated, _info = env.step(action)
+        t += dt
+
+        if viewer is not None:
+            viewer.update(obs)
+            viewer.render()
+
+        if float(obs["lap_counts"][ego_idx]) >= 1.0 or terminated or truncated:
+            break
+
+    if viewer is not None:
+        while not viewer.closed:
+            viewer.render()
+
+    env.close()
+
+    lap_completed = float(obs["lap_counts"][ego_idx]) >= 1.0
+    if not lap_completed:
+        raise RuntimeError(
+            "Run ended before completing a lap (terminated/truncated early); "
+            "no seed lap written."
+        )
+
+    write_seed_lap_csv(samples, dt, OUTPUT_CSV)
+    print(f"Wrote {len(samples)} samples ({len(samples) - 1} transitions) to {OUTPUT_CSV}")
+
+
+def write_seed_lap_csv(samples: list[dict[str, float]], dt: float, output_path: str) -> None:
+    """Write (x_k, u_k, J_k) samples -- see controllers/lmpc/DESIGN.md SS2/SS5.
+
+    T = len(samples) - 1 transitions were driven. Every k in [0, T] gets a
+    state and a cost-to-go J_k = T - k. Only k in [0, T-1] has a control
+    (a_k, delta_k) and therefore a valid x_{k+1} -- the last row has no
+    control or successor state, matching how the safe set trajectory data is
+    used downstream (ref/Racing-LMPC-ROS2/safe_set.cpp drops exactly this
+    last index for the same reason: "no xip1 available for it").
+    """
+    total_steps = len(samples) - 1
+    out_path = Path(output_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with out_path.open("w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["vx", "vy", "omega", "epsi", "s", "ey", "t", "a", "delta", "J"])
+        for k, sample in enumerate(samples):
+            is_last = k == total_steps
+            if is_last:
+                a_k = ""
+                delta_k = ""
+            else:
+                # Realized acceleration, not the controller's intended one --
+                # the actual measured transition is what the paper's error
+                # regression (DESIGN.md SS5) needs, not the velocity setpoint
+                # Stanley requested.
+                a_k = (samples[k + 1]["vx"] - sample["vx"]) / dt
+                delta_k = sample["delta"]
+            writer.writerow(
+                [
+                    sample["vx"], sample["vy"], sample["omega"], sample["epsi"],
+                    sample["s"], sample["ey"], sample["t"], a_k, delta_k,
+                    total_steps - k,
+                ]
+            )
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Drive and record an LMPC D^0 seed lap")
+    parser.add_argument(
+        "--visualize", action="store_true", help="Show the drive in the pyglet viewer"
+    )
+    args = parser.parse_args()
+    main(visualize=args.visualize)
