@@ -36,6 +36,59 @@ def _wrap_angle(angle: float) -> float:
     return float(np.arctan2(np.sin(angle), np.cos(angle)))
 
 
+class _PeriodicProgress:
+    """Unwraps a periodic Frenet s (mod track_length) into a continuous
+    coordinate, with an explicit rebase point for "the next LMPC
+    iteration's s=0". The nearest-lift construction on R -> R/LZ: crossing
+    the start/finish seam is detected from a jump larger than half the
+    track length between consecutive observations and folded back in,
+    rather than reset -- so the geometric wrap itself is never a lap
+    boundary. Only begin_lap() moves the origin.
+    """
+
+    def __init__(self, track_length: float) -> None:
+        if not np.isfinite(track_length) or track_length <= 0.0:
+            raise ValueError("track_length must be finite and positive")
+        self._length = track_length
+        self._last_s_mod = 0.0
+        self._unwrapped = 0.0
+        self._lap_origin = 0.0
+        self._initialized = False
+
+    def reset(self) -> None:
+        self._last_s_mod = 0.0
+        self._unwrapped = 0.0
+        self._lap_origin = 0.0
+        self._initialized = False
+
+    def update(self, s_mod: float) -> float:
+        """Feed one new periodic observation, return s relative to the
+        current lap origin."""
+        if not np.isfinite(s_mod):
+            raise ValueError("s_mod must be finite")
+        if not self._initialized:
+            self._last_s_mod = s_mod
+            self._unwrapped = s_mod
+            self._lap_origin = s_mod
+            self._initialized = True
+            return 0.0
+        ds = s_mod - self._last_s_mod
+        half_length = 0.5 * self._length
+        if ds < -half_length:
+            ds += self._length
+        elif ds > half_length:
+            ds -= self._length
+        self._unwrapped += ds
+        self._last_s_mod = s_mod
+        return self._unwrapped - self._lap_origin
+
+    def begin_lap(self) -> None:
+        """Rebase: the state of the last update() call becomes s=0."""
+        if not self._initialized:
+            raise RuntimeError("_PeriodicProgress.begin_lap: update() was never called")
+        self._lap_origin = self._unwrapped
+
+
 class LMPCController(Controller):
     """Wraps native.NativeLMPCController with the gym <-> Frenet translation."""
 
@@ -80,6 +133,11 @@ class LMPCController(Controller):
         self._path_psi = heading - np.pi / 2
         self._path_s = cumulative_arc_lengths(xy)
         self._last_idx = -1
+        # Same convention/algorithm as native Track::length() (cumulative
+        # open arclength over the same CSV) -- not an independent second
+        # definition, see _project_frenet().
+        self.track_length = float(self._path_s[-1])
+        self._progress = _PeriodicProgress(self.track_length)
 
         # A fixed index-count search window silently becomes physically
         # narrower as waypoint density increases (measured directly:
@@ -137,12 +195,33 @@ class LMPCController(Controller):
         self._raw_steering_angle = fn
 
     def reset(self) -> None:
+        """Full-episode reset. Do NOT call this between LMPC iterations in a
+        continuous multi-lap run -- it clears native control memory
+        (u_prev, actual_delta, warm starts) and would reintroduce a
+        standing-start restart every lap. Use begin_next_lap() instead."""
         self._native.reset()
         self.vehicle_state = VehicleState(0.0, 0.0, 0.0, 0.0)
         self._t = 0.0
         self._last_idx = -1
         self._current_speed = 0.0
         self.native_state = np.zeros(6, dtype=np.float64)
+        self._prediction_valid = False
+        self._progress.reset()
+
+    def begin_next_lap(self) -> None:
+        """Rebase Frenet progress so the CURRENT physical state becomes s=0
+        for the next LMPC iteration, without resetting anything physical.
+
+        Unlike reset(), this touches only the progress tracker: it does not
+        call native.reset(), so it does not clear native u_prev,
+        actual_delta, or the shifted u_warm trajectory -- the vehicle keeps
+        driving through the finish line instead of restarting from rest.
+        The caller must immediately call update() again on the same
+        post-crossing observation so native_state is rewritten with s=0
+        (the physical state is unchanged, only which origin s is measured
+        from).
+        """
+        self._progress.begin_lap()
         self._prediction_valid = False
 
     def add_lap(
@@ -215,14 +294,15 @@ class LMPCController(Controller):
         traj = self._native.predicted_trajectory()  # kStateDim x (N+1)
         s = traj[4, :]
         ey = traj[5, :]
-        # In finish mode the last predicted states can run past the
-        # centerline's final arc length; np.interp would clamp every such
-        # point onto the SAME last waypoint (a fixed pile-up that visually
-        # closes the horizon line into a loop). Drop them instead --
-        # rendering-only, like the interpolation below.
-        in_range = (s >= self._path_s[0]) & (s <= self._path_s[-1])
-        s = s[in_range]
-        ey = ey[in_range]
+        # Near the end of an iteration the predicted horizon legitimately
+        # runs past track_length (Track::curvature is periodic, same as
+        # the native side) -- wrap back into [0, track_length) instead of
+        # dropping those stages, so the rendered line actually crosses the
+        # seam instead of stopping dead at the last centerline sample.
+        # np.mod (not np.interp's own clamping) is what avoids the old
+        # pile-up-onto-the-last-waypoint artifact: wrapped points land at
+        # their true position near the start of the track, not the end.
+        s = np.mod(s, self.track_length)
         x = np.interp(s, self._path_s, self._path_xy[:, 0])
         y = np.interp(s, self._path_s, self._path_xy[:, 1])
         heading = np.interp(s, self._path_s, self._path_psi) + np.pi / 2
@@ -243,8 +323,13 @@ class LMPCController(Controller):
         tangent = np.array([np.cos(heading), np.sin(heading)])
         normal = np.array([-np.sin(heading), np.cos(heading)])
         delta = position - self._path_xy[idx]
-        s = float(self._path_s[idx] + np.dot(delta, tangent))
+        s_mod = float(self._path_s[idx] + np.dot(delta, tangent))
         ey = float(np.dot(delta, normal))
         epsi = _wrap_angle(vehicle_state.yaw - heading)
         self._last_idx = idx
-        return s, ey, epsi
+        # s_mod is the raw geometric projection (periodic on the closed
+        # track); unwrap/rebase it into this LMPC iteration's own s so a
+        # finish-line crossing doesn't jump the native state backward to 0
+        # mid-lap -- begin_next_lap() is what advances the lap origin.
+        s_lap = self._progress.update(s_mod)
+        return s_lap, ey, epsi

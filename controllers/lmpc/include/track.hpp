@@ -39,8 +39,16 @@ public:
   // Total arclength spanned by the loaded centerline (open path, one lap).
   double length() const { return s_.back(); }
 
-  // Curvature at arclength s (positive = left turn), s clamped to
-  // [0, length()] -- see class comment for why this is not periodic.
+  // Curvature at arclength s (positive = left turn). PERIODIC in s (s mod
+  // length()), not clamped: a receding-horizon prediction that starts near
+  // the end of a lap legitimately rolls out past length() (or, for a small
+  // reverse excursion, below 0) before the caller ever declares the lap
+  // finished, and the physical curvature there is the SAME geometry as the
+  // corresponding point near the start of the track. Clamping instead would
+  // freeze those stages at the final sample's curvature, which is wrong.
+  // The stored lap coordinate s itself (LMPCController's x(S), the safe
+  // set's recorded lap data) stays a non-periodic, per-iteration quantity
+  // -- only this geometry query wraps.
   double curvature(double s) const;
 
 private:

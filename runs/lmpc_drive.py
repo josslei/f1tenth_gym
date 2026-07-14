@@ -6,14 +6,24 @@ Pursuit/Stanley, and adds two LMPC-specific overlays: the car's own driven
 path (DrivenLineOverlay) and the solver's receding-horizon prediction
 (RecedingHorizonOverlay) alongside the reference centerline.
 
-Runs the paper's actual iteration scheme (lap-as-iteration): each lap is one
-LMPC iteration j -- launch from rest at the common initial state, drive until
-gym's finish detection fires, append the driven trajectory to the safe set
-(D^j), reset the sim and controller, relaunch. s stays non-periodic and the
-cost-to-go J_k = T - k keeps its single-task meaning, exactly matching how
-D^0 was recorded; continuous multi-lap driving would instead need flying-lap
-data and an unwrapped s/J redefinition (controllers/lmpc/DESIGN.md's seam
-discussion). A crashed or truncated lap is never added -- the safe set's
+Runs the paper's iteration scheme (lap-as-iteration) as ONE continuous
+physical episode: env.reset()/controller.reset() fire exactly once, before
+iteration 0. Each lap is one LMPC iteration j -- drive until gym's finish
+detection fires, append the driven trajectory to the safe set (D^j), then
+REBASE the Frenet progress coordinate (LMPCController.begin_next_lap()) so
+the same crossing state becomes s=0 for iteration j+1, without touching the
+simulator or any native control memory (u_prev, actual_delta, the shifted
+u_warm trajectory) -- the vehicle physically drives through the finish line
+instead of restarting from rest. Only iteration 0 launches from rest; every
+later iteration begins flying, at whatever speed the vehicle crossed the
+finish line with. s within an iteration still stays non-periodic (0 at the
+iteration start, >= L at its finish) and the cost-to-go J_k = T - k keeps
+its single-task meaning per iteration, exactly matching how D^0 was
+recorded -- D^0 itself remains a standing-start recording here (not
+regenerated as a flying lap), so the safe set's only s~0 data is still at
+~zero speed even though live iterations after the first reach s~0 flying;
+that is a known quality/feasibility caveat at the lap seam, not addressed
+by this change. A crashed or truncated lap is never added -- the safe set's
 guarantee rests on every stored trajectory actually finishing.
 """
 
@@ -193,23 +203,37 @@ def main() -> None:
         callbacks=[waypoint_overlay, driven_line_overlay, horizon_overlay],
     )
 
+    # Single full-episode reset -- everything after this point drives
+    # continuously across lap boundaries (module docstring has the
+    # rationale). Only iteration 0 launches from rest.
+    obs, _info = env.reset(options={"poses": initial_pose})
+    controller.reset()
+    sim_t = 0.0
+
+    state = obs_to_vehicle_state(obs)
+    controller.update(state, sim_t)
+    actual_delta, raw_speed = raw_steer_and_speed(f110_env, ego_idx)
+    samples = [LapSample(controller.native_state.copy(), actual_delta, raw_speed)]
+
+    viewer.update(obs)
+    viewer.render()
+
+    crashed = False
+    last_steer = 0.0
+    fallback_steps = 0
+
     for iteration in range(MAX_ITERATIONS):
-        obs, _info = env.reset(options={"poses": initial_pose})
-        controller.reset()
-        t = 0.0
-
-        state = obs_to_vehicle_state(obs)
-        controller.update(state, t)
-        actual_delta, raw_speed = raw_steer_and_speed(f110_env, ego_idx)
-        samples = [LapSample(controller.native_state.copy(), actual_delta, raw_speed)]
-
-        viewer.update(obs)
-        viewer.render()
-
-        crashed = False
+        if crashed or viewer.closed:
+            break
+        lap_start_t = sim_t
+        # No env.reset() happens between iterations, so gym's cumulative
+        # lap_counts only ever increases by 1 per finish crossing -- the
+        # target for iteration j is simply j+1 (0-indexed), unlike the old
+        # per-iteration-reset loop where the reset obs's stale lap_counts
+        # made ">= 1.0" ambiguous after the first lap.
+        target_lap_count = float(iteration + 1)
         lap_done = False
-        last_steer = 0.0
-        fallback_steps = 0
+
         while not (lap_done or crashed or viewer.closed):
             try:
                 cmd = controller.control()
@@ -234,36 +258,48 @@ def main() -> None:
             action = np.array([[steer, velocity]], dtype=np.float64)
 
             obs, _reward, _terminated, truncated, _info = env.step(action)
-            t += dt
+            sim_t += dt
             viewer.update(obs)
             viewer.render()
 
-            # lap_counts is recomputed from the toggle list every step, so
-            # the post-step value is trustworthy even right after a reset
-            # (the reset obs itself carries the previous episode's stale
-            # count -- only ever read it here, post-step).
             crashed = bool(f110_env.collisions[ego_idx]) or truncated
             if not crashed:
                 state = obs_to_vehicle_state(obs)
-                controller.update(state, t)
+                controller.update(state, sim_t)
                 actual_delta, raw_speed = raw_steer_and_speed(f110_env, ego_idx)
                 samples.append(
                     LapSample(controller.native_state.copy(), actual_delta, raw_speed)
                 )
-            lap_done = not crashed and float(obs["lap_counts"][ego_idx]) >= 1.0
+            lap_done = (
+                not crashed and float(obs["lap_counts"][ego_idx]) >= target_lap_count
+            )
 
         if viewer.closed:
             break
         if crashed:
-            print(f"iteration {iteration}: crashed after {t:.2f}s -- lap NOT added")
+            print(
+                f"iteration {iteration}: crashed after {sim_t - lap_start_t:.2f}s "
+                "-- lap NOT added"
+            )
             break
 
         x_lap, u_lap, J_lap = build_lap_arrays(samples, dt)
         controller.add_lap(x_lap, u_lap, J_lap)
         print(
-            f"iteration {iteration}: lap completed in {t:.2f}s "
+            f"iteration {iteration}: lap completed in {sim_t - lap_start_t:.2f}s "
             f"(transitions={u_lap.shape[1]}, states={x_lap.shape[1]})"
         )
+
+        if iteration + 1 < MAX_ITERATIONS:
+            # Same physical instant, rebased to s=0 for the next iteration --
+            # no env.step() happens between x_T^j (the sample just appended
+            # above) and this rebased x_0^(j+1).
+            controller.begin_next_lap()
+            controller.update(state, sim_t)
+            actual_delta, raw_speed = raw_steer_and_speed(f110_env, ego_idx)
+            samples = [
+                LapSample(controller.native_state.copy(), actual_delta, raw_speed)
+            ]
 
     while not viewer.closed:
         viewer.render()

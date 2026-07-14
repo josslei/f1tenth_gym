@@ -110,16 +110,23 @@ Track::Track(const std::string &centerline_csv_path) {
 }
 
 double Track::curvature(double s) const {
-  s = std::clamp(s, s_.front(), s_.back());
+  // Nonnegative modulo: fmod alone can return a negative result for
+  // negative s (e.g. a small reverse prediction just before the finish
+  // line wrapping to just before s=length, not to a negative value).
+  const double length = s_.back();
+  double s_periodic = std::fmod(s, length);
+  if (s_periodic < 0.0) {
+    s_periodic += length;
+  }
 
   // Binary search for the bracketing segment, then linearly interpolate.
-  const auto it = std::upper_bound(s_.begin(), s_.end(), s);
+  const auto it = std::upper_bound(s_.begin(), s_.end(), s_periodic);
   std::size_t hi = static_cast<std::size_t>(std::distance(s_.begin(), it));
   hi = std::clamp(hi, std::size_t(1), s_.size() - 1);
   const std::size_t lo = hi - 1;
 
   const double span = s_[hi] - s_[lo];
-  const double t = (span > 1e-9) ? (s - s_[lo]) / span : 0.0;
+  const double t = (span > 1e-9) ? (s_periodic - s_[lo]) / span : 0.0;
   return kappa_[lo] + t * (kappa_[hi] - kappa_[lo]);
 }
 
