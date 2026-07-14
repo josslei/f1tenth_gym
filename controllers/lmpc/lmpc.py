@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 import numpy as np
 
@@ -45,12 +45,22 @@ class LMPCController(Controller):
         seed_lap_csv: str,
         dt: float,
         horizon_steps: int = 75,
+        config_overrides: dict[str, Any] | None = None,
     ) -> None:
         config = native.LmpcConfig()
         config.centerline_csv_path = centerline_csv
         config.seed_lap_csv_path = seed_lap_csv
         config.dt = dt
         config.horizon_steps = horizon_steps
+        # Any other LmpcConfig field by name -- the cost-term weights are
+        # the usual reason (cost_to_go_weight, c_a/c_delta/c_d_a/c_d_delta,
+        # terminal_slack_weight, terminal_slack_state, ey_slack_l1/l2; the
+        # objective they weight is spelled out in
+        # controllers/lmpc/include/lmpc_config.hpp). LmpcConfig is a
+        # non-dynamic pybind11 class, so a mistyped name raises
+        # AttributeError instead of being silently ignored.
+        for name, value in (config_overrides or {}).items():
+            setattr(config, name, value)
         self.config = config
         self._native = native.NativeLMPCController(config)
         # Same centerline convention as

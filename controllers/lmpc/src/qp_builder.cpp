@@ -114,7 +114,7 @@ QpBuilder::QpBuilder(casadi_int horizon_steps, casadi_int safe_set_size,
   // finish line mid-plan) -- a constant additive N doesn't change the QP's
   // argmin, so it is omitted rather than adding dead cost terms to the
   // graph.
-  MX cost = MX::mtimes(Jss_param.T(), Lambda);
+  MX cost = weights.cost_to_go * MX::mtimes(Jss_param.T(), Lambda);
   for (casadi_int t = 0; t < N; ++t) {
     const MX u_t = U(Slice(), t);
     const MX u_prev_t =

@@ -42,7 +42,7 @@ MAP = "maps/custom/f110_gym_10/f110_gym_map"
 # about what s means).
 CENTERLINE_CSV = "maps/custom/f110_gym_10/f110_gym_centerline.csv"
 SEED_LAP_CSV = "outputs/lmpc_seed_laps/f110_gym_10_seed_lap.csv"
-HORIZON_STEPS = 30
+HORIZON_STEPS = 40
 # gym/f110_gym/envs/f110_env.py's F110Env defaults timestep to 0.01 unless a
 # caller overrides it -- explicit here rather than editing that vendored
 # default (CLAUDE.md: treat gym/ as a black box). 0.025 is the value
@@ -55,6 +55,20 @@ SIM_TIMESTEP = 0.025
 # lap grows the safe set, so later iterations should be at least as fast as
 # earlier ones (the paper's core property).
 MAX_ITERATIONS = 10
+# Cost-term weight overrides, applied onto LmpcConfig by field name --
+# controllers/lmpc/include/lmpc_config.hpp spells out the objective each
+# weight scales. The RATIOS set how hard the controller chases lap time vs.
+# shadowing the demonstrated laps: raise "cost_to_go_weight" (min-time pull)
+# or lower "terminal_slack_weight"/"terminal_slack_state" entries (safe-set
+# anchor = the exploration leash) to be more aggressive. While DESIGN.md
+# SS5/SS6's error regression is unimplemented, aggressive settings buy
+# sprints that end in real slides, not lap time -- tune in small steps.
+# cost_to_go_weight = 5.0 was picked by measurement (2026-07-14, headless):
+# at the 1.0 default the min-time pull is too weak to improve on the seed
+# lap (44.52s, and iteration 1 never finished); at 5.0 the LMPC actually
+# iterates faster (40.90s -> 39.15s) before the unmodeled grip limit ends
+# iteration 2; at 2.5 and 10.0 iteration 1 already ends in a slide.
+CONFIG_OVERRIDES: dict[str, Any] = {"cost_to_go_weight": 5.0}
 # Controlled-brake fallback for solve failures. Without the SS5/SS6 error
 # regression the nominal model overestimates cornering grip a little above
 # the demonstrated speeds, so the min-time QP's (individually rational)
@@ -160,6 +174,7 @@ def main() -> None:
         seed_lap_csv=SEED_LAP_CSV,
         dt=dt,
         horizon_steps=HORIZON_STEPS,
+        config_overrides=CONFIG_OVERRIDES,
     )
     controller.attach_raw_velocity_state(lambda: raw_velocity_state(f110_env, ego_idx))
 

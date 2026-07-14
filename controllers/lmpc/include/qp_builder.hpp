@@ -30,6 +30,9 @@ struct QpBounds {
 // decision variables. This keeps target-velocity and steering penalties
 // comparable despite their different physical units.
 struct QpWeights {
+  // Multiplier on the normalized terminal cost-to-go J^T lambda
+  // (LmpcConfig::cost_to_go_weight's comment).
+  double cost_to_go;
   casadi::DM control;
   casadi::DM control_rate;
   double terminal_slack;

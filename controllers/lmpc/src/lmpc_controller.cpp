@@ -14,11 +14,12 @@ LMPCController::LMPCController(const LmpcConfig &config_in)
           config.horizon_steps, SafeSet::kTerminalSimplexSize,
           QpBounds{config.a_min, config.a_max, config.delta_min,
                    config.delta_max, config.ey_max, config.sv_max * config.dt},
-          QpWeights{casadi::DM({config.c_a, config.c_delta}),
+          QpWeights{config.cost_to_go_weight,
+                    casadi::DM({config.c_a, config.c_delta}),
                     casadi::DM({config.c_d_a, config.c_d_delta}),
                     config.terminal_slack_weight,
-                    casadi::DM({1.0, 0.25, 0.25, 4.0, 4.0, 4.0}),
-                    config.ey_slack_l1, config.ey_slack_l2},
+                    casadi::DM(config.terminal_slack_state), config.ey_slack_l1,
+                    config.ey_slack_l2},
           // StateIndex order [VX,VY,OMEGA,EPSI,S,EY]; track.length() is safe to
           // call here since `track` is declared (and therefore initialized)
           // before `qp_builder` -- see the member declaration order in
