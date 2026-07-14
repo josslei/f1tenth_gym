@@ -119,10 +119,6 @@ PYBIND11_MODULE(lmpc_native, m) {
       .def_readwrite("c_delta", &lmpc::LmpcConfig::c_delta)
       .def_readwrite("c_d_a", &lmpc::LmpcConfig::c_d_a)
       .def_readwrite("c_d_delta", &lmpc::LmpcConfig::c_d_delta)
-      .def_readwrite("terminal_slack_weight",
-                     &lmpc::LmpcConfig::terminal_slack_weight)
-      .def_readwrite("terminal_slack_state",
-                     &lmpc::LmpcConfig::terminal_slack_state)
       .def_readwrite("ey_slack_l1", &lmpc::LmpcConfig::ey_slack_l1)
       .def_readwrite("ey_slack_l2", &lmpc::LmpcConfig::ey_slack_l2)
       .def_readwrite("scale_x_vy", &lmpc::LmpcConfig::scale_x_vy)

@@ -30,11 +30,6 @@ struct SafeSetSample {
 // X^j (kStateDim x KP) and J^j (KP x 1), P = number of laps currently loaded.
 class SafeSet {
 public:
-  // A single recorded lap is locally a one-dimensional trajectory, so its
-  // well-conditioned local simplex is the line segment between two states.
-  // Terminal slack handles mismatch outside that demonstrated manifold.
-  static constexpr casadi_int kTerminalSimplexSize = 2;
-
   // DESIGN.md SS2's P: at most this many laps are kept; add_lap() evicts
   // the OLDEST lap once full. Without a cap the per-query work (a KNN pass
   // over every stored lap) grows without bound as laps accumulate --
@@ -57,6 +52,9 @@ public:
 
   casadi_int num_laps() const { return static_cast<casadi_int>(laps.size()); }
 
+  // Number of terminal vertices returned by query(): K from every stored lap.
+  casadi_int terminal_point_count(casadi_int K) const;
+
   double cost_scale() const;
 
   // Where the recorded data runs out along the track, i.e. the earliest
@@ -69,13 +67,14 @@ public:
   double data_end_s() const;
 
   struct QueryResult {
-    casadi::DM X_ss; // kStateDim x kTerminalSimplexSize
-    casadi::DM J_ss; // kTerminalSimplexSize x 1
+    casadi::DM X_ss; // kStateDim x (K * num_laps())
+    casadi::DM J_ss; // (K * num_laps()) x 1
   };
 
-  // Build a candidate pool from the K nearest points in each lap, then
-  // greedily retain a numerically affinely independent simplex in normalized
-  // six-state space. state_scale follows StateIndex order.
+  // Select exactly K nearest samples independently from each stored lap,
+  // sorted by ascending distance within each lap, and concatenate all of
+  // them. No affine-rank or global fixed-size reduction is applied.
+  // state_scale follows StateIndex order.
   QueryResult query(const casadi::DM &x_query, casadi_int K,
                     const casadi::DM &state_scale) const;
 

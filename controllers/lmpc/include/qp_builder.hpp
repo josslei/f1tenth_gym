@@ -35,8 +35,6 @@ struct QpWeights {
   double cost_to_go;
   casadi::DM control;
   casadi::DM control_rate;
-  double terminal_slack;
-  casadi::DM terminal_slack_state;
   // Exact-plus-quadratic penalty on the per-stage ey slack (LmpcConfig::
   // ey_slack_l1's comment has the rationale for softening ey at all).
   double ey_slack_l1;
@@ -64,18 +62,17 @@ struct QpStage {
 };
 
 struct QpSolution {
-  casadi::DM x_traj;         // kStateDim x (N+1)
-  casadi::DM u_traj;         // kControlDim x N
-  casadi::DM lambda;         // safe_set_size x 1
-  casadi::DM terminal_slack; // normalized kStateDim x 1
+  casadi::DM x_traj; // kStateDim x (N+1)
+  casadi::DM u_traj; // kControlDim x N
+  casadi::DM lambda; // safe_set_size x 1
   bool success;
   std::string message; // populated with the solver's own error text on failure
 };
 
 // Builds the multi-shooting QP graph (DESIGN.md SS4) ONCE for a fixed
-// horizon length N and terminal simplex size. SafeSet searches K candidates
-// per lap but reduces them to a two-point local segment before this graph is
-// parameterized, so the QP never carries K redundant lambda variables.
+// horizon length N and terminal safe-set size q. QpBuilder is reconstructed
+// when a completed lap changes q; each control step only re-parameterizes the
+// existing graph.
 //
 // solve() re-parametrizes (A_t, B_t, C_t, x_k, u_{k-1}, the safe-set
 // matrices) and re-solves the SAME graph every control step -- this is the
@@ -89,11 +86,13 @@ public:
             const QpScaling &scaling, const std::string &solver_name = "qrqp");
 
   // stages.size() must equal N. x_warm/u_warm seed the receding-horizon
-  // trajectory; lambda_warm supplies the initial scalar segment coordinate.
+  // trajectory; lambda_warm supplies a q-dimensional simplex point.
   QpSolution solve(const casadi::DM &x_k, const casadi::DM &u_prev,
                    const std::vector<QpStage> &stages, const casadi::DM &X_ss,
                    const casadi::DM &J_ss, const casadi::DM &x_warm,
                    const casadi::DM &u_warm, const casadi::DM &lambda_warm);
+
+  casadi_int safe_set_size() const { return q; }
 
 private:
   casadi_int N;
@@ -110,12 +109,10 @@ private:
                       // units, >= 0) -- keeps the QP feasible when the
                       // measured/predicted state is pushed outside the ey
                       // box (QpWeights::ey_slack_l1's comment)
-  casadi::MX Alpha;   // scalar barycentric coordinate for the terminal segment
-  casadi::MX Lambda;  // [1-Alpha, Alpha]
-  casadi::MX TerminalSlack; // normalized terminal mismatch expression
-  casadi::MX X_phys; // scaling.x * X -- physical-unit state, used in every
-                     // constraint/cost and extracted at solve time
-  casadi::MX U_phys; // scaling.u * U -- physical-unit control, likewise
+  casadi::MX Lambda;  // q x 1 decision variable
+  casadi::MX X_phys;  // scaling.x * X -- physical-unit state, used in every
+                      // constraint/cost and extracted at solve time
+  casadi::MX U_phys;  // scaling.u * U -- physical-unit control, likewise
 
   casadi::MX x0_param;
   casadi::MX u_prev_param;

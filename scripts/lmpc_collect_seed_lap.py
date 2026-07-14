@@ -31,6 +31,7 @@ import numpy as np
 
 import f110_gym  # noqa: F401 - registers f110-v0
 from controllers.controller_base import VehicleState
+from controllers.lmpc.lap_data import LapSample, build_lap_arrays
 from controllers.pure_pursuit import DynamicLookaheadDistance, PurePursuit
 from utils.waypoint_utils import cumulative_arc_lengths, nearest_waypoint_index
 from utils.waypoint_view import initial_pose_from_waypoints
@@ -184,6 +185,43 @@ def project_frenet(
     return s, ey, heading, idx
 
 
+def capture_lap_sample(
+    obs: dict[str, Any],
+    f110_env: Any,
+    ego_idx: int,
+    path_xy: np.ndarray,
+    path_psi: np.ndarray,
+    path_s: np.ndarray,
+    last_idx: int,
+    search_window: int,
+) -> tuple[LapSample, int]:
+    """Capture one native LMPC state and the plant values at the same instant."""
+    state = obs_to_vehicle_state(obs, ego_idx)
+    raw_state = f110_env.sim.agents[ego_idx].state
+    raw_speed = float(raw_state[3])
+    beta = float(raw_state[6])
+    s, ey, path_heading, nearest_idx = project_frenet(
+        np.array([state.x, state.y]),
+        path_xy,
+        path_psi,
+        path_s,
+        last_idx,
+        search_window,
+    )
+    x = np.array(
+        [
+            raw_speed * np.cos(beta),
+            raw_speed * np.sin(beta),
+            float(raw_state[5]),
+            wrap_angle(state.yaw - path_heading),
+            s,
+            ey,
+        ],
+        dtype=np.float64,
+    )
+    return LapSample(x, float(raw_state[2]), raw_speed), nearest_idx
+
+
 def main(visualize: bool = False) -> None:
     env = gym.make("f110-v0", map=MAP, num_agents=1, timestep=SIM_TIMESTEP)
     f110_env: Any = env.unwrapped
@@ -224,14 +262,19 @@ def main(visualize: bool = False) -> None:
         viewer.update(obs)
         viewer.render()
 
-    # vx, vy are the body-frame velocity components the paper's dynamic
-    # bicycle model needs (Section II). The gym's public obs dict hardcodes
-    # linear_vels_y to 0.0 (gym/f110_gym/envs/base_classes.py) regardless of
-    # actual slip, so vy has to be reconstructed from the raw simulator state
-    # (index 6: slip angle beta) instead: vx = v*cos(beta), vy = v*sin(beta).
     last_idx = -1
     t = 0.0
-    samples: list[dict[str, float]] = []
+    initial_sample, last_idx = capture_lap_sample(
+        obs,
+        f110_env,
+        ego_idx,
+        path_xy,
+        path_psi,
+        path_s,
+        last_idx,
+        controller.search_window,
+    )
+    samples = [initial_sample]
     steering_guard = LaunchSteeringGuard()
 
     while True:
@@ -240,37 +283,21 @@ def main(visualize: bool = False) -> None:
         cmd = controller.control()
         steer = steering_guard.apply(cmd.steering, state.speed)
 
-        raw_state = f110_env.sim.agents[
-            ego_idx
-        ].state  # [x,y,delta,v,psi,yaw_rate,beta]
-        v = float(raw_state[3])
-        beta = float(raw_state[6])
-        vx = v * np.cos(beta)
-        vy = v * np.sin(beta)
-        omega = float(raw_state[5])
-
-        position = np.array([state.x, state.y])
-        s, ey, path_heading, last_idx = project_frenet(
-            position, path_xy, path_psi, path_s, last_idx, controller.search_window
-        )
-        epsi = wrap_angle(state.yaw - path_heading)
-
-        samples.append(
-            {
-                "vx": vx,
-                "vy": vy,
-                "omega": omega,
-                "epsi": epsi,
-                "s": s,
-                "ey": ey,
-                "t": t,
-                "delta": steer,
-            }
-        )
-
         action = np.array([[steer, cmd.velocity]], dtype=np.float64)
         obs, _reward, terminated, truncated, _info = env.step(action)
         t += dt
+
+        post_step_sample, last_idx = capture_lap_sample(
+            obs,
+            f110_env,
+            ego_idx,
+            path_xy,
+            path_psi,
+            path_s,
+            last_idx,
+            controller.search_window,
+        )
+        samples.append(post_step_sample)
 
         if viewer is not None:
             viewer.update(obs)
@@ -285,30 +312,37 @@ def main(visualize: bool = False) -> None:
 
     env.close()
 
-    lap_completed = float(obs["lap_counts"][ego_idx]) >= 1.0
+    lap_completed = (
+        float(obs["lap_counts"][ego_idx]) >= 1.0
+        and not bool(f110_env.collisions[ego_idx])
+        and not truncated
+    )
     if not lap_completed:
         raise RuntimeError(
             "Run ended before completing a lap (terminated/truncated early); "
             "no seed lap written."
         )
 
-    write_seed_lap_csv(samples, dt, OUTPUT_CSV)
+    x_lap, u_lap, J_lap = build_lap_arrays(samples, dt)
+    write_seed_lap_csv(x_lap, u_lap, J_lap, dt, OUTPUT_CSV)
     print(
-        f"Wrote {len(samples)} samples ({len(samples) - 1} transitions) to {OUTPUT_CSV}"
+        f"Wrote {x_lap.shape[1]} states ({u_lap.shape[1]} transitions) to {OUTPUT_CSV}"
     )
 
 
 def write_seed_lap_csv(
-    samples: list[dict[str, float]], dt: float, output_path: str
+    x_lap: np.ndarray,
+    u_lap: np.ndarray,
+    J_lap: np.ndarray,
+    dt: float,
+    output_path: str,
 ) -> None:
-    """Write (x_k, u_k, J_k) samples -- see controllers/lmpc/DESIGN.md SS2/SS5.
+    """Write finalized (x_k, u_k, J_k) arrays to the seed-lap CSV.
 
-    T = len(samples) - 1 transitions were driven. Every k in [0, T] gets a
-    state and a cost-to-go J_k = T - k. Only k in [0, T-1] has a control
-    (a_k, delta_k) and therefore a valid x_{k+1} -- the last row has no control
-    or successor state, matching how the safe set trajectory data is used.
+    One lap with T transitions has T+1 states including the first post-step
+    finish-crossing state, T realized inputs, and J_k = T-k.
     """
-    total_steps = len(samples) - 1
+    total_steps = u_lap.shape[1]
     out_path = Path(output_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -328,26 +362,21 @@ def write_seed_lap_csv(
                 "J",
             ]
         )
-        for k, sample in enumerate(samples):
+        for k in range(x_lap.shape[1]):
             is_last = k == total_steps
             if is_last:
                 a_k = ""
                 delta_k = ""
             else:
-                a_k = (samples[k + 1]["vx"] - sample["vx"]) / dt
-                delta_k = sample["delta"]
+                a_k = u_lap[0, k]
+                delta_k = u_lap[1, k]
             writer.writerow(
                 [
-                    sample["vx"],
-                    sample["vy"],
-                    sample["omega"],
-                    sample["epsi"],
-                    sample["s"],
-                    sample["ey"],
-                    sample["t"],
+                    *x_lap[:, k],
+                    k * dt,
                     a_k,
                     delta_k,
-                    total_steps - k,
+                    J_lap[k],
                 ]
             )
 

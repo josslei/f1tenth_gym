@@ -10,40 +10,41 @@ LMPCController::LMPCController(const LmpcConfig &config_in)
     : config(config_in), dynamics_model(config.vehicle_params), integrator(),
       linearizer(dynamics_model, integrator, config.dt),
       track(config.centerline_csv_path), safe_set(config.seed_lap_csv_path),
-      qp_builder(
-          config.horizon_steps, SafeSet::kTerminalSimplexSize,
-          QpBounds{config.a_min, config.a_max, config.delta_min,
-                   config.delta_max, config.ey_max, config.sv_max * config.dt},
-          QpWeights{config.cost_to_go_weight,
-                    casadi::DM({config.c_a, config.c_delta}),
-                    casadi::DM({config.c_d_a, config.c_d_delta}),
-                    config.terminal_slack_weight,
-                    casadi::DM(config.terminal_slack_state), config.ey_slack_l1,
-                    config.ey_slack_l2},
-          // StateIndex order [VX,VY,OMEGA,EPSI,S,EY]; track.length() is safe to
-          // call here since `track` is declared (and therefore initialized)
-          // before `qp_builder` -- see the member declaration order in
-          // lmpc_controller.hpp. LmpcConfig::scale_x_vy et al.'s comment has
-          // the full rationale for why these particular values.
-          QpScaling{
-              casadi::DM({config.v_max, config.scale_x_vy, config.scale_x_omega,
-                          config.scale_x_epsi, track.length(), config.ey_max}),
-              casadi::DM({config.a_max, config.delta_max}),
-              safe_set.cost_scale()},
-          config.solver_name),
+      cost_to_go_scale(safe_set.cost_scale()), qp_builder(nullptr),
       x(casadi::DM::zeros(kStateDim, 1)), t(0.0), has_state(false),
       u_prev(casadi::DM::zeros(kControlDim, 1)), actual_delta(0.0),
       x_warm(casadi::DM::zeros(kStateDim, config.horizon_steps + 1)),
       u_warm(casadi::DM::zeros(kControlDim, config.horizon_steps)),
-      // Uniform 1/q: the simplex centroid, feasible (sums to 1, every
-      // component in [0,1]) with no a-priori reason to favor one safe-set
-      // neighbor over another -- see lambda_warm's declaration comment
-      // (lmpc_controller.hpp) for why an unset (all-zero) guess is worse than
-      // this, not just different.
-      lambda_warm(casadi::DM::ones(SafeSet::kTerminalSimplexSize, 1) /
-                  SafeSet::kTerminalSimplexSize),
-      has_warm_start(false),
-      x_pred(casadi::DM::zeros(kStateDim, config.horizon_steps + 1)) {}
+      lambda_warm(casadi::DM::zeros(0, 1)), has_warm_start(false),
+      x_pred(casadi::DM::zeros(kStateDim, config.horizon_steps + 1)) {
+  rebuild_qp_builder();
+}
+
+casadi_int LMPCController::terminal_set_size() const {
+  return safe_set.terminal_point_count(config.K);
+}
+
+void LMPCController::reset_lambda_warm_start() {
+  const casadi_int q = terminal_set_size();
+  lambda_warm = casadi::DM::ones(q, 1) / q;
+}
+
+void LMPCController::rebuild_qp_builder() {
+  qp_builder = std::make_unique<QpBuilder>(
+      config.horizon_steps, terminal_set_size(),
+      QpBounds{config.a_min, config.a_max, config.delta_min, config.delta_max,
+               config.ey_max, config.sv_max * config.dt},
+      QpWeights{config.cost_to_go_weight,
+                casadi::DM({config.c_a, config.c_delta}),
+                casadi::DM({config.c_d_a, config.c_d_delta}),
+                config.ey_slack_l1, config.ey_slack_l2},
+      QpScaling{
+          casadi::DM({config.v_max, config.scale_x_vy, config.scale_x_omega,
+                      config.scale_x_epsi, track.length(), config.ey_max}),
+          casadi::DM({config.a_max, config.delta_max}), cost_to_go_scale},
+      config.solver_name);
+  reset_lambda_warm_start();
+}
 
 void LMPCController::reset() {
   x = casadi::DM::zeros(kStateDim, 1);
@@ -53,8 +54,7 @@ void LMPCController::reset() {
   actual_delta = 0.0;
   x_warm = casadi::DM::zeros(kStateDim, config.horizon_steps + 1);
   u_warm = casadi::DM::zeros(kControlDim, config.horizon_steps);
-  const casadi_int q = SafeSet::kTerminalSimplexSize;
-  lambda_warm = casadi::DM::ones(q, 1) / q;
+  reset_lambda_warm_start();
   has_warm_start = false;
   x_pred = casadi::DM::zeros(kStateDim, config.horizon_steps + 1);
 }
@@ -179,16 +179,24 @@ QpSolution LMPCController::solve_once() {
   const casadi::DM x_terminal_ref = x_warm(casadi::Slice(), N);
   SafeSet::QueryResult safe_set_result =
       safe_set.query(x_terminal_ref, config.K, safe_set_query_scale());
+  const casadi_int expected_q = terminal_set_size();
+  if (safe_set_result.X_ss.size1() != kStateDim ||
+      safe_set_result.X_ss.size2() != expected_q ||
+      safe_set_result.J_ss.size1() != expected_q ||
+      safe_set_result.J_ss.size2() != 1) {
+    throw std::runtime_error("LMPCController::solve_once: safe-set query "
+                             "returned invalid dimensions");
+  }
   // Finish-mode terminal set: within the last few horizons of a lap the
   // terminal reference runs past the end of the recorded data (s is
   // non-periodic, each stored lap ends where gym's finish detection fired).
   // The plain query can then only clamp onto each lap's final samples, whose
-  // s sits BEHIND the reference -- the terminal slack pulls the prediction
-  // backward and J has already bottomed out at ~0, so the QP's optimum is to
-  // brake and park exactly on the data's endpoint instead of driving through
-  // the line (the measured 3.7 -> 2.3 m/s braking at the seam). Past the
-  // data's end the real target is the finish set {x : s >= L}: keep the
-  // queried samples' dynamic states as the terminal anchor but free the s
+  // s sits BEHIND the reference, so the hard terminal equality can pull the
+  // prediction backward after J has already bottomed out at ~0 and the QP's
+  // optimum is to brake and park exactly on the data's endpoint instead of
+  // driving through the line (the measured 3.7 -> 2.3 m/s braking at the seam).
+  // Past the data's end the real target is the finish set {x : s >= L}: keep
+  // the queried samples' dynamic states as the terminal anchor but free the s
   // row (match it to the reference itself, no backward pull) and zero the
   // cost-to-go -- a forward absorbing extension of the safe set. The lap
   // ends (lap-as-iteration: runs/lmpc_drive.py resets and starts iteration
@@ -203,8 +211,7 @@ QpSolution LMPCController::solve_once() {
   // Safe-set vertices are reselected every control step, so the previous
   // lambda entries no longer refer to the same columns. Seed the new simplex
   // at its feasible centroid instead of carrying incompatible coordinates.
-  lambda_warm = casadi::DM::ones(SafeSet::kTerminalSimplexSize, 1) /
-                SafeSet::kTerminalSimplexSize;
+  lambda_warm = casadi::DM::ones(expected_q, 1) / expected_q;
 
   // Anchor the QP's stage-0 steering-rate cost/constraint (QpBounds::
   // ddelta_max) against the PLANT's actual current steering angle, not this
@@ -216,8 +223,8 @@ QpSolution LMPCController::solve_once() {
   u_prev_anchor(dynamics::DELTA) = actual_delta;
 
   // DESIGN.md SS8 step 5.
-  return qp_builder.solve(x, u_prev_anchor, stages, safe_set_result.X_ss,
-                          safe_set_result.J_ss, x_warm, u_warm, lambda_warm);
+  return qp_builder->solve(x, u_prev_anchor, stages, safe_set_result.X_ss,
+                           safe_set_result.J_ss, x_warm, u_warm, lambda_warm);
 }
 
 casadi::DM LMPCController::control() {
@@ -285,6 +292,7 @@ void LMPCController::add_lap(const casadi::DM &x_lap, const casadi::DM &u_lap,
   // J), so the fixed scale keeps J_ss/scaling.j in (0, 1] -- exactly the
   // conditioning it was chosen for.
   safe_set.add_lap(std::move(lap));
+  rebuild_qp_builder();
 }
 
 } // namespace lmpc

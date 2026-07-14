@@ -1,7 +1,6 @@
 #include "safe_set.hpp"
 
 #include <algorithm>
-#include <array>
 #include <cmath>
 #include <fstream>
 #include <limits>
@@ -130,84 +129,59 @@ double SafeSet::cost_scale() const {
   return scale;
 }
 
+casadi_int SafeSet::terminal_point_count(casadi_int K) const {
+  if (K <= 0) {
+    throw std::invalid_argument(
+        "SafeSet::terminal_point_count: K must be positive");
+  }
+  if (laps.empty()) {
+    throw std::runtime_error(
+        "SafeSet::terminal_point_count: safe set contains no laps");
+  }
+  for (std::size_t lap_idx = 0; lap_idx < laps.size(); ++lap_idx) {
+    if (laps[lap_idx].size() < static_cast<std::size_t>(K)) {
+      throw std::runtime_error("SafeSet::terminal_point_count: lap " +
+                               std::to_string(lap_idx) +
+                               " contains fewer than K samples");
+    }
+  }
+  return K * num_laps();
+}
+
 SafeSet::QueryResult SafeSet::query(const casadi::DM &x_query, casadi_int K,
                                     const casadi::DM &state_scale) const {
-  // K remains the per-lap candidate count. The terminal QP receives one
-  // global simplex selected from the combined candidate pool. Each sample's
-  // distance is computed exactly once and carried alongside its pointer --
-  // recomputing it inside sort comparators is O(n log n) casadi::DM
-  // element reads per lap per control step, a real per-frame cost.
-  std::vector<std::pair<double, const SafeSetSample *>> candidates;
+  const casadi_int q = terminal_point_count(K);
+  QueryResult result{casadi::DM::zeros(dynamics::kStateDim, q),
+                     casadi::DM::zeros(q, 1)};
+  casadi_int output_col = 0;
+
   for (const std::vector<SafeSetSample> &lap : laps) {
-    const std::size_t k =
-        std::min<std::size_t>(static_cast<std::size_t>(K), lap.size());
-    std::vector<std::pair<double, const SafeSetSample *>> ranked;
+    // Carry the sample index as a deterministic tie-breaker for equal
+    // distances.
+    std::vector<std::pair<double, std::size_t>> ranked;
     ranked.reserve(lap.size());
-    for (const SafeSetSample &sample : lap) {
+    for (std::size_t sample_idx = 0; sample_idx < lap.size(); ++sample_idx) {
       ranked.emplace_back(
-          normalized_distance_sq(sample.x, x_query, state_scale), &sample);
+          normalized_distance_sq(lap[sample_idx].x, x_query, state_scale),
+          sample_idx);
     }
-    std::nth_element(ranked.begin(), ranked.begin() + (k - 1), ranked.end());
-    candidates.insert(candidates.end(), ranked.begin(), ranked.begin() + k);
-  }
-
-  std::sort(candidates.begin(), candidates.end());
-
-  std::vector<casadi::DM> x_cols;
-  std::vector<double> j_vals;
-  std::vector<std::array<double, dynamics::kStateDim>> basis;
-  x_cols.reserve(kTerminalSimplexSize);
-  j_vals.reserve(kTerminalSimplexSize);
-  basis.reserve(kTerminalSimplexSize - 1);
-
-  const SafeSetSample *base = candidates.front().second;
-  x_cols.push_back(base->x);
-  j_vals.push_back(base->J);
-
-  constexpr double kAffineRankTolerance = 1e-3;
-  for (std::size_t candidate_idx = 1;
-       candidate_idx < candidates.size() &&
-       static_cast<casadi_int>(x_cols.size()) < kTerminalSimplexSize;
-       ++candidate_idx) {
-    const SafeSetSample *candidate = candidates[candidate_idx].second;
-    std::array<double, dynamics::kStateDim> residual{};
-    for (casadi_int row = 0; row < dynamics::kStateDim; ++row) {
-      residual[static_cast<std::size_t>(row)] =
-          (static_cast<double>(candidate->x(row)) -
-           static_cast<double>(base->x(row))) /
-          static_cast<double>(state_scale(row));
-    }
-
-    for (const auto &direction : basis) {
-      double projection = 0.0;
-      for (casadi_int row = 0; row < dynamics::kStateDim; ++row) {
-        projection += residual[static_cast<std::size_t>(row)] *
-                      direction[static_cast<std::size_t>(row)];
-      }
-      for (casadi_int row = 0; row < dynamics::kStateDim; ++row) {
-        residual[static_cast<std::size_t>(row)] -=
-            projection * direction[static_cast<std::size_t>(row)];
-      }
-    }
-
-    double norm_sq = 0.0;
-    for (double value : residual) {
-      norm_sq += value * value;
-    }
-    const double norm = std::sqrt(norm_sq);
-    if (norm > kAffineRankTolerance) {
-      for (double &value : residual) {
-        value /= norm;
-      }
-      basis.push_back(residual);
-      x_cols.push_back(candidate->x);
-      j_vals.push_back(candidate->J);
+    std::partial_sort(ranked.begin(), ranked.begin() + K, ranked.end());
+    for (casadi_int selected = 0; selected < K; ++selected) {
+      const SafeSetSample &sample =
+          lap[ranked[static_cast<std::size_t>(selected)].second];
+      result.X_ss(casadi::Slice(), output_col) = sample.x;
+      result.J_ss(output_col, 0) = sample.J;
+      ++output_col;
     }
   }
 
-  QueryResult result;
-  result.X_ss = casadi::DM::horzcat(x_cols);
-  result.J_ss = casadi::DM(j_vals);
+  if (output_col != q || result.X_ss.size1() != dynamics::kStateDim ||
+      result.X_ss.size2() != q || result.J_ss.size1() != q ||
+      result.J_ss.size2() != 1 || !result.X_ss.is_regular() ||
+      !result.J_ss.is_regular()) {
+    throw std::runtime_error("SafeSet::query: constructed terminal matrices "
+                             "have invalid dimensions or values");
+  }
   return result;
 }
 

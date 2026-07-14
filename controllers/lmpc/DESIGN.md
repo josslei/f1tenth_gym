@@ -7,10 +7,11 @@ This is the source of truth for symbol ordering and index conventions — code
 should mirror it exactly (named constants/enums, not magic indices).
 
 Status: conventions pinned. The "dummy A^e/B^e/C^e" first pass (§8) is wired
-end-to-end. The QP uses normalized state/control variables and normalized
-safe-set cost-to-go, a normalized terminal slack, and state-aware safe-set
-neighbors over `[vx, epsi, s, ey]`. Error-dynamics regression (§5/§6) is not
-implemented -- this pass genuinely skips 3a/3b as designed.
+end-to-end. The QP uses normalized state/control variables, normalized
+safe-set cost-to-go, and state-aware safe-set neighbors over
+`[vx, epsi, s, ey]`. The terminal state is a hard convex combination of all
+`K` selected points from every stored lap. Error-dynamics regression (§5/§6)
+is not implemented -- this pass genuinely skips 3a/3b as designed.
 
 The QP control convention is `[a, delta]`. The Python wrapper converts solved
 acceleration into Gym's target-velocity action by inverting Gym's proportional
@@ -97,15 +98,15 @@ At time `k` of lap `j`, using `D^{j-1}`:
 ```
 J_k^j(x_k, u_{k-1}, z̄_k; D^{j-1}) =
 
-  min_{x,u,λ,e_N} Σ_{t=0}^{N-1} [ 1_F(x_t) + u_t^T R u_t
+  min_{x,u,λ} Σ_{t=0}^{N-1} [ 1_F(x_t) + u_t^T R u_t
                                   + (u_t-u_{t-1})^T Rd (u_t-u_{t-1}) ]
-                   + (J_N^{j-1}/J_scale)^T λ + ρ_N‖W_N e_N‖²
+                   + (J_N^{j-1}/J_scale)^T λ
 
   s.t.  x_0 = x_k,  u_{-1} = u_{k-1}
         x_{t+1} = A(z̄_{k+t}; D^{j-1}) x_t + B(z̄_{k+t}; D^{j-1}) u_t + C(z̄_{k+t}; D^{j-1}),
                                                               t = 0,...,N-1
         x_t ∈ X,  u_t ∈ U,                                  t = 0,...,N
-        X^{j-1}(x̄_{k+N}; D^{j-1}) λ + S_x e_N = x_N
+        X^{j-1}(x̄_{k+N}; D^{j-1}) λ = x_N
         0 ≤ λ ≤ 1,  1^T λ = 1
 ```
 
@@ -118,17 +119,17 @@ never finishes mid-plan.
 
 ## 4. Translation into a solver-facing QP
 
-Decision vector: `w = (x_0,...,x_N, u_0,...,u_{N-1}, λ, e_N)`,
+Decision vector: `w = (x_0,...,x_N, u_0,...,u_{N-1}, λ)`,
 `n=6, m=2, q=KP`.
 
 ```
 Φ(w) = Σ [ 1_F(x_t) + u_t^T R u_t + (u_t-u_{t-1})^T Rd (u_t-u_{t-1}) ]
-       + (J/J_scale)^T λ + ρ_N‖W_N e_N‖²
+       + (J/J_scale)^T λ
 
 g_eq(w) = 0:
     x_0 - x_k = 0
     x_{t+1} - A_t x_t - B_t u_t - C_t = 0,   t = 0,...,N-1
-    X_ss λ + S_x e_N - x_N = 0
+    X_ss λ - x_N = 0
     1^T λ - 1 = 0
 
 g_ineq(w) ≤ 0:
@@ -336,20 +337,15 @@ from the start means turning on regression later is additive (fill in
    safe-set query, QP solve, receding-horizon warm-start shift.
 
 **Structural feasibility fixes.** State/control decisions are normalized by
-`QpScaling`, and safe-set cost-to-go is divided by the largest loaded value.
+`QpScaling`, and safe-set cost-to-go is divided by D^0's fixed maximum value.
 Control effort and rate costs act directly on scaled `U`, making their weights
-independent of physical units and the seed lap's length. The terminal safe-set
-equality includes normalized slack, with lower relative
-penalties on `vy/omega`, a medium penalty on `vx`, and higher penalties on
-`epsi/s/ey`. The terminal neighbor query uses normalized
-`[vx, epsi, s, ey]` distance rather than position alone. Lambda retains the
-paper's simplex constraint without carrying all `K=32` weights: a single
-recorded lap is locally a one-dimensional demonstrated manifold, so the
-query selects a two-point line segment and `QpBuilder` uses the minimal
-barycentric coordinate `[1-alpha, alpha]`, `0<=alpha<=1`. No mask or lambda
-ridge is added. `QpBuilder` also eliminates the slack variable algebraically
-and penalizes the equivalent normalized terminal mismatch directly, avoiding
-six unnecessary variables and equalities.
+independent of physical units and the seed lap's length. The terminal neighbor
+query uses normalized `[vx, epsi, s, ey]` distance rather than position alone.
+It returns exactly `K` points per stored lap, so `q = K*P`; `Lambda` is the
+full q-dimensional decision variable with `0<=Lambda<=1`, `1^T Lambda=1`, and
+the hard equality `x_N = X_ss Lambda`. No terminal slack or Lambda ridge is
+added. Because q grows as completed laps are stored, `QpBuilder` is rebuilt
+once after each `add_lap()`, while the cost-to-go scale remains fixed to D^0.
 
 **`SIM_TIMESTEP` switched from an accidental 0.01 to the originally-
 intended 0.025 (2026-07-13)** -- `gym/f110_gym/envs/f110_env.py`'s
@@ -480,7 +476,7 @@ died at the start pose) is resolved by two coupled decisions:
 
 1. **Lap-as-iteration, not a wrapped-lap copy.** Crossing the line ends
    iteration `j` exactly as the paper defines it: the runner
-   (`runs/lmpc_drive.py`) records the driven `(x_k, u_k)` per step,
+   (`runs/lmpc_drive.py`) records each pre/post-transition plant state,
    computes `J_k = T - k` at the crossing, calls
    `LMPCController::add_lap`, resets the sim + controller, and relaunches
    from rest. `s` stays non-periodic; `J` keeps its single-task
@@ -494,6 +490,12 @@ died at the start pose) is resolved by two coupled decisions:
    Crashed/truncated laps are never added (the safe set's meaning rests
    on every stored trajectory reaching the finish); `SafeSet` keeps at
    most `kMaxLaps = 3` laps, evicting the oldest.
+
+   One completed lap with T transitions stores T+1 states `x_0..x_T`, T
+   realized inputs, and T+1 costs with `J_k=T-k`. `x_T` is the first
+   post-step finish-crossing state. Both D^0 and online laps reconstruct
+   `a_k` from raw scalar-speed finite differences and use the plant's actual
+   pre-transition steering state, never commanded steering.
 2. **Finish-mode terminal set for the last horizons.** Even within one
    lap, the terminal reference passes the stored data's end a few
    horizons before the crossing; clamping the query onto each lap's final

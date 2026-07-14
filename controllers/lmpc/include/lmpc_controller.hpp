@@ -2,6 +2,7 @@
 #define LMPC__LMPC_CONTROLLER_HPP_
 
 #include <casadi/casadi.hpp>
+#include <memory>
 
 #include "dynamics/common.hpp"
 #include "dynamics/gym_dynamics.hpp"
@@ -98,7 +99,9 @@ private:
   Linearizer linearizer;
   Track track;
   SafeSet safe_set;
-  QpBuilder qp_builder;
+  // Captured from D^0 and retained even after older-lap eviction.
+  double cost_to_go_scale;
+  std::unique_ptr<QpBuilder> qp_builder;
 
   casadi::DM x;
   double t;
@@ -137,6 +140,10 @@ private:
   // variable-conditioning scale; see the definition's comment for the
   // measured failure that conflating the two caused.
   casadi::DM safe_set_query_scale() const;
+
+  casadi_int terminal_set_size() const;
+  void rebuild_qp_builder();
+  void reset_lambda_warm_start();
 
   // Seeds u_warm from the D^0 trajectory segment nearest the current state
   // (SafeSet::trajectory_segment) before the very first solve -- NOT a

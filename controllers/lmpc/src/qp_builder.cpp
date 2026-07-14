@@ -1,13 +1,29 @@
 #include "qp_builder.hpp"
 
+#include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 
 #include "dynamics/common.hpp"
 
 namespace lmpc {
+
+namespace {
+
+void require_shape(const casadi::DM &value, casadi_int rows, casadi_int cols,
+                   const char *name) {
+  if (value.size1() != rows || value.size2() != cols) {
+    std::ostringstream message;
+    message << "QpBuilder::solve: " << name << " must be " << rows << "x"
+            << cols << ", got " << value.size1() << "x" << value.size2();
+    throw std::invalid_argument(message.str());
+  }
+}
+
+} // namespace
 
 QpBuilder::QpBuilder(casadi_int horizon_steps, casadi_int safe_set_size,
                      const QpBounds &bounds, const QpWeights &weights,
@@ -41,8 +57,7 @@ QpBuilder::QpBuilder(casadi_int horizon_steps, casadi_int safe_set_size,
   X = opti.variable(kStateDim, N + 1);
   U = opti.variable(kControlDim, N);
   EySlack = opti.variable(1, N + 1);
-  Alpha = opti.variable(1, 1);
-  Lambda = MX::vertcat({1.0 - Alpha, Alpha});
+  Lambda = opti.variable(q, 1);
   X_phys = this->scaling.x * X;
   U_phys = this->scaling.u * U;
 
@@ -50,8 +65,6 @@ QpBuilder::QpBuilder(casadi_int horizon_steps, casadi_int safe_set_size,
   u_prev_param = opti.parameter(kControlDim, 1);
   Xss_param = opti.parameter(kStateDim, q);
   Jss_param = opti.parameter(q, 1);
-  TerminalSlack =
-      (X_phys(Slice(), N) - MX::mtimes(Xss_param, Lambda)) / this->scaling.x;
 
   A_params.reserve(N);
   B_params.reserve(N);
@@ -113,9 +126,10 @@ QpBuilder::QpBuilder(casadi_int horizon_steps, casadi_int safe_set_size,
     opti.subject_to(-bounds.ddelta_max <= ddelta);
     opti.subject_to(ddelta <= bounds.ddelta_max);
   }
-  // Minimal barycentric parameterization of the two-point terminal simplex.
-  opti.subject_to(0 <= Alpha);
-  opti.subject_to(Alpha <= 1.0);
+  opti.subject_to(X_phys(Slice(), N) == MX::mtimes(Xss_param, Lambda));
+  opti.subject_to(0 <= Lambda);
+  opti.subject_to(Lambda <= 1.0);
+  opti.subject_to(MX::sum1(Lambda) == 1.0);
 
   // DESIGN.md SS3's Phi(w). The min-time indicator 1_F(x_t) is a constant
   // +1 per stage in practice (SS3: the horizon never actually crosses the
@@ -131,16 +145,13 @@ QpBuilder::QpBuilder(casadi_int horizon_steps, casadi_int safe_set_size,
     cost += MX::dot(MX(weights.control), MX::sq(u_t)) +
             MX::dot(MX(weights.control_rate), MX::sq(du_t));
   }
-  cost += weights.terminal_slack *
-          MX::sumsqr(weights.terminal_slack_state * TerminalSlack);
   // Soft-ey penalty (constraint block above): l1 keeps it exact, l2 keeps
   // the recovery direction well-scaled once a violation does occur.
   cost += weights.ey_slack_l1 * MX::sum2(EySlack) +
           weights.ey_slack_l2 * MX::sumsqr(EySlack);
-  // Regularize otherwise unpenalized scaled state/simplex directions.
+  // Regularize otherwise unpenalized scaled state directions.
   constexpr double kRegularization = 1e-6;
   cost += kRegularization * MX::sumsqr(X);
-  cost += kRegularization * MX::sumsqr(Alpha);
   opti.minimize(cost);
 
   // Every control step re-solves this same graph (class comment above), so
@@ -200,6 +211,17 @@ QpSolution QpBuilder::solve(const casadi::DM &x_k, const casadi::DM &u_prev,
     throw std::invalid_argument(
         "QpBuilder::solve: stages.size() must equal the horizon length");
   }
+  require_shape(x_k, dynamics::kStateDim, 1, "x_k");
+  require_shape(u_prev, dynamics::kControlDim, 1, "u_prev");
+  require_shape(X_ss, dynamics::kStateDim, q, "X_ss");
+  require_shape(J_ss, q, 1, "J_ss");
+  require_shape(x_warm, dynamics::kStateDim, N + 1, "x_warm");
+  require_shape(u_warm, dynamics::kControlDim, N, "u_warm");
+  require_shape(lambda_warm, q, 1, "lambda_warm");
+  if (!lambda_warm.is_regular()) {
+    throw std::invalid_argument(
+        "QpBuilder::solve: lambda_warm must contain only finite values");
+  }
 
   QpSolution result;
   try {
@@ -225,25 +247,34 @@ QpSolution QpBuilder::solve(const casadi::DM &x_k, const casadi::DM &u_prev,
     // directly against this vendored CasADi build, not assumed).
     opti.set_initial(X, x_warm / scaling.x);
     opti.set_initial(U, u_warm / scaling.u);
-    opti.set_initial(Alpha, lambda_warm(1));
+    opti.set_initial(Lambda, lambda_warm);
 
     const casadi::OptiSol sol = opti.solve_limited();
     const casadi::DM x_traj = sol.value(X_phys);
     const casadi::DM u_traj = sol.value(U_phys);
     const casadi::DM lambda = sol.value(Lambda);
-    const casadi::DM terminal_slack = sol.value(TerminalSlack);
+    const casadi::DM terminal_projection = casadi::DM::mtimes(X_ss, lambda);
+    const casadi::DM terminal_residual =
+        (x_traj(Slice(), N) - terminal_projection) / scaling.x;
+    const double lambda_sum = static_cast<double>(casadi::DM::sum1(lambda));
 
     if (std::getenv("LMPC_DEBUG_TERMINAL") != nullptr) {
-      std::cerr << "x0=" << x_k.T() << "\n"
-                << "X_ss(VX,VY,OMEGA,EPSI,S,EY rows x 2 cols)=" << X_ss << "\n"
+      std::cerr << "q=" << q << " X_ss=" << X_ss.size1() << "x" << X_ss.size2()
+                << " J_ss=" << J_ss.size1() << "x" << J_ss.size2() << "\n"
+                << "x0=" << x_k.T() << "\n"
+                << "X_ss=" << X_ss << "\n"
                 << "J_ss=" << J_ss.T() << " scale.j=" << scaling.j << "\n"
-                << "Alpha/Lambda=" << lambda.T()
-                << " x_N_phys=" << x_traj(casadi::Slice(), N).T()
-                << " terminal_slack(raw)=" << terminal_slack.T() << std::endl;
+                << "lambda sum=" << lambda_sum
+                << " min=" << casadi::DM::mmin(lambda)
+                << " max=" << casadi::DM::mmax(lambda) << "\n"
+                << "x_N=" << x_traj(casadi::Slice(), N).T() << "\n"
+                << "X_ss*lambda=" << terminal_projection.T() << "\n"
+                << "normalized terminal equality residual="
+                << terminal_residual.T() << std::endl;
     }
 
     const bool regular = x_traj.is_regular() && u_traj.is_regular() &&
-                         lambda.is_regular() && terminal_slack.is_regular();
+                         lambda.is_regular() && terminal_residual.is_regular();
 
     const double a_hi =
         static_cast<double>(casadi::DM::mmax(u_traj(dynamics::A, Slice())));
@@ -256,6 +287,10 @@ QpSolution QpBuilder::solve(const casadi::DM &x_k, const casadi::DM &u_prev,
     const double lambda_hi_over_bound =
         static_cast<double>(casadi::DM::mmax(lambda - 1.0));
     const double lambda_lo = static_cast<double>(casadi::DM::mmin(lambda));
+    const double terminal_residual_max =
+        terminal_residual.is_regular()
+            ? static_cast<double>(casadi::DM::mmax(fabs(terminal_residual)))
+            : std::numeric_limits<double>::infinity();
 
     // qrqp's convergence check declares success once no further active-set
     // flip is attempted, which is NOT a strict primal-feasibility
@@ -283,6 +318,18 @@ QpSolution QpBuilder::solve(const casadi::DM &x_k, const casadi::DM &u_prev,
                                lambda_hi_over_bound <= lambda_tol &&
                                lambda_lo >= -lambda_tol;
 
+    constexpr double kTerminalEqualityTolerance = 1e-4;
+    constexpr double kLambdaSumTolerance = 1e-6;
+    if (regular && (terminal_residual_max > kTerminalEqualityTolerance ||
+                    std::abs(lambda_sum - 1.0) > kLambdaSumTolerance)) {
+      std::ostringstream diag;
+      diag << "solver (" << solver_name
+           << ") returned a solution violating the terminal simplex equality. "
+           << "normalized residual max=" << terminal_residual_max
+           << "; lambda sum=" << lambda_sum;
+      throw std::runtime_error(diag.str());
+    }
+
     if (!within_bounds) {
       std::ostringstream diag;
       diag << "solver (" << solver_name << ") returned a ";
@@ -303,13 +350,11 @@ QpSolution QpBuilder::solve(const casadi::DM &x_k, const casadi::DM &u_prev,
     result.x_traj = x_traj;
     result.u_traj = u_traj;
     result.lambda = lambda;
-    result.terminal_slack = terminal_slack;
     result.success = true;
   } catch (const std::exception &e) {
     result.x_traj = x_warm;
     result.u_traj = u_warm;
     result.lambda = lambda_warm;
-    result.terminal_slack = casadi::DM::zeros(dynamics::kStateDim, 1);
     result.success = false;
     result.message = e.what();
   }

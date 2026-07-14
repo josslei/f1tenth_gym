@@ -41,10 +41,8 @@ struct LmpcConfig {
 
   // Safe-set neighbor count K (DESIGN.md SS2, pinned from upstream's
   // barc_lmpc.param.yaml num_ss_pts_per_lap): neighbors taken PER LAP. P
-  // (laps kept in the safe set) is not a separate field here -- it is
-  // simply how many laps are loaded into the SafeSet the controller was
-  // built with (1 for D^0 alone; grows only if add_lap() is called, not
-  // yet wired up for this first pass -- DESIGN.md SS8 step 8).
+  // (laps kept in the safe set) is not a separate field here: SafeSet starts
+  // with D^0, add_lap() grows it, and SafeSet::kMaxLaps caps it.
   casadi_int K = 32;
 
   // U = {u | u_l <= u <= u_u} (DESIGN.md SS3).
@@ -84,14 +82,12 @@ struct LmpcConfig {
   //   cost_to_go_weight * J^T lambda / scaling.j          (min-time pull)
   // + sum_t c_a*a_t^2 + c_delta*delta_t^2                 (control effort)
   // + sum_t c_d_a*da_t^2 + c_d_delta*ddelta_t^2           (control rate)
-  // + terminal_slack_weight
-  //     * || terminal_slack_state o slack_N ||^2          (safe-set anchor)
   // + ey_slack_l1 * sum sigma + ey_slack_l2 * sum sigma^2 (soft corridor)
   //
   // The RATIOS between these decide how aggressively the controller seeks
-  // time over shadowing the demonstrated data: raising cost_to_go_weight
-  // (or lowering the terminal anchor / rate weights) trades conservatism
-  // for speed. Caveat while SS5/SS6's error regression is unimplemented:
+  // time over control effort: raising cost_to_go_weight (or lowering the
+  // rate weights) trades conservatism for speed. Caveat while SS5/SS6's
+  // error regression is unimplemented:
   // the nominal model overestimates cornering grip above the demonstrated
   // speeds, so aggressive settings buy sprints that end in real slides,
   // not lap time.
@@ -99,7 +95,7 @@ struct LmpcConfig {
   // Multiplier on the normalized terminal cost-to-go J^T lambda -- the
   // ONLY term that rewards finishing sooner (the per-stage min-time
   // indicator is constant over the horizon and omitted). At 1.0 the
-  // normalized J gradient is small against the effort/anchor terms below,
+  // normalized J gradient is small against the effort terms below,
   // which reads as "not actually seeking the fastest path".
   double cost_to_go_weight = 1.0;
 
@@ -108,18 +104,6 @@ struct LmpcConfig {
   double c_delta = 0.01;
   double c_d_a = 0.1;
   double c_d_delta = 0.1;
-
-  // Penalty on normalized terminal safe-set mismatch. Dynamic-state mismatch
-  // is penalized less than epsi/s/ey mismatch (per-state weights below).
-  double terminal_slack_weight = 100.0;
-
-  // Per-state weights inside the terminal-slack norm, StateIndex order
-  // [vx, vy, omega, epsi, s, ey]. With a 2-point simplex the demonstrated
-  // manifold is locally a line segment, so this soft anchor is ALSO the
-  // exploration knob: the ey/epsi entries decide how far off the
-  // demonstrated line the terminal may drift (corner-cutting), the vx
-  // entry how far past demonstrated speed it may aim.
-  std::vector<double> terminal_slack_state = {1.0, 0.25, 0.25, 4.0, 4.0, 4.0};
 
   // Exact-plus-quadratic penalty on the per-stage ey corridor slack
   // (QpBuilder softens the ey box with a >= 0 slack per stage). A HARD ey

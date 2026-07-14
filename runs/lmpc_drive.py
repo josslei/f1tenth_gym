@@ -26,6 +26,7 @@ import numpy as np
 
 import f110_gym  # noqa: F401 - registers f110-v0
 from controllers.controller_base import VehicleState
+from controllers.lmpc.lap_data import LapSample, build_lap_arrays
 from controllers.lmpc.lmpc import LMPCController
 from f110_gym.viewer import F110Viewer
 from utils.waypoint_view import (
@@ -58,9 +59,8 @@ MAX_ITERATIONS = 10
 # Cost-term weight overrides, applied onto LmpcConfig by field name --
 # controllers/lmpc/include/lmpc_config.hpp spells out the objective each
 # weight scales. The RATIOS set how hard the controller chases lap time vs.
-# shadowing the demonstrated laps: raise "cost_to_go_weight" (min-time pull)
-# or lower "terminal_slack_weight"/"terminal_slack_state" entries (safe-set
-# anchor = the exploration leash) to be more aggressive. While DESIGN.md
+# control effort: raise "cost_to_go_weight" (min-time pull) or lower the
+# control/rate weights to be more aggressive. While DESIGN.md
 # SS5/SS6's error regression is unimplemented, aggressive settings buy
 # sprints that end in real slides, not lap time -- tune in small steps.
 # cost_to_go_weight = 5.0 was measured (2026-07-14, headless) to iterate
@@ -162,34 +162,6 @@ def raw_steer_and_speed(f110_env: Any, ego_idx: int) -> tuple[float, float]:
     return float(raw_state[2]), float(raw_state[3])
 
 
-def finalize_lap(
-    samples: list[tuple[np.ndarray, float, float]], dt: float
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Build LMPCController.add_lap arrays from one lap's recorded samples.
-
-    samples holds (native_state, actual_delta, raw_speed) per control step,
-    all three sampled BEFORE stepping -- so the last sample is the state one
-    step short of the crossing and gets no control, exactly the convention
-    scripts/lmpc_collect_seed_lap.py::write_seed_lap_csv pins for D^0
-    (T = len(samples) - 1 transitions; J_k = T - k).
-
-    Both control columns are REALIZED plant values, not commanded ones
-    (raw_steer_and_speed's comment has the full rationale for why each
-    needs to be reconstructed from the raw state rather than read off the
-    action this loop sent to gym). Storing the commanded versions instead
-    corrupts exactly the newest, fastest-driving lap the very next
-    iteration's warm start is seeded from.
-    """
-    x_lap = np.column_stack([x for x, _, _ in samples])  # (6, T+1)
-    total_steps = len(samples) - 1
-    raw_speed = np.array([v for _, _, v in samples], dtype=np.float64)
-    accel = (raw_speed[1:] - raw_speed[:-1]) / dt
-    steer = np.array([delta for _, delta, _ in samples[:-1]], dtype=np.float64)
-    u_lap = np.vstack([accel, steer])  # (2, T)
-    cost_to_go = np.arange(total_steps, -1, -1, dtype=np.float64)
-    return x_lap, u_lap, cost_to_go
-
-
 def main() -> None:
     env = gym.make("f110-v0", map=MAP, num_agents=1, timestep=SIM_TIMESTEP)
     f110_env: Any = env.unwrapped
@@ -224,8 +196,12 @@ def main() -> None:
     for iteration in range(MAX_ITERATIONS):
         obs, _info = env.reset(options={"poses": initial_pose})
         controller.reset()
-        samples: list[tuple[np.ndarray, float, float]] = []
         t = 0.0
+
+        state = obs_to_vehicle_state(obs)
+        controller.update(state, t)
+        actual_delta, raw_speed = raw_steer_and_speed(f110_env, ego_idx)
+        samples = [LapSample(controller.native_state.copy(), actual_delta, raw_speed)]
 
         viewer.update(obs)
         viewer.render()
@@ -235,8 +211,6 @@ def main() -> None:
         last_steer = 0.0
         fallback_steps = 0
         while not (lap_done or crashed or viewer.closed):
-            state = obs_to_vehicle_state(obs)
-            controller.update(state, t)
             try:
                 cmd = controller.control()
                 fallback_steps = 0
@@ -257,11 +231,6 @@ def main() -> None:
                 steer = last_steer
                 velocity = max(state.speed - FALLBACK_BRAKE_DELTA_V, 0.0)
             last_steer = steer
-            # actual_delta/raw_speed, not the command above -- finalize_lap's
-            # comment has the rationale; sampled now (before stepping) to
-            # align 1:1 with the native_state also captured before this step.
-            actual_delta, raw_speed = raw_steer_and_speed(f110_env, ego_idx)
-            samples.append((controller.native_state.copy(), actual_delta, raw_speed))
             action = np.array([[steer, velocity]], dtype=np.float64)
 
             obs, _reward, _terminated, truncated, _info = env.step(action)
@@ -274,6 +243,13 @@ def main() -> None:
             # (the reset obs itself carries the previous episode's stale
             # count -- only ever read it here, post-step).
             crashed = bool(f110_env.collisions[ego_idx]) or truncated
+            if not crashed:
+                state = obs_to_vehicle_state(obs)
+                controller.update(state, t)
+                actual_delta, raw_speed = raw_steer_and_speed(f110_env, ego_idx)
+                samples.append(
+                    LapSample(controller.native_state.copy(), actual_delta, raw_speed)
+                )
             lap_done = not crashed and float(obs["lap_counts"][ego_idx]) >= 1.0
 
         if viewer.closed:
@@ -282,9 +258,11 @@ def main() -> None:
             print(f"iteration {iteration}: crashed after {t:.2f}s -- lap NOT added")
             break
 
-        controller.add_lap(*finalize_lap(samples, dt))
+        x_lap, u_lap, J_lap = build_lap_arrays(samples, dt)
+        controller.add_lap(x_lap, u_lap, J_lap)
         print(
-            f"iteration {iteration}: lap completed in {t:.2f}s ({len(samples)} steps)"
+            f"iteration {iteration}: lap completed in {t:.2f}s "
+            f"(transitions={u_lap.shape[1]}, states={x_lap.shape[1]})"
         )
 
     while not viewer.closed:
