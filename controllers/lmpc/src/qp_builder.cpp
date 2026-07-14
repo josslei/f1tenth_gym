@@ -13,7 +13,15 @@ QpBuilder::QpBuilder(casadi_int horizon_steps, casadi_int safe_set_size,
                      const QpBounds &bounds, const QpWeights &weights,
                      const QpScaling &scaling, const std::string &solver_name)
     : N(horizon_steps), q(safe_set_size), bounds(bounds),
-      solver_name(solver_name), scaling(scaling), opti("conic") {
+      solver_name(solver_name), scaling(scaling),
+      // "conic" mode restricts Opti to CasADi's conic-solver plugin
+      // interface (qrqp, osqp, ...); ipopt is registered under the
+      // separate nlpsol interface instead, so it needs plain (default,
+      // NLP-mode) Opti. Same MX graph either way -- this QP's affine
+      // dynamics/convex quadratic objective satisfy "conic" mode's extra
+      // structural requirements, but nothing about how the graph itself is
+      // built below depends on which mode constructed it.
+      opti(solver_name == "ipopt" ? casadi::Opti() : casadi::Opti("conic")) {
   using casadi::MX;
   using casadi::Slice;
   using dynamics::A;
@@ -138,26 +146,47 @@ QpBuilder::QpBuilder(casadi_int horizon_steps, casadi_int safe_set_size,
   // Every control step re-solves this same graph (class comment above), so
   // per-iteration solver logging would spam stdout every ~dt seconds in
   // closed-loop use -- silenced here rather than left to each caller.
-  //
-  // Passed as the SECOND (plugin_options) argument, not the third
-  // (solver_options): Opti::solver's third arg gets nested under a key
-  // named after the solver itself (OptiNode::solver in
-  // optistack_internal.cpp: solver_options_[solver_name] = solver_options)
-  // before being handed to casadi::conic() -- which this vendored CasADi
-  // version does not actually unpack for the qrqp plugin, producing
-  // "Unknown option: qrqp" (the literal nesting key itself rejected as an
-  // unrecognized option). Flat options in the second argument avoid that
-  // nesting entirely.
-  // error_on_fail=false: on a failed solve, qrqp otherwise dumps every input
-  // matrix to stdout. solve_limited() accepts iteration-limited results but
-  // still throws for statuses such as infeasibility; the try/catch below
-  // handles those while the post-solve checks reject malformed iterates.
-  opti.solver(solver_name, casadi::Dict{{"max_iter", 1000},
-                                        {"print_time", false},
-                                        {"print_iter", false},
-                                        {"print_header", false},
-                                        {"print_info", false},
-                                        {"error_on_fail", false}});
+  if (solver_name == "ipopt") {
+    // Opti::solver's third arg is ALREADY auto-wrapped as
+    // {solver_name: third_arg} before being handed to casadi::nlpsol()
+    // (OptiNode::solver in optistack_internal.cpp: solver_options_[
+    // solver_name] = solver_options) -- so ipopt's OWN options
+    // (max_iter, print_level, ...) go FLAT here, not nested under an
+    // extra "ipopt" key of our own: that would double-nest into
+    // {"ipopt": {"ipopt": {...}}}, which is exactly what produced
+    // "No such IPOPT option: ipopt" (IpoptInterface tried to set a
+    // literal option NAMED "ipopt" from the surviving outer key) when
+    // first tried (2026-07-14). print_time is a generic nlpsol-level
+    // option, so it goes in the SECOND (plugin_options) arg instead.
+    // sb="yes" silences ipopt's startup banner (no print_header/
+    // print_info equivalent for it). error_on_fail is qrqp/conic-only;
+    // ipopt failures are instead read off OptiSol the same way
+    // solve_limited() already handles a qrqp non-convergence.
+    opti.solver(
+        solver_name, casadi::Dict{{"print_time", false}},
+        casadi::Dict{{"max_iter", 2000}, {"print_level", 0}, {"sb", "yes"}});
+  } else {
+    // Passed as the SECOND (plugin_options) argument, not the third
+    // (solver_options): Opti::solver's third arg gets nested under a key
+    // named after the solver itself (OptiNode::solver in
+    // optistack_internal.cpp: solver_options_[solver_name] = solver_options)
+    // before being handed to casadi::conic() -- which this vendored CasADi
+    // version does not actually unpack for the qrqp plugin, producing
+    // "Unknown option: qrqp" (the literal nesting key itself rejected as an
+    // unrecognized option). Flat options in the second argument avoid that
+    // nesting entirely.
+    // error_on_fail=false: on a failed solve, qrqp otherwise dumps every
+    // input matrix to stdout. solve_limited() accepts iteration-limited
+    // results but still throws for statuses such as infeasibility; the
+    // try/catch below handles those while the post-solve checks reject
+    // malformed iterates.
+    opti.solver(solver_name, casadi::Dict{{"max_iter", 2000},
+                                          {"print_time", false},
+                                          {"print_iter", false},
+                                          {"print_header", false},
+                                          {"print_info", false},
+                                          {"error_on_fail", false}});
+  }
 }
 
 QpSolution QpBuilder::solve(const casadi::DM &x_k, const casadi::DM &u_prev,

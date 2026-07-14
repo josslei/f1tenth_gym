@@ -42,7 +42,7 @@ MAP = "maps/custom/f110_gym_10/f110_gym_map"
 # about what s means).
 CENTERLINE_CSV = "maps/custom/f110_gym_10/f110_gym_centerline.csv"
 SEED_LAP_CSV = "outputs/lmpc_seed_laps/f110_gym_10_seed_lap.csv"
-HORIZON_STEPS = 30
+HORIZON_STEPS = 40
 # gym/f110_gym/envs/f110_env.py's F110Env defaults timestep to 0.01 unless a
 # caller overrides it -- explicit here rather than editing that vendored
 # default (CLAUDE.md: treat gym/ as a black box). 0.025 is the value

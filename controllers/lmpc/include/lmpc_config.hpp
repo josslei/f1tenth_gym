@@ -153,8 +153,18 @@ struct LmpcConfig {
   double scale_x_omega = 2.0;
   double scale_x_epsi = 0.5;
 
-  // DESIGN.md SS7: qrqp for correctness-first bring-up.
-  std::string solver_name = "qrqp";
+  // DESIGN.md SS7 originally pinned qrqp for correctness-first bring-up;
+  // switched to ipopt (2026-07-14) once the native build could actually
+  // provide it -- CasADi's own superbuild git-clones and compiles IPOPT
+  // (jgillis/Ipopt-1, upstream's easier-to-build fork) plus its MUMPS
+  // linear-solver dependency from source (controllers/lmpc/CMakeLists.txt:
+  // WITH_IPOPT/WITH_BUILD_IPOPT/WITH_BUILD_REQUIRED, LMPC_PLUGIN_TARGETS).
+  // qrqp remains fully supported (QpBuilder branches on solver_name) and
+  // is a valid config_overrides={"solver_name": "qrqp"} override; measured
+  // (2026-07-14, this vehicle/horizon) steady-state per-solve time is
+  // comparable between the two (~19ms ipopt vs ~22ms qrqp against a 25ms
+  // dt budget), so this is not a performance-motivated default.
+  std::string solver_name = "ipopt";
 };
 
 } // namespace lmpc

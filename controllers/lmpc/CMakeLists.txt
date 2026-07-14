@@ -30,9 +30,16 @@ find_package(casadi CONFIG QUIET
 if(NOT TARGET casadi AND NOT TARGET casadi::casadi)
   # DESIGN.md SS7: qrqp is CasADi's own built-in dense active-set QP
   # solver -- part of casadi core, no external plugin/build flag needed.
-  set(WITH_IPOPT OFF CACHE BOOL "Do not require IPOPT for the initial LMPC build" FORCE)
-  set(WITH_BUILD_REQUIRED OFF CACHE BOOL "Do not build Fortran-based CasADi dependencies" FORCE)
-  set(WITH_BUILD_IPOPT OFF CACHE BOOL "Do not build IPOPT from source" FORCE)
+  # ipopt is ALSO available (LmpcConfig::solver_name, 2026-07-14): CasADi's
+  # own superbuild git-clones and builds IPOPT (jgillis/Ipopt-1, upstream's
+  # own easier-to-build fork) plus its MUMPS linear-solver dependency from
+  # source via ExternalProject_Add -- no system package manager install
+  # needed. WITH_BUILD_REQUIRED covers whichever of IPOPT's OWN transitive
+  # deps (LAPACK, METIS) aren't already found on this system, building
+  # those from source too rather than requiring them pre-installed.
+  set(WITH_IPOPT ON CACHE BOOL "Enable the IPOPT NLP solver interface" FORCE)
+  set(WITH_BUILD_REQUIRED ON CACHE BOOL "Build IPOPT's Fortran-based transitive deps (LAPACK/METIS) from source if not found on the system" FORCE)
+  set(WITH_BUILD_IPOPT ON CACHE BOOL "Build IPOPT itself from source (git clone + configure/make, no brew/apt install)" FORCE)
   set(WITH_PYTHON OFF CACHE BOOL "Do not build CasADi's own Python frontend here" FORCE)
   set(WITH_EXAMPLES OFF CACHE BOOL "Do not build CasADi examples here" FORCE)
   set(WITH_DOC OFF CACHE BOOL "Do not build CasADi docs here" FORCE)
@@ -104,8 +111,13 @@ set_target_properties(lmpc_native PROPERTIES
 # libcasadi itself -- and add_subdirectory(casadi ... EXCLUDE_FROM_ALL)
 # means plugin targets aren't built by a plain `cmake --build .` unless
 # something depends on them. DESIGN.md SS7 pins qrqp for correctness-first
-# bring-up, so it's the one plugin required here.
-set(LMPC_PLUGIN_TARGETS casadi_conic_qrqp)
+# bring-up; casadi_nlpsol_ipopt is the same story for LmpcConfig::
+# solver_name = "ipopt" (2026-07-14) -- without it here, `cmake --build .`
+# silently skips both the ipopt-external ExternalProject_Add (git clone +
+# build IPOPT/MUMPS from source) and casadi's own ipopt interface plugin,
+# even with WITH_IPOPT/WITH_BUILD_IPOPT ON above, since nothing else in
+# this project's own (non-EXCLUDE_FROM_ALL) build graph depends on it.
+set(LMPC_PLUGIN_TARGETS casadi_conic_qrqp casadi_nlpsol_ipopt)
 foreach(plugin_target ${LMPC_PLUGIN_TARGETS})
   add_dependencies(lmpc_native ${plugin_target})
 endforeach()
