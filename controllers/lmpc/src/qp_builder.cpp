@@ -142,8 +142,8 @@ QpBuilder::QpBuilder(casadi_int horizon_steps, casadi_int safe_set_size,
     const MX u_prev_t =
         (t == 0) ? u_prev_param / this->scaling.u : MX(U(Slice(), t - 1));
     const MX du_t = u_t - u_prev_t;
-    cost += MX::dot(MX(weights.control), MX::sq(u_t)) +
-            MX::dot(MX(weights.control_rate), MX::sq(du_t));
+    cost += weights.control * MX::sumsqr(u_t) +
+            weights.control_rate * MX::sumsqr(du_t);
   }
   // Soft-ey penalty (constraint block above): l1 keeps it exact, l2 keeps
   // the recovery direction well-scaled once a violation does occur.

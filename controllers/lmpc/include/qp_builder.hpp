@@ -26,15 +26,17 @@ struct QpBounds {
   double ddelta_max;
 };
 
-// Diagonal cost weights in ControlIndex order, applied to the scaled U
-// decision variables. This keeps target-velocity and steering penalties
-// comparable despite their different physical units.
+// Scalar cost weights, applied uniformly to the scaled U decision
+// variable (the paper's own c_u/c_d_u -- a plain L2 norm on the control
+// vector, not a per-component-weighted Q-norm/R matrix; LmpcConfig::c_u's
+// comment has the full rationale, including why a per-component weight
+// isn't needed once U is already normalized to O(1)).
 struct QpWeights {
   // Multiplier on the normalized terminal cost-to-go J^T lambda
   // (LmpcConfig::cost_to_go_weight's comment).
   double cost_to_go;
-  casadi::DM control;
-  casadi::DM control_rate;
+  double control;
+  double control_rate;
   // Exact-plus-quadratic penalty on the per-stage ey slack (LmpcConfig::
   // ey_slack_l1's comment has the rationale for softening ey at all).
   double ey_slack_l1;

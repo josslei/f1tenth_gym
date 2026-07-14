@@ -80,9 +80,19 @@ struct LmpcConfig {
   // The FHOCP's objective is (all in scaled/normalized coordinates):
   //
   //   cost_to_go_weight * J^T lambda / scaling.j          (min-time pull)
-  // + sum_t c_a*a_t^2 + c_delta*delta_t^2                 (control effort)
-  // + sum_t c_d_a*da_t^2 + c_d_delta*ddelta_t^2           (control rate)
+  // + sum_t c_u * ||u_t||^2                               (control effort)
+  // + sum_t c_d_u * ||u_t - u_{t-1}||^2                   (control rate)
   // + ey_slack_l1 * sum sigma + ey_slack_l2 * sum sigma^2 (soft corridor)
+  //
+  // c_u/c_d_u are SCALAR (the paper's own formulation: a plain scaled L2
+  // norm on the control vector, not a per-component-weighted Q-norm/R
+  // matrix). An earlier version of this code gave acceleration and
+  // steering separate weights (c_a/c_delta, c_d_a/c_d_delta), reasoning
+  // that they needed independent weighting to stay comparable despite
+  // different physical units -- but that's already handled by
+  // QpScaling::u (the control vector is normalized to O(1) BEFORE this
+  // cost is applied), so the extra per-component weights were a redundant,
+  // paper-incorrect second layer of weighting, not a real requirement.
   //
   // The RATIOS between these decide how aggressively the controller seeks
   // time over control effort: raising cost_to_go_weight (or lowering the
@@ -99,11 +109,10 @@ struct LmpcConfig {
   // which reads as "not actually seeking the fastest path".
   double cost_to_go_weight = 1.0;
 
-  // Per-control effort/rate weights applied in scaled control coordinates.
-  double c_a = 0.0;
-  double c_delta = 0.01;
-  double c_d_a = 0.1;
-  double c_d_delta = 0.1;
+  // Control effort/rate weights, applied uniformly to the scaled control
+  // vector (see the block comment above -- NOT per-component).
+  double c_u = 0.01;
+  double c_d_u = 0.1;
 
   // Exact-plus-quadratic penalty on the per-stage ey corridor slack
   // (QpBuilder softens the ey box with a >= 0 slack per stage). A HARD ey

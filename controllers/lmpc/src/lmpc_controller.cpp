@@ -34,9 +34,7 @@ void LMPCController::rebuild_qp_builder() {
       config.horizon_steps, terminal_set_size(),
       QpBounds{config.a_min, config.a_max, config.delta_min, config.delta_max,
                config.ey_max, config.sv_max * config.dt},
-      QpWeights{config.cost_to_go_weight,
-                casadi::DM({config.c_a, config.c_delta}),
-                casadi::DM({config.c_d_a, config.c_d_delta}),
+      QpWeights{config.cost_to_go_weight, config.c_u, config.c_d_u,
                 config.ey_slack_l1, config.ey_slack_l2},
       QpScaling{
           casadi::DM({config.v_max, config.scale_x_vy, config.scale_x_omega,

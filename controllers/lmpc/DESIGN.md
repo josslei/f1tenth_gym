@@ -98,8 +98,8 @@ At time `k` of lap `j`, using `D^{j-1}`:
 ```
 J_k^j(x_k, u_{k-1}, z̄_k; D^{j-1}) =
 
-  min_{x,u,λ} Σ_{t=0}^{N-1} [ 1_F(x_t) + u_t^T R u_t
-                                  + (u_t-u_{t-1})^T Rd (u_t-u_{t-1}) ]
+  min_{x,u,λ} Σ_{t=0}^{N-1} [ 1_F(x_t) + c_u ||u_t||^2
+                                  + c_d_u ||u_t-u_{t-1}||^2 ]
                    + (J_N^{j-1}/J_scale)^T λ
 
   s.t.  x_0 = x_k,  u_{-1} = u_{k-1}
@@ -123,7 +123,7 @@ Decision vector: `w = (x_0,...,x_N, u_0,...,u_{N-1}, λ)`,
 `n=6, m=2, q=KP`.
 
 ```
-Φ(w) = Σ [ 1_F(x_t) + u_t^T R u_t + (u_t-u_{t-1})^T Rd (u_t-u_{t-1}) ]
+Φ(w) = Σ [ 1_F(x_t) + c_u ||u_t||^2 + c_d_u ||u_t-u_{t-1}||^2 ]
        + (J/J_scale)^T λ
 
 g_eq(w) = 0:
@@ -150,8 +150,11 @@ the previous C++ port.
 **Command interface.** The QP solves `[a, delta]`, while Gym consumes target
 velocity and target steering angle. The Python wrapper inverts Gym's
 proportional velocity controller so the requested setpoint produces `a` before
-Gym applies its acceleration constraints. `R` and `Rd` act on scaled controls
-so acceleration and steering remain comparable despite their different units.
+Gym applies its acceleration constraints. `c_u`/`c_d_u` are SCALAR (the
+paper's own formulation -- a plain L2 norm on the control vector, not a
+per-component-weighted `R`/`Rd` matrix): acceleration and steering are
+already comparable by the time this cost applies, since the control vector
+is normalized to O(1) by `QpScaling::u` before it's used anywhere.
 
 ## 5. Error dynamics regression (paper eq. 5–8) — pinned sparsity
 
@@ -515,7 +518,8 @@ failures.
 
 **Measured after the second pass:** iteration 0 completes the full lap
 (44.52s, 1781 steps) and grows the safe set. Iteration 1 launches faster
-but self-terminates mid-lap: with `c_a = 0`, a soft terminal anchor, and
+but self-terminates mid-lap: with a low control-effort weight (`c_u`,
+formerly a separate near-zero `c_a`), a soft terminal anchor, and
 J rewarding a further-along `x_N`, each solve rationally plans
 "sprint now, brake at horizon end" and the receding horizon re-defers the
 brake -- correct min-time behavior IF the model is right, but the

@@ -94,12 +94,11 @@ MAX_ITERATIONS = 10
 # horizon end") as CORRECT min-time behavior IF THE MODEL IS RIGHT -- the
 # actual defect is the uncorrected nominal model overestimating cornering
 # grip, which is what the (unimplemented) error-dynamics regression is
-# meant to fix. Adding a synthetic cost like C_A to discourage
-# acceleration papers over that, rather than fixing it -- MU below is the
-# more principled lever: derating the PLANNER's own friction assumption
-# (not gym's real plant) directly shrinks what the QP believes is
-# achievable, which is a reasonable proxy for what the regression would
-# learn.
+# meant to fix. Raising C_U to discourage acceleration papers over that,
+# rather than fixing it -- MU below is the more principled lever: derating
+# the PLANNER's own friction assumption (not gym's real plant) directly
+# shrinks what the QP believes is achievable, which is a reasonable proxy
+# for what the regression would learn.
 
 # Safe-set neighbor count K (DESIGN.md SS2) -- neighbors taken PER LAP.
 SAFE_SET_K = 32
@@ -116,7 +115,7 @@ SAFE_SET_K = 32
 # model predicts is available (GymDynamics's mu*C_Sf/mu*C_Sr terms), so
 # min-time solves stop planning cornering speeds the real tires can't
 # deliver -- see the block comment above for why this is preferred over
-# C_A.
+# raising C_U.
 MU = 1.0489
 
 # Control bounds: U = {u | u_l <= u <= u_u}.
@@ -147,11 +146,13 @@ EY_MAX = 0.25
 # time pull. The old cost_to_go_weight=5.0 value (git history) was swept
 # against f110_gym_10 specifically and does not carry over to this track.
 COST_TO_GO_WEIGHT = 1.0
-# Per-control effort/rate weights, in scaled control coordinates.
-C_A = 0.0
-C_DELTA = 0.01
-C_D_A = 0.1
-C_D_DELTA = 0.1
+# Control effort/rate weights, applied uniformly to the scaled control
+# vector (the paper's own c_u/c_d_u -- a plain L2 norm, not a
+# per-component-weighted Q-norm; lmpc_config.hpp's own comment has the
+# rationale for why a single scalar is correct here, not separate
+# accel/steering weights).
+C_U = 0.01
+C_D_U = 0.17
 
 # Soft ey-corridor slack penalty (exact L1 + quadratic L2 on violation).
 EY_SLACK_L1 = 10.0
@@ -180,10 +181,8 @@ CONFIG_OVERRIDES: dict[str, Any] = {
     "v_max": V_MAX,
     "ey_max": EY_MAX,
     "cost_to_go_weight": COST_TO_GO_WEIGHT,
-    "c_a": C_A,
-    "c_delta": C_DELTA,
-    "c_d_a": C_D_A,
-    "c_d_delta": C_D_DELTA,
+    "c_u": C_U,
+    "c_d_u": C_D_U,
     "ey_slack_l1": EY_SLACK_L1,
     "ey_slack_l2": EY_SLACK_L2,
     "scale_x_vy": SCALE_X_VY,
