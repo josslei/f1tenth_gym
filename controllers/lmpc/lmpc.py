@@ -111,8 +111,23 @@ class LMPCController(Controller):
         # controllers/lmpc/include/lmpc_config.hpp). LmpcConfig is a
         # non-dynamic pybind11 class, so a mistyped name raises
         # AttributeError instead of being silently ignored.
+        #
+        # "vehicle_params" is special-cased to accept a dict of VehicleParams
+        # field names (mu, C_Sf, C_Sr, lf, lr, h, m, I) rather than requiring
+        # a whole VehicleParams object -- e.g. {"mu": 0.6} to plan against a
+        # DERATED friction coefficient without touching gym's own plant
+        # params. This is the principled way to compensate for the
+        # nominal model overestimating cornering grip (DESIGN.md's SS5/SS6
+        # discussion) until the error-dynamics regression is implemented:
+        # it directly shrinks what the QP believes is achievable, rather
+        # than adding a synthetic control-effort cost (c_a) that isn't part
+        # of the paper's formulation.
         for name, value in (config_overrides or {}).items():
-            setattr(config, name, value)
+            if name == "vehicle_params" and isinstance(value, dict):
+                for vp_name, vp_value in value.items():
+                    setattr(config.vehicle_params, vp_name, vp_value)
+            else:
+                setattr(config, name, value)
         self.config = config
         self._native = native.NativeLMPCController(config)
         # Same centerline convention as

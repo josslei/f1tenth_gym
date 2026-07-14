@@ -37,7 +37,9 @@ def _to_image_coords(points, x_min, y_min, resolution, height_px):
     return list(zip(px, py))
 
 
-def _rasterize_track(centerline, width_right, width_left, yaml_path, resolution):
+def _rasterize_track(
+    centerline, width_right, width_left, yaml_path, resolution, wall_thickness=1.0
+):
     """Create a single-channel PNG where only the track boundaries are black."""
     pts = np.vstack([centerline, centerline[:1]])
     wr = np.append(width_right, width_right[0])
@@ -60,7 +62,12 @@ def _rasterize_track(centerline, width_right, width_left, yaml_path, resolution)
     img = Image.new("L", (width_px, height_px), 255)
     draw = ImageDraw.Draw(img)
 
-    line_width = max(1, int(np.ceil(1.0 / resolution)))
+    # Wall thickness in WORLD units, not pixels -- the default (1.0m)
+    # reasonably models a real wall on F1TENTH-scale tracks (width O(2-9)m),
+    # but at a narrower track scale (e.g. BARC's ~1.1m total width) it would
+    # consume the entire drivable corridor, so it's a parameter, not a
+    # hardcoded constant.
+    line_width = max(1, int(np.ceil(wall_thickness / resolution)))
     left_pts = _to_image_coords(left, x_min, y_min, resolution, height_px)
     right_pts = _to_image_coords(right, x_min, y_min, resolution, height_px)
     draw.line(left_pts, fill=0, width=line_width)
@@ -94,6 +101,12 @@ def main():
         default=0.05,
         help="Meters per pixel (default: 0.05)",
     )
+    parser.add_argument(
+        "--wall-thickness",
+        type=float,
+        default=1.0,
+        help="Wall thickness in meters (default: 1.0)",
+    )
     args = parser.parse_args()
 
     raw = np.loadtxt(args.track, delimiter=",", skiprows=1, dtype=np.float64)
@@ -114,6 +127,7 @@ def main():
         width_left,
         yaml_path,
         args.resolution,
+        args.wall_thickness,
     )
     print(f"Map written to {yaml_path} and {yaml_path.with_suffix('.png')}")
 

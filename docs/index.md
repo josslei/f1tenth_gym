@@ -5,6 +5,7 @@
 - `cpp-backend.md`: native planner backend build, runtime, and debugging.
 - `rollout_kernel.md`: native rollout kernel design and parity notes.
 - `realtime_visualization.md`: viewer and rendering usage.
+- `lmpc_drive.md`: how to build and run the native LMPC controller demo.
 - `coding_style.md`: project coding conventions.
 - `google_python_style_guide.md`: Python style reference.
 

@@ -36,14 +36,14 @@ from controllers.pure_pursuit import DynamicLookaheadDistance, PurePursuit
 from utils.waypoint_utils import cumulative_arc_lengths, nearest_waypoint_index
 from utils.waypoint_view import initial_pose_from_waypoints
 
-MAP = "maps/custom/f110_gym_10/f110_gym_map"
+MAP = "maps/custom/barc_oval/barc_oval_map"
 # Raw geometric centerline (scripts/generate_centerline.py's output format:
 # x_m, y_m, w_tr_right_m, w_tr_left_m -- no heading/speed columns), not a
 # mintime-optimized raceline. This matches the paper's own D^0 recipe
 # (Section V-C / III: "closed-loop trajectories from a simple low-speed
 # center-line tracking controller"), not an optimized trajectory.
-WAYPOINTS_CSV = "maps/custom/f110_gym_10/f110_gym_centerline.csv"
-OUTPUT_CSV = "outputs/lmpc_seed_laps/f110_gym_10_seed_lap.csv"
+WAYPOINTS_CSV = "maps/custom/barc_oval/barc_oval_centerline.csv"
+OUTPUT_CSV = "outputs/lmpc_seed_laps/barc_oval_seed_lap.csv"
 
 # gym/f110_gym/envs/f110_env.py's F110Env defaults timestep to 0.01 unless a
 # caller overrides it -- explicit here rather than editing that vendored
@@ -54,21 +54,37 @@ OUTPUT_CSV = "outputs/lmpc_seed_laps/f110_gym_10_seed_lap.csv"
 # at.
 SIM_TIMESTEP = 0.025
 
-# Raw centerline CSVs have no speed column -- constant, comfortably above
-# LOW_SPEED_STEER_RESTORE_AT so cruise never re-enters the launch guard's
-# ramp band, and conservative for this track's tight ~1.5m half-width.
-SEED_LAP_SPEED = 3.5
+# NOT a conservative "low speed" pass here, unlike f110_gym_10's 3.5 m/s:
+# this track (converted from ref/Racing-LMPC-ROS2's BARC oval) has a median
+# turn radius of ~1.57m and a minimum of ~0.97m (vs f110_gym_10's ~41.7m
+# median) -- essentially continuous tight cornering, not occasional
+# hairpins. Measured directly (2026-07-14): gym's dynamic single-track
+# model diverges (raw sim omega -> 1e29+ within ~1s) at v~1.0 m/s on this
+# track's curvature REGARDLESS of steering magnitude or smoothness (tested
+# with both Pure Pursuit and open-loop curvature-derived steering) -- this
+# is gym's own low-speed dynamic-branch instability (see the guard below),
+# not a controller tuning problem, and this track's tightness keeps the
+# vehicle inside that band far more persistently than f110_gym_10 ever
+# does. 3.0 m/s sits just above the instability band and just below the
+# grip limit at the tightest corner (mu*g*r ~= 3.16 m/s at r=0.97m) --
+# verified to complete a full lap cleanly (omega stayed under ~3 rad/s
+# throughout) but with a much thinner safety margin than f110_gym_10's 3.5.
+SEED_LAP_SPEED = 3.0
 
 ZOOM = 1.0
 WINDOW_WIDTH = 1000
 WINDOW_HEIGHT = 800
 
-# Pure Pursuit lookahead policy -- same values as runs/waypoint_drive.py's
-# own DynamicLookaheadDistance, already validated there rather than guessed
-# fresh here. At a near-constant SEED_LAP_SPEED (3.5 m/s), this settles to
-# very close to MAX_LOOKAHEAD most of the lap.
-MIN_LOOKAHEAD = 2.0
-MAX_LOOKAHEAD = 4.0
+# Pure Pursuit lookahead policy, scaled down from f110_gym_10's (2.0/4.0/8.0)
+# to match this track's much smaller scale (~17m lap vs ~164m): a lookahead
+# comparable to or larger than the track's own turn radius (~1-1.6m) made
+# Pure Pursuit's geometric curvature demand ill-conditioned -- measured
+# steering commands over 1.0 rad (>2x delta_max) from a 0.3m lookahead on a
+# ~1m-radius corner, which is what first triggered the divergence above,
+# not the low speed by itself. 0.6-0.9m (roughly half the median turn
+# radius) keeps commanded steering within the physical range naturally.
+MIN_LOOKAHEAD = 0.6
+MAX_LOOKAHEAD = 0.9
 LOOKAHEAD_RATIO = 8.0
 
 # F110 Gym's dynamic single-track model (gym/f110_gym/envs/dynamic_models.py,
@@ -94,13 +110,13 @@ class LaunchSteeringGuard:
     """Suppress steering only through the one-time launch-from-rest crossing.
 
     The gym's divergence risk (see module docstring) is specific to the
-    discrete kinematic/dynamic model switch at |v| < 0.5 m/s. This track's
-    minimum cornering speed (~2.5 m/s, from the raceline's curvature-limited
-    speed profile) never revisits that switch after launch, so the guard
-    latches open permanently once the restore speed is first reached instead
-    of re-suppressing every time speed dips during normal cornering later in
-    the lap -- a per-step clamp would throttle steering authority through
-    every tight corner on this track, not just the initial launch.
+    discrete kinematic/dynamic model switch at |v| < 0.5 m/s. SEED_LAP_SPEED
+    is constant (the paper's own D^0 recipe), so once Pure Pursuit's P
+    controller settles onto it after launch, speed never dips back into the
+    danger zone -- measured directly (2026-07-14, this track): speed reaches
+    ~3.0 m/s within ~1.5s of launch and stays there for the rest of the lap,
+    even through the tightest corner. The guard therefore only needs to
+    latch open once, not re-suppress every time speed dips during cornering.
     """
 
     def __init__(self) -> None:

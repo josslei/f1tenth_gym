@@ -1,0 +1,9 @@
+free_thresh: 0.196
+image: barc_oval_map.png
+negate: 0
+occupied_thresh: 0.45
+origin:
+- -5.466536756451777
+- -3.3790008665244375
+- 0.0
+resolution: 0.02

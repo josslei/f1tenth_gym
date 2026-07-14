@@ -1,4 +1,4 @@
-"""Drive the f110_gym_10 map with the native LMPC controller.
+"""Drive the barc_oval map with the native LMPC controller.
 
 Mirrors runs/waypoint_drive.py's shape (env/viewer setup, obs->state->cmd
 loop) but for controllers.lmpc.LMPCController instead of Pure
@@ -46,14 +46,18 @@ from utils.waypoint_view import (
     initial_pose_from_waypoints,
 )
 
-MAP = "maps/custom/f110_gym_10/f110_gym_map"
+MAP = "maps/custom/barc_oval/barc_oval_map"
 # Raw geometric centerline, not a mintime raceline -- must be the SAME file
 # the seed lap below was recorded against (controllers/lmpc/DESIGN.md SS1:
 # the native controller's own s/ey/epsi are meaningless if the two disagree
-# about what s means).
-CENTERLINE_CSV = "maps/custom/f110_gym_10/f110_gym_centerline.csv"
-SEED_LAP_CSV = "outputs/lmpc_seed_laps/f110_gym_10_seed_lap.csv"
-HORIZON_STEPS = 40
+# about what s means). Converted from ref/Racing-LMPC-ROS2's own BARC oval
+# (the track their actual LMPC demo drives, not just their tracking-MPC
+# demos) -- a much smaller, tighter track than f110_gym_10 (~17m lap vs
+# ~164m, median turn radius ~1.57m vs ~41.7m). scripts/lmpc_collect_seed_lap.py
+# has the full rationale for this track's speed/lookahead tuning.
+CENTERLINE_CSV = "maps/custom/barc_oval/barc_oval_centerline.csv"
+SEED_LAP_CSV = "outputs/lmpc_seed_laps/barc_oval_seed_lap.csv"
+HORIZON_STEPS = 30
 # gym/f110_gym/envs/f110_env.py's F110Env defaults timestep to 0.01 unless a
 # caller overrides it -- explicit here rather than editing that vendored
 # default (CLAUDE.md: treat gym/ as a black box). 0.025 is the value
@@ -66,24 +70,127 @@ SIM_TIMESTEP = 0.025
 # lap grows the safe set, so later iterations should be at least as fast as
 # earlier ones (the paper's core property).
 MAX_ITERATIONS = 10
-# Cost-term weight overrides, applied onto LmpcConfig by field name --
-# controllers/lmpc/include/lmpc_config.hpp spells out the objective each
-# weight scales. The RATIOS set how hard the controller chases lap time vs.
-# control effort: raise "cost_to_go_weight" (min-time pull) or lower the
-# control/rate weights to be more aggressive. While DESIGN.md
-# SS5/SS6's error regression is unimplemented, aggressive settings buy
-# sprints that end in real slides, not lap time -- tune in small steps.
-# cost_to_go_weight = 5.0 was measured (2026-07-14, headless) to iterate
-# faster (44.52s -> 40.90s -> 39.15s) before the unmodeled grip limit ends
-# iteration 2 -- but that sweep was run against a nominal model with a
-# curvature bug (understated by 2x, and hardcoded to 0 at the start/finish
-# seam), a missing -omega term in beta_dot, an Euler/RK4 discretization
-# mismatch against the plant, and a stage-0 steering-rate anchor pinned to
-# the last COMMAND instead of the plant's actual angle -- all fixed
-# 2026-07-14 (recom.md). 5.0 was tuned to compensate for exactly those
-# errors' extra optimism, so it is not validated against the corrected
-# model yet -- re-sweep before trusting it as more than a starting point.
-CONFIG_OVERRIDES: dict[str, Any] = {"cost_to_go_weight": 5.0}
+# ---------------------------------------------------------------------
+# LmpcConfig overrides. Every constant below maps 1:1 to a
+# controllers/lmpc/include/lmpc_config.hpp field (see that file for the
+# exact objective/constraint each one scales) and is applied via
+# CONFIG_OVERRIDES at the bottom of this section -- exposed individually
+# here, rather than left to LmpcConfig's own C++ defaults, so tuning this
+# (or any other) track doesn't require editing C++ or guessing field
+# names blind. Values below match LmpcConfig's own defaults except where
+# a comment says otherwise for this track.
+#
+# This track's safe operating window is unusually narrow (measured
+# 2026-07-14, barc_oval): below ~2.6-3.0 m/s gym's own dynamic
+# single-track model diverges (documented plant defect, see
+# LOW_SPEED_STEER_ZERO_BELOW/RESTORE_AT below), above ~3.16 m/s the
+# tightest corner (min radius ~0.97m) exceeds available grip -- both ends
+# fail fast (~2s). Traced directly: with every weight below at its
+# LmpcConfig default, the min-time pull accelerated the car to 6.3 m/s --
+# 2x the seed lap's 3.0 m/s and 2x this track's grip ceiling -- and it
+# crashed into the wall at 2.0s (confirmed a real collision, not a solver
+# failure: the QP solved successfully every step). DESIGN.md's SS5/SS6
+# discussion already diagnoses this exact pattern ("sprint now, brake at
+# horizon end") as CORRECT min-time behavior IF THE MODEL IS RIGHT -- the
+# actual defect is the uncorrected nominal model overestimating cornering
+# grip, which is what the (unimplemented) error-dynamics regression is
+# meant to fix. Adding a synthetic cost like C_A to discourage
+# acceleration papers over that, rather than fixing it -- MU below is the
+# more principled lever: derating the PLANNER's own friction assumption
+# (not gym's real plant) directly shrinks what the QP believes is
+# achievable, which is a reasonable proxy for what the regression would
+# learn.
+
+# Safe-set neighbor count K (DESIGN.md SS2) -- neighbors taken PER LAP.
+SAFE_SET_K = 32
+
+# Vehicle physical parameters used ONLY by the LMPC's own nominal
+# planning model (dynamics/gym_dynamics.hpp), applied via the
+# "vehicle_params" dict special-case in LMPCController.__init__ -- NOT
+# gym's real simulator params, which stay at DEFAULT_PARAMS regardless
+# (the plant should model the actual car; only the planner's belief about
+# it is being derated here). mu defaults to 1.0489, matching gym's own
+# DEFAULT_PARAMS["mu"] exactly -- i.e. today the planner and the plant
+# agree on friction. Lowering MU makes the planner conservative relative
+# to the real car: it directly reduces the lateral tire force the nominal
+# model predicts is available (GymDynamics's mu*C_Sf/mu*C_Sr terms), so
+# min-time solves stop planning cornering speeds the real tires can't
+# deliver -- see the block comment above for why this is preferred over
+# C_A.
+MU = 1.0489
+
+# Control bounds: U = {u | u_l <= u <= u_u}.
+A_MIN = -9.51
+A_MAX = 9.51
+DELTA_MIN = -0.4189
+DELTA_MAX = 0.4189
+
+# Gym's steering-rate actuator limit (rad/s) -- per-stage
+# |delta_t - delta_{t-1}| <= SV_MAX*dt in the FHOCP.
+SV_MAX = 3.2
+
+# Gym velocity limits used when converting solved acceleration to the
+# public velocity-setpoint action and when scaling vx.
+V_MIN = -5.0
+V_MAX = 20.0
+
+# ey corridor half-width (X = {x | -EY_MAX <= ey <= EY_MAX}). Overridden
+# down from LmpcConfig's default (1.0, sized for f110_gym_10's ~1.5m
+# centerline half-width): this track's centerline half-width is only
+# ~0.49m minimum, and the vehicle itself is 0.31m wide (f110_env
+# DEFAULT_PARAMS) -- 0.25 leaves ~0.08m clearance at the tightest point.
+EY_MAX = 0.25
+
+# ---- Cost-term weights (controllers/lmpc/include/lmpc_config.hpp spells
+# out the full objective each one scales) ----
+# Multiplier on the normalized terminal cost-to-go J^T lambda -- the min-
+# time pull. The old cost_to_go_weight=5.0 value (git history) was swept
+# against f110_gym_10 specifically and does not carry over to this track.
+COST_TO_GO_WEIGHT = 1.0
+# Per-control effort/rate weights, in scaled control coordinates.
+C_A = 0.0
+C_DELTA = 0.01
+C_D_A = 0.1
+C_D_DELTA = 0.1
+
+# Soft ey-corridor slack penalty (exact L1 + quadratic L2 on violation).
+EY_SLACK_L1 = 10.0
+EY_SLACK_L2 = 100.0
+
+# QP variable-conditioning scale for the vy/omega/epsi state entries
+# (StateIndex order) -- reused as-is from the prior BARC-validated port,
+# not derived from this track specifically (lmpc_config.hpp's own comment
+# has the rationale for why these three are the exception).
+SCALE_X_VY = 2.0
+SCALE_X_OMEGA = 2.0
+SCALE_X_EPSI = 0.5
+
+# "qrqp" or "ipopt" -- lmpc_config.hpp's own comment has the tradeoffs.
+SOLVER_NAME = "ipopt"
+
+CONFIG_OVERRIDES: dict[str, Any] = {
+    "K": SAFE_SET_K,
+    "vehicle_params": {"mu": MU},
+    "a_min": A_MIN,
+    "a_max": A_MAX,
+    "delta_min": DELTA_MIN,
+    "delta_max": DELTA_MAX,
+    "sv_max": SV_MAX,
+    "v_min": V_MIN,
+    "v_max": V_MAX,
+    "ey_max": EY_MAX,
+    "cost_to_go_weight": COST_TO_GO_WEIGHT,
+    "c_a": C_A,
+    "c_delta": C_DELTA,
+    "c_d_a": C_D_A,
+    "c_d_delta": C_D_DELTA,
+    "ey_slack_l1": EY_SLACK_L1,
+    "ey_slack_l2": EY_SLACK_L2,
+    "scale_x_vy": SCALE_X_VY,
+    "scale_x_omega": SCALE_X_OMEGA,
+    "scale_x_epsi": SCALE_X_EPSI,
+    "solver_name": SOLVER_NAME,
+}
 # Controlled-brake fallback for solve failures. Without the SS5/SS6 error
 # regression the nominal model overestimates cornering grip a little above
 # the demonstrated speeds, so the min-time QP's (individually rational)
