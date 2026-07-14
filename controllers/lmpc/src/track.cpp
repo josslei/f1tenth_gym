@@ -62,8 +62,25 @@ Track::Track(const std::string &centerline_csv_path) {
     s_[i] = s_[i - 1] + std::sqrt(dx * dx + dy * dy);
   }
 
+  // Per-segment length, PERIODIC (size n: seg_len[i] is the distance from
+  // point i to point (i+1)%n) -- seg_len[n-1] is the closing segment back to
+  // point 0, which s_ itself does not cover (s_ stays open/non-periodic).
+  // Needed below to place each segment heading at its true midpoint arc
+  // length, including the two segments that straddle the seam at i=0.
+  std::vector<double> seg_len(n);
+  for (std::size_t i = 0; i + 1 < n; ++i) {
+    seg_len[i] = s_[i + 1] - s_[i];
+  }
+  {
+    const double dx = xy[0].first - xy[n - 1].first;
+    const double dy = xy[0].second - xy[n - 1].second;
+    seg_len[n - 1] = std::sqrt(dx * dx + dy * dy);
+  }
+
   // Forward-difference heading at every sample, wrapping the last sample to
   // the first -- matches load_centerline_waypoints()'s use of np.roll.
+  // heading[i] is the tangent of segment i (points i -> (i+1)%n), so it sits
+  // at that segment's MIDPOINT arc length, not at s_[i] itself.
   std::vector<double> heading(n);
   for (std::size_t i = 0; i < n; ++i) {
     const std::size_t next = (i + 1) % n;
@@ -72,13 +89,22 @@ Track::Track(const std::string &centerline_csv_path) {
     heading[i] = std::atan2(dy, dx);
   }
 
-  // Discrete curvature at each sample using adjacent headings.
+  // Discrete curvature at each sample from the two segment headings
+  // straddling it (periodic in the heading/segment indices, even though s_
+  // itself is open): kappa_[i] = wrap(heading[i] - heading[i-1]) / ds, where
+  // ds is the arc length BETWEEN the two segments' midpoints, i.e.
+  // 0.5*(seg_len[i-1] + seg_len[i]) -- NOT seg_len[i-1] + seg_len[i] (a
+  // previous version used the full s_[i+1]-s_[i-1] span as the denominator,
+  // which is exactly 2x too large and understated every curvature by half;
+  // it also hardcoded kappa_[0] = 0 instead of differencing across the seam,
+  // flattening the start/finish straight's curvature). i=0 and i=n-1 wrap
+  // through the closing segment (heading[n-1]/seg_len[n-1]) so the seam gets
+  // a real finite difference like every other sample.
   kappa_.resize(n);
   for (std::size_t i = 0; i < n; ++i) {
-    const std::size_t prev = (i == 0) ? 0 : i - 1;
+    const std::size_t prev = (i == 0) ? (n - 1) : (i - 1);
     const double dtheta = wrap_angle(heading[i] - heading[prev]);
-    const double ds =
-        (i == 0) ? (s_[1] - s_[0]) : (s_[std::min(i + 1, n - 1)] - s_[prev]);
+    const double ds = 0.5 * (seg_len[prev] + seg_len[i]);
     kappa_[i] = (ds > 1e-9) ? (dtheta / ds) : 0.0;
   }
 }

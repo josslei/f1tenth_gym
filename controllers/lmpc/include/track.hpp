@@ -26,8 +26,12 @@ namespace lmpc {
 //    wraparound artifact) -- same as load_centerline_waypoints()'s use of
 //    np.roll(xy, -1).
 // Curvature is then the turn rate of that heading per unit arclength,
-// finite-differenced at each sample and linearly interpolated between
-// samples for an arbitrary query s.
+// finite-differenced at each sample against the arc-length SEPARATION
+// BETWEEN THE TWO ADJACENT SEGMENT MIDPOINTS (each segment's heading sits at
+// its own midpoint, not at a sample's own s) and linearly interpolated
+// between samples for an arbitrary query s. The finite difference wraps
+// through the closing segment at the seam (i=0/n-1), so kappa there is a
+// real difference, not a hardcoded 0.
 class Track {
 public:
   explicit Track(const std::string &centerline_csv_path);

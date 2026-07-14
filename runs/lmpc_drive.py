@@ -42,7 +42,7 @@ MAP = "maps/custom/f110_gym_10/f110_gym_map"
 # about what s means).
 CENTERLINE_CSV = "maps/custom/f110_gym_10/f110_gym_centerline.csv"
 SEED_LAP_CSV = "outputs/lmpc_seed_laps/f110_gym_10_seed_lap.csv"
-HORIZON_STEPS = 40
+HORIZON_STEPS = 30
 # gym/f110_gym/envs/f110_env.py's F110Env defaults timestep to 0.01 unless a
 # caller overrides it -- explicit here rather than editing that vendored
 # default (CLAUDE.md: treat gym/ as a black box). 0.025 is the value
@@ -63,11 +63,16 @@ MAX_ITERATIONS = 10
 # anchor = the exploration leash) to be more aggressive. While DESIGN.md
 # SS5/SS6's error regression is unimplemented, aggressive settings buy
 # sprints that end in real slides, not lap time -- tune in small steps.
-# cost_to_go_weight = 5.0 was picked by measurement (2026-07-14, headless):
-# at the 1.0 default the min-time pull is too weak to improve on the seed
-# lap (44.52s, and iteration 1 never finished); at 5.0 the LMPC actually
-# iterates faster (40.90s -> 39.15s) before the unmodeled grip limit ends
-# iteration 2; at 2.5 and 10.0 iteration 1 already ends in a slide.
+# cost_to_go_weight = 5.0 was measured (2026-07-14, headless) to iterate
+# faster (44.52s -> 40.90s -> 39.15s) before the unmodeled grip limit ends
+# iteration 2 -- but that sweep was run against a nominal model with a
+# curvature bug (understated by 2x, and hardcoded to 0 at the start/finish
+# seam), a missing -omega term in beta_dot, an Euler/RK4 discretization
+# mismatch against the plant, and a stage-0 steering-rate anchor pinned to
+# the last COMMAND instead of the plant's actual angle -- all fixed
+# 2026-07-14 (recom.md). 5.0 was tuned to compensate for exactly those
+# errors' extra optimism, so it is not validated against the corrected
+# model yet -- re-sweep before trusting it as more than a starting point.
 CONFIG_OVERRIDES: dict[str, Any] = {"cost_to_go_weight": 5.0}
 # Controlled-brake fallback for solve failures. Without the SS5/SS6 error
 # regression the nominal model overestimates cornering grip a little above
@@ -89,33 +94,29 @@ WINDOW_HEIGHT = 800
 # F110 Gym's own single-track model diverges when handed nonzero steering
 # at low speed (measured this project: raw sim omega reached -26 rad/s at
 # 0.9 m/s under small, rate-limited steering commands -- a plant-side
-# defect no controller-side fix can compensate for). Same guard, same
-# measured-safe thresholds, as scripts/lmpc_collect_seed_lap.py; every lap
-# here also launches from rest. This is an actuator-level safety mask, not
-# a second controller -- the LMPC still plans/solves every step, only its
-# steering output is suppressed through the one-time launch window.
+# defect no controller-side fix can compensate for; confirmed again
+# 2026-07-14 mid-lap, not just at launch: braking through a real hairpin
+# under the corrected nominal model, gym's own raw sim omega diverged to
+# ~1e42 within a handful of steps as v crossed zero while steering was
+# still nonzero). Same guard, same measured-safe thresholds, as
+# scripts/lmpc_collect_seed_lap.py. Applied UNCONDITIONALLY, any time speed
+# is low, not just through the one-time launch crossing -- this is a
+# plant-level speed regime, not a launch-specific one. This is an
+# actuator-level safety mask, not a second controller -- the LMPC still
+# plans/solves every step, only what reaches gym's action is suppressed.
 LOW_SPEED_STEER_ZERO_BELOW = 2.0
 LOW_SPEED_STEER_RESTORE_AT = 3.0
 
 
-class LaunchSteeringGuard:
-    """Suppress steering only through the one-time launch-from-rest crossing."""
-
-    def __init__(self) -> None:
-        self._launched = False
-
-    def apply(self, steer: float, speed: float) -> float:
-        if self._launched:
-            return steer
-        if speed >= LOW_SPEED_STEER_RESTORE_AT:
-            self._launched = True
-            return steer
-        if speed <= LOW_SPEED_STEER_ZERO_BELOW:
-            return 0.0
-        ramp = (speed - LOW_SPEED_STEER_ZERO_BELOW) / (
-            LOW_SPEED_STEER_RESTORE_AT - LOW_SPEED_STEER_ZERO_BELOW
-        )
-        return steer * ramp
+def apply_low_speed_steering_guard(steer: float, speed: float) -> float:
+    if speed >= LOW_SPEED_STEER_RESTORE_AT:
+        return steer
+    if speed <= LOW_SPEED_STEER_ZERO_BELOW:
+        return 0.0
+    ramp = (speed - LOW_SPEED_STEER_ZERO_BELOW) / (
+        LOW_SPEED_STEER_RESTORE_AT - LOW_SPEED_STEER_ZERO_BELOW
+    )
+    return steer * ramp
 
 
 def obs_to_vehicle_state(obs: dict[str, Any]) -> VehicleState:
@@ -142,23 +143,49 @@ def raw_velocity_state(f110_env: Any, ego_idx: int) -> tuple[float, float, float
     return v * np.cos(beta), v * np.sin(beta), float(raw_state[5])
 
 
+def raw_steer_and_speed(f110_env: Any, ego_idx: int) -> tuple[float, float]:
+    """(actual steering angle, raw scalar speed v) from the simulator's raw state.
+
+    Both are gym's own raw_state[2]/[3] -- neither is what this controller
+    last commanded. Steering: gym applies steer through a 2-step delay
+    buffer and a rate-limited PID (base_classes.py::update_pose), so the
+    commanded and actual angles diverge. Speed: gym's ST model integrates
+    dv/dt = a directly with NO other coupling (vehicle_dynamics_st's f[3] =
+    u[1] exactly) -- unlike vx = v*cos(beta), which also picks up a
+    -v*sin(beta)*beta_dot term under slip, finite-differencing v alone
+    recovers the realized acceleration gym's PID actually applied, exactly
+    (RaceCar.accel exists but is dead -- update_pose never writes the accl
+    it computes back into it, only resets it to 0 on collision -- so it
+    can't be read directly and must be reconstructed this way instead).
+    """
+    raw_state = f110_env.sim.agents[ego_idx].state  # [x,y,delta,v,psi,yaw_rate,beta]
+    return float(raw_state[2]), float(raw_state[3])
+
+
 def finalize_lap(
-    samples: list[tuple[np.ndarray, float]], dt: float
+    samples: list[tuple[np.ndarray, float, float]], dt: float
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Build LMPCController.add_lap arrays from one lap's recorded samples.
 
-    samples holds (native_state, applied_steer) per control step, state
-    recorded BEFORE stepping -- so the last sample is the state one step
-    short of the crossing and gets no control, exactly the convention
+    samples holds (native_state, actual_delta, raw_speed) per control step,
+    all three sampled BEFORE stepping -- so the last sample is the state one
+    step short of the crossing and gets no control, exactly the convention
     scripts/lmpc_collect_seed_lap.py::write_seed_lap_csv pins for D^0
-    (T = len(samples) - 1 transitions; realized acceleration from the
-    successor's vx, not the commanded one; J_k = T - k).
+    (T = len(samples) - 1 transitions; J_k = T - k).
+
+    Both control columns are REALIZED plant values, not commanded ones
+    (raw_steer_and_speed's comment has the full rationale for why each
+    needs to be reconstructed from the raw state rather than read off the
+    action this loop sent to gym). Storing the commanded versions instead
+    corrupts exactly the newest, fastest-driving lap the very next
+    iteration's warm start is seeded from.
     """
-    x_lap = np.column_stack([x for x, _ in samples])  # (6, T+1)
-    accel = (x_lap[0, 1:] - x_lap[0, :-1]) / dt
-    steer = np.array([steer for _, steer in samples[:-1]], dtype=np.float64)
-    u_lap = np.vstack([accel, steer])  # (2, T)
+    x_lap = np.column_stack([x for x, _, _ in samples])  # (6, T+1)
     total_steps = len(samples) - 1
+    raw_speed = np.array([v for _, _, v in samples], dtype=np.float64)
+    accel = (raw_speed[1:] - raw_speed[:-1]) / dt
+    steer = np.array([delta for _, delta, _ in samples[:-1]], dtype=np.float64)
+    u_lap = np.vstack([accel, steer])  # (2, T)
     cost_to_go = np.arange(total_steps, -1, -1, dtype=np.float64)
     return x_lap, u_lap, cost_to_go
 
@@ -177,6 +204,9 @@ def main() -> None:
         config_overrides=CONFIG_OVERRIDES,
     )
     controller.attach_raw_velocity_state(lambda: raw_velocity_state(f110_env, ego_idx))
+    controller.attach_raw_steering_angle(
+        lambda: raw_steer_and_speed(f110_env, ego_idx)[0]
+    )
 
     initial_pose = initial_pose_from_waypoints(controller.waypoints)
     waypoint_overlay = WaypointOverlay(controller.waypoints)
@@ -194,8 +224,7 @@ def main() -> None:
     for iteration in range(MAX_ITERATIONS):
         obs, _info = env.reset(options={"poses": initial_pose})
         controller.reset()
-        steering_guard = LaunchSteeringGuard()
-        samples: list[tuple[np.ndarray, float]] = []
+        samples: list[tuple[np.ndarray, float, float]] = []
         t = 0.0
 
         viewer.update(obs)
@@ -211,12 +240,12 @@ def main() -> None:
             try:
                 cmd = controller.control()
                 fallback_steps = 0
-                steer = steering_guard.apply(cmd.steering, state.speed)
+                steer = apply_low_speed_steering_guard(cmd.steering, state.speed)
                 velocity = cmd.velocity
             except RuntimeError as e:
                 # FALLBACK_BRAKE_DELTA_V's comment has the rationale; this is
-                # an actuator-level safety net like LaunchSteeringGuard, not a
-                # second controller -- the LMPC is re-attempted every step.
+                # an actuator-level safety net like the steering guard above,
+                # not a second controller -- the LMPC is re-attempted every step.
                 fallback_steps += 1
                 if fallback_steps > MAX_CONSECUTIVE_FALLBACK_STEPS:
                     print(
@@ -228,7 +257,11 @@ def main() -> None:
                 steer = last_steer
                 velocity = max(state.speed - FALLBACK_BRAKE_DELTA_V, 0.0)
             last_steer = steer
-            samples.append((controller.native_state.copy(), steer))
+            # actual_delta/raw_speed, not the command above -- finalize_lap's
+            # comment has the rationale; sampled now (before stepping) to
+            # align 1:1 with the native_state also captured before this step.
+            actual_delta, raw_speed = raw_steer_and_speed(f110_env, ego_idx)
+            samples.append((controller.native_state.copy(), actual_delta, raw_speed))
             action = np.array([[steer, velocity]], dtype=np.float64)
 
             obs, _reward, _terminated, truncated, _info = env.step(action)

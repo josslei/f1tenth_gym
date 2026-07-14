@@ -32,7 +32,7 @@ LMPCController::LMPCController(const LmpcConfig &config_in)
               safe_set.cost_scale()},
           config.solver_name),
       x(casadi::DM::zeros(kStateDim, 1)), t(0.0), has_state(false),
-      u_prev(casadi::DM::zeros(kControlDim, 1)),
+      u_prev(casadi::DM::zeros(kControlDim, 1)), actual_delta(0.0),
       x_warm(casadi::DM::zeros(kStateDim, config.horizon_steps + 1)),
       u_warm(casadi::DM::zeros(kControlDim, config.horizon_steps)),
       // Uniform 1/q: the simplex centroid, feasible (sums to 1, every
@@ -50,6 +50,7 @@ void LMPCController::reset() {
   t = 0.0;
   has_state = false;
   u_prev = casadi::DM::zeros(kControlDim, 1);
+  actual_delta = 0.0;
   x_warm = casadi::DM::zeros(kStateDim, config.horizon_steps + 1);
   u_warm = casadi::DM::zeros(kControlDim, config.horizon_steps);
   const casadi_int q = SafeSet::kTerminalSimplexSize;
@@ -58,13 +59,15 @@ void LMPCController::reset() {
   x_pred = casadi::DM::zeros(kStateDim, config.horizon_steps + 1);
 }
 
-void LMPCController::update(const casadi::DM &x_in, double t_in) {
+void LMPCController::update(const casadi::DM &x_in, double t_in,
+                            double actual_delta_in) {
   if (x_in.size1() != kStateDim || x_in.size2() != 1) {
     throw std::invalid_argument("LMPCController::update: x must be a 6x1 "
                                 "vector [vx, vy, omega, epsi, s, ey]");
   }
   x = x_in;
   t = t_in;
+  actual_delta = actual_delta_in;
   has_state = true;
 }
 
@@ -203,8 +206,17 @@ QpSolution LMPCController::solve_once() {
   lambda_warm = casadi::DM::ones(SafeSet::kTerminalSimplexSize, 1) /
                 SafeSet::kTerminalSimplexSize;
 
+  // Anchor the QP's stage-0 steering-rate cost/constraint (QpBounds::
+  // ddelta_max) against the PLANT's actual current steering angle, not this
+  // controller's own last command -- see actual_delta's declaration
+  // comment. Acceleration has no equivalent hard rate constraint and no
+  // comparably direct raw measurement, so u_prev(A) is left as the last
+  // commanded value.
+  casadi::DM u_prev_anchor = u_prev;
+  u_prev_anchor(dynamics::DELTA) = actual_delta;
+
   // DESIGN.md SS8 step 5.
-  return qp_builder.solve(x, u_prev, stages, safe_set_result.X_ss,
+  return qp_builder.solve(x, u_prev_anchor, stages, safe_set_result.X_ss,
                           safe_set_result.J_ss, x_warm, u_warm, lambda_warm);
 }
 

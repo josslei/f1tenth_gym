@@ -5,7 +5,7 @@
 
 #include "dynamics/common.hpp"
 #include "dynamics/gym_dynamics.hpp"
-#include "integrators/euler.hpp"
+#include "integrators/rk4.hpp"
 #include "linearization.hpp"
 #include "lmpc_config.hpp"
 #include "qp_builder.hpp"
@@ -36,10 +36,14 @@ using dynamics::StateIndex;
 // terminal cost-to-go pulling the car forward) works at all before the
 // learning layer is added on top.
 //
-// Nominal model is hardcoded to GymDynamics + Euler for this first pass
-// (both interchangeable per DESIGN.md SS8, but a single fixed pair keeps
-// this class's surface simple until there's a reason to expose the
-// choice).
+// Nominal model is hardcoded to GymDynamics + RK4 for this first pass (both
+// interchangeable per DESIGN.md SS8, but a single fixed pair keeps this
+// class's surface simple until there's a reason to expose the choice). RK4,
+// not Euler: F110Env defaults to Integrator.RK4 (gym/f110_gym/envs/
+// f110_env.py) and runs/lmpc_drive.py never overrides it, so a nominal
+// model discretized with Euler was integrating a different one-step map
+// than the actual plant at the same dt -- most visible in corners, where
+// (beta, omega) move fastest relative to dt=0.025.
 class LMPCController {
 public:
   explicit LMPCController(const LmpcConfig &config);
@@ -47,8 +51,16 @@ public:
   void reset();
 
   // x is the native kStateDim x 1 state vector (StateIndex order).
-  // t is the current simulation time in seconds.
-  void update(const casadi::DM &x, double t);
+  // t is the current simulation time in seconds. actual_delta is the
+  // PLANT's own current steering angle (e.g. gym's raw sim state[2]) --
+  // NOT the last angle this controller commanded. Used only to anchor the
+  // stage-0 steering-rate constraint/cost in solve_once() (QpBounds::
+  // ddelta_max's comment): gym applies steering through a 2-step delay
+  // buffer and a rate-limited PID, so the commanded delta and the plant's
+  // actual delta diverge, and constraining stage 0's rate against the
+  // COMMAND (what an earlier revision did, via u_prev alone) anchors the
+  // plan to a steering angle the tires were never actually at.
+  void update(const casadi::DM &x, double t, double actual_delta);
 
   // Runs one FHOCP solve (DESIGN.md SS8 steps 2-6) and returns the
   // kControlDim x 1 control vector (ControlIndex order): [a, delta].
@@ -82,7 +94,7 @@ private:
   LmpcConfig config;
 
   dynamics::GymDynamics dynamics_model;
-  integrators::Euler integrator;
+  integrators::Rk4 integrator;
   Linearizer linearizer;
   Track track;
   SafeSet safe_set;
@@ -92,7 +104,14 @@ private:
   double t;
   bool has_state;
 
-  casadi::DM u_prev; // u_{k-1}, ControlIndex order
+  casadi::DM u_prev; // u_{k-1}, ControlIndex order -- this controller's own
+                     // last COMMAND, not necessarily what the plant reached.
+
+  // The plant's actual current steering angle, set by update() -- see its
+  // header comment. Used in solve_once() to override just the DELTA
+  // component of the u_prev handed to QpBuilder, so the stage-0
+  // steering-rate anchor reflects reality instead of the last command.
+  double actual_delta;
 
   // The linearization sequence z_bar_{k:k+N} (DESIGN.md SS8 step 2): the
   // previous solve's own trajectory, shifted one step for the receding

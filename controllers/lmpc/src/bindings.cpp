@@ -135,9 +135,11 @@ PYBIND11_MODULE(lmpc_native, m) {
       .def("reset", &lmpc::LMPCController::reset)
       .def(
           "update",
-          [](lmpc::LMPCController &self, const py::array_t<double> &x,
-             double t) { self.update(dm_from_array(x), t); },
-          py::arg("x"), py::arg("t"))
+          [](lmpc::LMPCController &self, const py::array_t<double> &x, double t,
+             double actual_delta) {
+            self.update(dm_from_array(x), t, actual_delta);
+          },
+          py::arg("x"), py::arg("t"), py::arg("actual_delta"))
       .def("control",
            [](lmpc::LMPCController &self) {
              return array_from_dm(self.control());

@@ -101,6 +101,15 @@ class LMPCController(Controller):
         # runner script wires this in, since only it has direct access to
         # f110_env.sim.agents[...].state.
         self._raw_velocity_state: Callable[[], tuple[float, float, float]] | None = None
+        # The plant's actual current steering angle (raw sim state[2]), NOT
+        # this controller's last commanded delta -- gym applies steering
+        # through a 2-step delay buffer and a rate-limited PID, so the two
+        # diverge. Passed to native.update() every step to anchor the FHOCP's
+        # stage-0 steering-rate constraint/cost against reality instead of
+        # our own last command (NativeLMPCController::update's comment has
+        # the full rationale). Defaults to 0.0 -- matches the state actually
+        # starting at delta=0 for every standing-start launch.
+        self._raw_steering_angle: Callable[[], float] | None = None
 
         self.vehicle_state = VehicleState(0.0, 0.0, 0.0, 0.0)
         self._t = 0.0
@@ -123,6 +132,10 @@ class LMPCController(Controller):
     ) -> None:
         """fn() -> (vx, vy, omega) in the vehicle body frame."""
         self._raw_velocity_state = fn
+
+    def attach_raw_steering_angle(self, fn: Callable[[], float]) -> None:
+        """fn() -> the plant's actual current steering angle (rad)."""
+        self._raw_steering_angle = fn
 
     def reset(self) -> None:
         self._native.reset()
@@ -161,7 +174,10 @@ class LMPCController(Controller):
         self._current_speed = vehicle_state.speed
         x_native = np.array([vx, vy, omega, epsi, s, ey], dtype=np.float64)
         self.native_state = x_native
-        self._native.update(x_native, self._t)
+        actual_delta = (
+            self._raw_steering_angle() if self._raw_steering_angle is not None else 0.0
+        )
+        self._native.update(x_native, self._t, actual_delta)
 
     def control(self) -> ControlCommand:
         try:

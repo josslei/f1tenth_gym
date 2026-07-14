@@ -76,9 +76,17 @@ public:
             (lr * C_Sr * fzr_term - lf * C_Sf * fzf_term) * beta +
         mu * m / (I * (lr + lf)) * lf * C_Sf * fzf_term * delta;
 
+    // dynamic_models.py::vehicle_dynamics_st's f[6] (beta_dot) has this
+    // omega term as (mu/(v^2*(lr+lf))*(...) - 1) * omega, i.e. an explicit
+    // "-omega" alongside the mu/... coefficient -- an earlier transcription
+    // dropped the "-1" and only carried the mu/... part, understating the
+    // model's own yaw-rate coupling into slip angle (a transcription bug,
+    // not an unmodeled-error regression: this term is exactly known).
     const SX beta_dot =
-        mu / (v * v * (lr + lf)) *
-            (C_Sr * fzr_term * lr - C_Sf * fzf_term * lf) * omega -
+        (mu / (v * v * (lr + lf)) *
+             (C_Sr * fzr_term * lr - C_Sf * fzf_term * lf) -
+         1.0) *
+            omega -
         mu / (v * (lr + lf)) * (C_Sr * fzr_term + C_Sf * fzf_term) * beta +
         mu / (v * (lr + lf)) * C_Sf * fzf_term * delta;
 
