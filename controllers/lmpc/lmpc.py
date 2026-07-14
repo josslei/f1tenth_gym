@@ -10,10 +10,9 @@ translation inside it):
      scripts/lmpc_collect_seed_lap.py uses to build D^0, so the native
      controller's own s/ey/epsi state means the same thing here as it did
      when the seed lap was recorded.
-  2. Converts the native [a, delta] solution back into a gym ControlCommand
-     (steering, velocity) -- DESIGN.md SS4's "no separate integration step":
-     the velocity command is the solved trajectory's own one-step-ahead vx,
-     not an integrated a*dt.
+  2. Converts the native [acceleration, steering_angle] solution into Gym's
+     [target_steering_angle, target_velocity] public action by inverting its
+     proportional velocity controller.
 """
 
 from __future__ import annotations
@@ -46,7 +45,6 @@ class LMPCController(Controller):
         seed_lap_csv: str,
         dt: float,
         horizon_steps: int = 75,
-        v_min: float = -5.0,
     ) -> None:
         config = native.LmpcConfig()
         config.centerline_csv_path = centerline_csv
@@ -55,12 +53,6 @@ class LMPCController(Controller):
         config.horizon_steps = horizon_steps
         self.config = config
         self._native = native.NativeLMPCController(config)
-        # gym's own DEFAULT_PARAMS "v_min" (gym/f110_gym/envs/f110_env.py) --
-        # not tracked by LmpcConfig itself (only needed here, to invert
-        # gym's braking-side P-controller gain in control() below; the QP
-        # has no vx box constraint to enforce it against, DESIGN.md SS3).
-        self._v_min = v_min
-
         # Same centerline convention as
         # scripts/lmpc_collect_seed_lap.py::load_centerline_waypoints: heading
         # is the forward-difference tangent between consecutive (closed-loop,
@@ -102,7 +94,19 @@ class LMPCController(Controller):
 
         self.vehicle_state = VehicleState(0.0, 0.0, 0.0, 0.0)
         self._t = 0.0
-        self._current_speed = 0.0  # sqrt(vx^2+vy^2) -- see control()'s comment
+        self._current_speed = 0.0
+        # The last update()'s state in the NATIVE convention
+        # [vx, vy, omega, epsi, s, ey] -- what the lap-as-iteration runner
+        # (runs/lmpc_drive.py) records each step so a completed lap can be
+        # handed straight to add_lap() without re-deriving the projection.
+        self.native_state = np.zeros(6, dtype=np.float64)
+        # False until control() succeeds, and again whenever it fails: the
+        # native side keeps the LAST successful solve's trajectory, so
+        # while the runner's fallback brake is driving,
+        # predicted_horizon_xy() would otherwise render a stale horizon
+        # frozen at a fixed spot on the track (measured: a closed
+        # triangle-ish ghost line during fallback stretches).
+        self._prediction_valid = False
 
     def attach_raw_velocity_state(
         self, fn: Callable[[], tuple[float, float, float]]
@@ -116,6 +120,23 @@ class LMPCController(Controller):
         self._t = 0.0
         self._last_idx = -1
         self._current_speed = 0.0
+        self.native_state = np.zeros(6, dtype=np.float64)
+        self._prediction_valid = False
+
+    def add_lap(
+        self, x_lap: np.ndarray, u_lap: np.ndarray, cost_to_go: np.ndarray
+    ) -> None:
+        """Append a completed closed-loop lap to the native safe set (D^j).
+
+        x_lap is (6, T+1) in native state order, u_lap is (2, T) realized
+        [a, delta], cost_to_go is (T+1,) with J_k = T - k -- the same
+        conventions scripts/lmpc_collect_seed_lap.py records D^0 in.
+        """
+        self._native.add_lap(
+            np.ascontiguousarray(x_lap, dtype=np.float64),
+            np.ascontiguousarray(u_lap, dtype=np.float64),
+            np.ascontiguousarray(cost_to_go, dtype=np.float64),
+        )
 
     def update(self, vehicle_state: VehicleState, t: float | None = None) -> None:
         self.vehicle_state = vehicle_state
@@ -127,45 +148,29 @@ class LMPCController(Controller):
             vx, vy, omega = self._raw_velocity_state()
         else:
             vx, vy, omega = vehicle_state.speed, 0.0, 0.0
-        # vx = v*cos(beta), vy = v*sin(beta) (attach_raw_velocity_state's own
-        # convention) -- their magnitude recovers v exactly, the same "current
-        # speed" gym/f110_gym/envs/dynamic_models.py::pid() measures against,
-        # needed by control() below to invert that same controller.
-        self._current_speed = float(np.hypot(vx, vy))
-
+        self._current_speed = vehicle_state.speed
         x_native = np.array([vx, vy, omega, epsi, s, ey], dtype=np.float64)
+        self.native_state = x_native
         self._native.update(x_native, self._t)
 
     def control(self) -> ControlCommand:
-        u = self._native.control()
-        a_solved = float(u[0])  # StateIndex::A -- this solve's own [a, delta]
-
-        # gym's own low-level controller (dynamic_models.py::pid) does NOT
-        # integrate a velocity command directly -- it treats `velocity` as a
-        # SETPOINT its own P-controller chases: accl = kp*(velocity -
-        # current_speed), kp = 10*a_max/v_max while accelerating (or
-        # 10*a_max/(-v_min) while braking). Sending predicted_next_state()[0]
-        # (this solve's own one-step-ahead vx under the LMPC's DIRECT-a
-        # dynamics model) as that setpoint massively undershoots what's
-        # needed: at dt=0.025 the setpoint gap it implies is only a*dt, but
-        # gym's controller needs a gap of a/kp to realize that same a -- a
-        # factor of kp*dt (~0.12 at this track's params) too small. Measured
-        # directly (2026-07-13): the QP repeatedly solved a~=6-9 m/s^2 near
-        # launch, but real speed only reached 0.05 m/s after 4 control steps
-        # (0.1s) -- an order of magnitude short of what a~=6-9 m/s^2 implies,
-        # and the resulting model/reality gap compounded every step until
-        # the QP's own solve broke. Fixed by inverting gym's P-controller:
-        # choose velocity so gym's OWN kp*(velocity-current_speed) reproduces
-        # a_solved, instead of however small a gap the one-step model
-        # integration happens to produce.
-        kp = (
-            10.0
-            * self.config.a_max
-            / (self.config.v_max if a_solved >= 0.0 else -self._v_min)
+        try:
+            u = self._native.control()
+        except RuntimeError:
+            self._prediction_valid = False
+            raise
+        self._prediction_valid = True
+        acceleration = float(u[0])
+        gain_scale = 10.0 if self._current_speed > 0.0 else 2.0
+        velocity_scale = self.config.v_max if acceleration > 0.0 else -self.config.v_min
+        kp = gain_scale * self.config.a_max / velocity_scale
+        target_velocity = self._current_speed + acceleration / kp
+        # A setpoint outside gym's own velocity range asks its P-controller
+        # for an acceleration the inversion above no longer models.
+        target_velocity = float(
+            np.clip(target_velocity, self.config.v_min, self.config.v_max)
         )
-        vx_cmd = self._current_speed + a_solved / kp
-
-        return ControlCommand(steering=float(u[1]), velocity=vx_cmd)
+        return ControlCommand(steering=float(u[1]), velocity=target_velocity)
 
     def predicted_horizon_xy(self) -> np.ndarray:
         """World-frame (x, y) of the last solve's predicted state trajectory.
@@ -177,9 +182,22 @@ class LMPCController(Controller):
         possible +-pi wrap is an acceptable approximation (not used for
         control).
         """
+        if not self._prediction_valid:
+            # No successful solve to show (fallback braking / pre-first-solve):
+            # the native buffer still holds the previous solution, and drawing
+            # it would freeze a ghost horizon at a fixed spot on the track.
+            return np.empty((0, 2), dtype=np.float64)
         traj = self._native.predicted_trajectory()  # kStateDim x (N+1)
         s = traj[4, :]
         ey = traj[5, :]
+        # In finish mode the last predicted states can run past the
+        # centerline's final arc length; np.interp would clamp every such
+        # point onto the SAME last waypoint (a fixed pile-up that visually
+        # closes the horizon line into a loop). Drop them instead --
+        # rendering-only, like the interpolation below.
+        in_range = (s >= self._path_s[0]) & (s <= self._path_s[-1])
+        s = s[in_range]
+        ey = ey[in_range]
         x = np.interp(s, self._path_s, self._path_xy[:, 0])
         y = np.interp(s, self._path_s, self._path_xy[:, 1])
         heading = np.interp(s, self._path_s, self._path_psi) + np.pi / 2

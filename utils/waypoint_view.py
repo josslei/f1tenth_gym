@@ -39,6 +39,27 @@ def _to_xyz_flat(points_xy: np.ndarray, scale: float) -> list[float]:
     return points_xyz.ravel().tolist()
 
 
+def _polyline_segment_vertices(
+    points_xy: np.ndarray, close: bool = False
+) -> np.ndarray:
+    """Duplicate interior vertices so a polyline draws as GL_LINES.
+
+    Never batch GL_LINE_STRIP/GL_LINE_LOOP vertex lists here: pyglet's
+    Batch packs same-mode lists into one vertex domain and its allocator
+    MERGES adjacent allocations into a single glMultiDrawArrays span
+    (pyglet/graphics/allocation.py), which fuses separate strips into one
+    connected line -- measured in this project as a phantom segment
+    joining the receding-horizon line to a fixed vertex of whichever other
+    strip sat next to it in the buffer (worst from lap 2 on, once the
+    previous-lap trace exists). GL_LINES segments are order-independent,
+    so region merging cannot change what they draw.
+    """
+    if close:
+        points_xy = np.vstack([points_xy, points_xy[:1]])
+    n = points_xy.shape[0]
+    return points_xy[np.repeat(np.arange(n), 2)[1:-1]]
+
+
 @dataclass
 class WaypointOverlay:
     """Draw the reference waypoint loop as a viewer callback."""
@@ -53,13 +74,14 @@ class WaypointOverlay:
         if self._vertex_list is not None:
             return
 
-        from pyglet.gl.gl import GL_LINE_LOOP
+        from pyglet.gl.gl import GL_LINES
 
-        positions = _to_xyz_flat(self.waypoints_xy, self.render_scale)
-        colors = list(self.color) * self.waypoints_xy.shape[0]
+        vertices = _polyline_segment_vertices(self.waypoints_xy, close=True)
+        positions = _to_xyz_flat(vertices, self.render_scale)
+        colors = list(self.color) * vertices.shape[0]
         self._vertex_list = renderer.program.vertex_list(
-            self.waypoints_xy.shape[0],
-            GL_LINE_LOOP,
+            vertices.shape[0],
+            GL_LINES,
             batch=renderer.batch,
             position=("f", positions),
             colors=("Bn", colors),
@@ -74,20 +96,21 @@ class DrivenLineOverlay:
     previous_color: tuple[int, int, int, int] = (255, 90, 90, 190)
     render_scale: float = WAYPOINT_RENDER_SCALE
     min_point_distance: float = 0.05
-    # _replace_vertex_list rebuilds the whole line's GL buffer from scratch
-    # (O(n) in points-so-far), so at min_point_distance spacing it was doing a
-    # full rebuild almost every control step -- a real per-frame cost that
-    # grows over a lap and is independent of any LMPC solver setting. Only
-    # rebuilding every rebuild_stride accepted points cuts that by the same
-    # factor; the live trace can lag by up to rebuild_stride points but always
-    # catches up, and the finalized previous-lap trace (rebuilt once, in full,
-    # on lap change) is never affected.
-    rebuild_stride: int = 4
+    # The live trace is stored as fixed-size GL chunks: a full chunk's vertex
+    # list is never touched again, and each accepted point rebuilds only the
+    # one open (partial) chunk. Rebuilding a single ever-growing vertex list
+    # instead -- even only every few points -- is O(points-so-far) per rebuild
+    # and therefore O(n^2/stride) accumulated over a lap; measured as an FPS
+    # drop that grows with lap progress and is independent of any LMPC solver
+    # setting. Each new chunk starts at the previous chunk's last point so the
+    # per-chunk polylines join without gaps.
+    chunk_capacity: int = 256
     current_points: list[tuple[float, float]] = field(default_factory=list)
     previous_points: list[tuple[float, float]] = field(default_factory=list)
     _last_lap_count: int = 0
-    _pending_rebuild: int = 0
-    _current_vertex_list: Any | None = None
+    _open_chunk_start: int = 0
+    _frozen_vertex_lists: list[Any] = field(default_factory=list)
+    _open_vertex_list: Any | None = None
     _previous_vertex_list: Any | None = None
 
     def __call__(self, renderer: Any, obs: dict[str, Any] | None = None) -> None:
@@ -98,23 +121,38 @@ class DrivenLineOverlay:
         lap_count = int(obs["lap_counts"][ego])
         point = (float(obs["poses_x"][ego]), float(obs["poses_y"][ego]))
 
+        # An INCREASE is a completed lap: promote the live trace to the
+        # previous-lap trace. A DECREASE is an env.reset() (lap-as-iteration
+        # relaunch, runs/lmpc_drive.py): the completed lap already finalized
+        # at the crossing on the way up, so only clear the live trace --
+        # finalizing again here would overwrite the full previous-lap loop
+        # with the two-point crossing-to-reset stub recorded in between.
         if lap_count > self._last_lap_count:
             self.previous_points = self.current_points
-            self.current_points = []
-            self._last_lap_count = lap_count
-            self._pending_rebuild = 0
-            self._replace_vertex_list(
-                "previous", renderer, self.previous_points, self.previous_color
+            self._reset_current_trace(lap_count)
+            if self._previous_vertex_list is not None:
+                self._previous_vertex_list.delete()
+            # One full build per lap change, not per frame.
+            self._previous_vertex_list = self._make_vertex_list(
+                renderer, self.previous_points, self.previous_color
             )
+        elif lap_count < self._last_lap_count:
+            self._reset_current_trace(lap_count)
 
         if self._should_append(point):
             self.current_points.append(point)
-            self._pending_rebuild += 1
-            if self._pending_rebuild >= self.rebuild_stride:
-                self._pending_rebuild = 0
-                self._replace_vertex_list(
-                    "current", renderer, self.current_points, self.current_color
-                )
+            self._rebuild_open_chunk(renderer)
+
+    def _reset_current_trace(self, lap_count: int) -> None:
+        self.current_points = []
+        self._last_lap_count = lap_count
+        self._open_chunk_start = 0
+        for vertex_list in self._frozen_vertex_lists:
+            vertex_list.delete()
+        self._frozen_vertex_lists = []
+        if self._open_vertex_list is not None:
+            self._open_vertex_list.delete()
+            self._open_vertex_list = None
 
     def _should_append(self, point: tuple[float, float]) -> bool:
         if not self.current_points:
@@ -124,36 +162,41 @@ class DrivenLineOverlay:
         dy = point[1] - last_y
         return dx * dx + dy * dy >= self.min_point_distance * self.min_point_distance
 
-    def _replace_vertex_list(
+    def _rebuild_open_chunk(self, renderer: Any) -> None:
+        if self._open_vertex_list is not None:
+            self._open_vertex_list.delete()
+            self._open_vertex_list = None
+        chunk = self.current_points[self._open_chunk_start :]
+        self._open_vertex_list = self._make_vertex_list(
+            renderer, chunk, self.current_color
+        )
+        if len(chunk) >= self.chunk_capacity:
+            # Freeze this chunk's vertex list permanently; the next chunk
+            # shares its last point so the strips stay connected.
+            self._frozen_vertex_lists.append(self._open_vertex_list)
+            self._open_vertex_list = None
+            self._open_chunk_start = len(self.current_points) - 1
+
+    def _make_vertex_list(
         self,
-        which: str,
         renderer: Any,
         points: list[tuple[float, float]],
         color: tuple[int, int, int, int],
-    ) -> None:
-        vertex_attr = f"_{which}_vertex_list"
-        vertex_list = getattr(self, vertex_attr)
-        if vertex_list is not None:
-            vertex_list.delete()
-            setattr(self, vertex_attr, None)
+    ) -> Any | None:
         if len(points) < 2:
-            return
+            return None
 
-        from pyglet.gl.gl import GL_LINE_STRIP
+        from pyglet.gl.gl import GL_LINES
 
-        points_xy = np.asarray(points, dtype=np.float64)
-        positions = _to_xyz_flat(points_xy, self.render_scale)
-        colors = list(color) * points_xy.shape[0]
-        setattr(
-            self,
-            vertex_attr,
-            renderer.program.vertex_list(
-                points_xy.shape[0],
-                GL_LINE_STRIP,
-                batch=renderer.batch,
-                position=("f", positions),
-                colors=("Bn", colors),
-            ),
+        vertices = _polyline_segment_vertices(np.asarray(points, dtype=np.float64))
+        positions = _to_xyz_flat(vertices, self.render_scale)
+        colors = list(color) * vertices.shape[0]
+        return renderer.program.vertex_list(
+            vertices.shape[0],
+            GL_LINES,
+            batch=renderer.batch,
+            position=("f", positions),
+            colors=("Bn", colors),
         )
 
 
@@ -180,21 +223,25 @@ class RecedingHorizonOverlay:
         if points_xy.shape[0] < 2:
             return
 
-        from pyglet.gl.gl import GL_LINE_STRIP, GL_POINTS
+        from pyglet.gl.gl import GL_LINES, GL_POINTS
 
-        positions = _to_xyz_flat(points_xy, self.render_scale)
-        colors = list(self.color) * points_xy.shape[0]
+        # GL_POINTS is order-independent, so only the line needs the
+        # segment conversion (_polyline_segment_vertices' comment).
+        segment_vertices = _polyline_segment_vertices(points_xy)
+        positions = _to_xyz_flat(segment_vertices, self.render_scale)
+        colors = list(self.color) * segment_vertices.shape[0]
         self._vertex_list = renderer.program.vertex_list(
-            points_xy.shape[0],
-            GL_LINE_STRIP,
+            segment_vertices.shape[0],
+            GL_LINES,
             batch=renderer.batch,
             position=("f", positions),
             colors=("Bn", colors),
         )
+        point_positions = _to_xyz_flat(points_xy, self.render_scale)
         self._point_vertex_list = renderer.program.vertex_list(
             points_xy.shape[0],
             GL_POINTS,
             batch=renderer.batch,
-            position=("f", positions),
+            position=("f", point_positions),
             colors=("Bn", list(self.point_color) * points_xy.shape[0]),
         )

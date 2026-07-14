@@ -18,18 +18,26 @@ struct QpBounds {
   double delta_min;
   double delta_max;
   double ey_max;
+  // Max |delta_t - delta_{t-1}| per stage: the plant's steering-rate limit
+  // integrated over one control period (LmpcConfig::sv_max * dt) -- keeps
+  // every planned steering step physically executable by gym's
+  // rate-limited actuator (LmpcConfig::sv_max's comment has the measured
+  // failure this prevents).
+  double ddelta_max;
 };
 
-// Cost weights from DESIGN.md SS3's Phi(w): c_u on ||u_t||^2, c_du on
-// ||u_t - u_{t-1}||^2. Not pinned by the paper or upstream (DESIGN.md's
-// open items) -- exposed here so they're a config knob, not a magic
-// number, until a tuned value is settled on. terminal_slack penalizes the
-// normalized mismatch between the terminal state and safe-set convex hull.
+// Diagonal cost weights in ControlIndex order, applied to the scaled U
+// decision variables. This keeps target-velocity and steering penalties
+// comparable despite their different physical units.
 struct QpWeights {
-  double c_u;
-  double c_du;
+  casadi::DM control;
+  casadi::DM control_rate;
   double terminal_slack;
   casadi::DM terminal_slack_state;
+  // Exact-plus-quadratic penalty on the per-stage ey slack (LmpcConfig::
+  // ey_slack_l1's comment has the rationale for softening ey at all).
+  double ey_slack_l1;
+  double ey_slack_l2;
 };
 
 // Diagonal variable-scaling factors (LmpcConfig's comment on scale_x_vy
@@ -93,10 +101,14 @@ private:
   QpScaling scaling;
 
   casadi::Opti opti;
-  casadi::MX X;      // kStateDim x (N+1), SCALED (O(1)) decision variable
-  casadi::MX U;      // kControlDim x N, SCALED (O(1)) decision variable
-  casadi::MX Alpha;  // scalar barycentric coordinate for the terminal segment
-  casadi::MX Lambda; // [1-Alpha, Alpha]
+  casadi::MX X;       // kStateDim x (N+1), SCALED (O(1)) decision variable
+  casadi::MX U;       // kControlDim x N, SCALED (O(1)) decision variable
+  casadi::MX EySlack; // 1 x (N+1), per-stage ey corridor slack (scaled ey
+                      // units, >= 0) -- keeps the QP feasible when the
+                      // measured/predicted state is pushed outside the ey
+                      // box (QpWeights::ey_slack_l1's comment)
+  casadi::MX Alpha;   // scalar barycentric coordinate for the terminal segment
+  casadi::MX Lambda;  // [1-Alpha, Alpha]
   casadi::MX TerminalSlack; // normalized terminal mismatch expression
   casadi::MX X_phys; // scaling.x * X -- physical-unit state, used in every
                      // constraint/cost and extracted at solve time

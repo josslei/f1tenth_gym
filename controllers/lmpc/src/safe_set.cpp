@@ -4,9 +4,10 @@
 #include <array>
 #include <cmath>
 #include <fstream>
-#include <numeric>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
+#include <utility>
 
 #include "dynamics/common.hpp"
 
@@ -16,10 +17,10 @@ namespace {
 
 // Parses the header written by
 // scripts/lmpc_collect_seed_lap.py::write_seed_lap_csv:
-// vx,vy,omega,epsi,s,ey,t,a,delta,J -- only x = [vx,vy,omega,epsi,s,ey] and
-// J are needed for the safe-set query, so a/delta/t (which are blank on the
-// CSV's last row anyway -- there is no successor state for it) are read and
-// discarded.
+// vx,vy,omega,epsi,s,ey,t,a,delta,J. The a/delta columns are kept (not
+// discarded) -- trajectory_segment() returns them as the first solve's
+// control warm start. They are blank only on the final row (no successor
+// state), which maps to has_control = false.
 std::vector<SafeSetSample> load_lap(const std::string &csv_path) {
   std::ifstream file(csv_path);
   if (!file.is_open()) {
@@ -58,7 +59,14 @@ std::vector<SafeSetSample> load_lap(const std::string &csv_path) {
     x(dynamics::EY) = std::stod(fields[5]);
     const double J = std::stod(fields[9]);
 
-    samples.push_back(SafeSetSample{x, J});
+    casadi::DM u = casadi::DM::zeros(dynamics::kControlDim, 1);
+    const bool has_control = !fields[7].empty() && !fields[8].empty();
+    if (has_control) {
+      u(dynamics::A) = std::stod(fields[7]);
+      u(dynamics::DELTA) = std::stod(fields[8]);
+    }
+
+    samples.push_back(SafeSetSample{x, u, J, has_control});
   }
 
   if (samples.empty()) {
@@ -90,8 +98,26 @@ SafeSet::SafeSet(const std::string &seed_lap_csv_path) {
   laps.push_back(load_lap(seed_lap_csv_path));
 }
 
+void SafeSet::add_lap(std::vector<SafeSetSample> lap) {
+  if (lap.empty()) {
+    throw std::invalid_argument("SafeSet::add_lap: empty lap");
+  }
+  laps.push_back(std::move(lap));
+  if (laps.size() > kMaxLaps) {
+    laps.erase(laps.begin());
+  }
+}
+
 void SafeSet::add_lap(const std::string &lap_csv_path) {
-  laps.push_back(load_lap(lap_csv_path));
+  add_lap(load_lap(lap_csv_path));
+}
+
+double SafeSet::data_end_s() const {
+  double end_s = std::numeric_limits<double>::infinity();
+  for (const std::vector<SafeSetSample> &lap : laps) {
+    end_s = std::min(end_s, static_cast<double>(lap.back().x(dynamics::S)));
+  }
+  return end_s;
 }
 
 double SafeSet::cost_scale() const {
@@ -106,31 +132,26 @@ double SafeSet::cost_scale() const {
 
 SafeSet::QueryResult SafeSet::query(const casadi::DM &x_query, casadi_int K,
                                     const casadi::DM &state_scale) const {
-  std::vector<const SafeSetSample *> candidates;
-
   // K remains the per-lap candidate count. The terminal QP receives one
-  // global simplex selected from the combined candidate pool.
+  // global simplex selected from the combined candidate pool. Each sample's
+  // distance is computed exactly once and carried alongside its pointer --
+  // recomputing it inside sort comparators is O(n log n) casadi::DM
+  // element reads per lap per control step, a real per-frame cost.
+  std::vector<std::pair<double, const SafeSetSample *>> candidates;
   for (const std::vector<SafeSetSample> &lap : laps) {
-    const casadi_int k =
-        std::min<casadi_int>(K, static_cast<casadi_int>(lap.size()));
-    std::vector<std::size_t> idx(lap.size());
-    std::iota(idx.begin(), idx.end(), 0);
-    std::partial_sort(
-        idx.begin(), idx.begin() + k, idx.end(),
-        [&](std::size_t i, std::size_t j) {
-          return normalized_distance_sq(lap[i].x, x_query, state_scale) <
-                 normalized_distance_sq(lap[j].x, x_query, state_scale);
-        });
-    for (casadi_int n = 0; n < k; ++n) {
-      candidates.push_back(&lap[idx[n]]);
+    const std::size_t k =
+        std::min<std::size_t>(static_cast<std::size_t>(K), lap.size());
+    std::vector<std::pair<double, const SafeSetSample *>> ranked;
+    ranked.reserve(lap.size());
+    for (const SafeSetSample &sample : lap) {
+      ranked.emplace_back(
+          normalized_distance_sq(sample.x, x_query, state_scale), &sample);
     }
+    std::nth_element(ranked.begin(), ranked.begin() + (k - 1), ranked.end());
+    candidates.insert(candidates.end(), ranked.begin(), ranked.begin() + k);
   }
 
-  std::sort(candidates.begin(), candidates.end(),
-            [&](const auto *a, const auto *b) {
-              return normalized_distance_sq(a->x, x_query, state_scale) <
-                     normalized_distance_sq(b->x, x_query, state_scale);
-            });
+  std::sort(candidates.begin(), candidates.end());
 
   std::vector<casadi::DM> x_cols;
   std::vector<double> j_vals;
@@ -139,7 +160,7 @@ SafeSet::QueryResult SafeSet::query(const casadi::DM &x_query, casadi_int K,
   j_vals.reserve(kTerminalSimplexSize);
   basis.reserve(kTerminalSimplexSize - 1);
 
-  const SafeSetSample *base = candidates.front();
+  const SafeSetSample *base = candidates.front().second;
   x_cols.push_back(base->x);
   j_vals.push_back(base->J);
 
@@ -148,7 +169,7 @@ SafeSet::QueryResult SafeSet::query(const casadi::DM &x_query, casadi_int K,
        candidate_idx < candidates.size() &&
        static_cast<casadi_int>(x_cols.size()) < kTerminalSimplexSize;
        ++candidate_idx) {
-    const SafeSetSample *candidate = candidates[candidate_idx];
+    const SafeSetSample *candidate = candidates[candidate_idx].second;
     std::array<double, dynamics::kStateDim> residual{};
     for (casadi_int row = 0; row < dynamics::kStateDim; ++row) {
       residual[static_cast<std::size_t>(row)] =
@@ -188,6 +209,43 @@ SafeSet::QueryResult SafeSet::query(const casadi::DM &x_query, casadi_int K,
   result.X_ss = casadi::DM::horzcat(x_cols);
   result.J_ss = casadi::DM(j_vals);
   return result;
+}
+
+SafeSet::TrajectorySegment
+SafeSet::trajectory_segment(const casadi::DM &x_query, casadi_int horizon_steps,
+                            const casadi::DM &state_scale) const {
+  using casadi::Slice;
+
+  const std::vector<SafeSetSample> &lap = laps.back();
+  const std::size_t n = lap.size();
+
+  std::size_t nearest = 0;
+  double best = normalized_distance_sq(lap[0].x, x_query, state_scale);
+  for (std::size_t i = 1; i < n; ++i) {
+    const double d = normalized_distance_sq(lap[i].x, x_query, state_scale);
+    if (d < best) {
+      best = d;
+      nearest = i;
+    }
+  }
+
+  TrajectorySegment segment;
+  segment.x_traj = casadi::DM::zeros(dynamics::kStateDim, horizon_steps + 1);
+  segment.u_traj = casadi::DM::zeros(dynamics::kControlDim, horizon_steps);
+  for (casadi_int t = 0; t <= horizon_steps; ++t) {
+    // Clamp past the lap's end (one open lap, s non-periodic): hold the
+    // final sample rather than wrapping to the start line.
+    const std::size_t i =
+        std::min(nearest + static_cast<std::size_t>(t), n - 1);
+    segment.x_traj(Slice(), t) = lap[i].x;
+    if (t < horizon_steps) {
+      // The final sample has no recorded control (has_control == false);
+      // hold the last real one instead of its zero placeholder.
+      const std::size_t i_u = lap[i].has_control ? i : i - 1;
+      segment.u_traj(Slice(), t) = lap[i_u].u;
+    }
+  }
+  return segment;
 }
 
 } // namespace lmpc

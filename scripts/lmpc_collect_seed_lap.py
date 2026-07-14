@@ -305,10 +305,8 @@ def write_seed_lap_csv(
 
     T = len(samples) - 1 transitions were driven. Every k in [0, T] gets a
     state and a cost-to-go J_k = T - k. Only k in [0, T-1] has a control
-    (a_k, delta_k) and therefore a valid x_{k+1} -- the last row has no
-    control or successor state, matching how the safe set trajectory data is
-    used downstream (ref/Racing-LMPC-ROS2/safe_set.cpp drops exactly this
-    last index for the same reason: "no xip1 available for it").
+    (a_k, delta_k) and therefore a valid x_{k+1} -- the last row has no control
+    or successor state, matching how the safe set trajectory data is used.
     """
     total_steps = len(samples) - 1
     out_path = Path(output_path)
@@ -317,7 +315,18 @@ def write_seed_lap_csv(
     with out_path.open("w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(
-            ["vx", "vy", "omega", "epsi", "s", "ey", "t", "a", "delta", "J"]
+            [
+                "vx",
+                "vy",
+                "omega",
+                "epsi",
+                "s",
+                "ey",
+                "t",
+                "a",
+                "delta",
+                "J",
+            ]
         )
         for k, sample in enumerate(samples):
             is_last = k == total_steps
@@ -325,10 +334,6 @@ def write_seed_lap_csv(
                 a_k = ""
                 delta_k = ""
             else:
-                # Realized acceleration, not the controller's intended one --
-                # the actual measured transition is what the paper's error
-                # regression (DESIGN.md SS5) needs, not the velocity setpoint
-                # the controller requested.
                 a_k = (samples[k + 1]["vx"] - sample["vx"]) / dt
                 delta_k = sample["delta"]
             writer.writerow(

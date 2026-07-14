@@ -1,5 +1,7 @@
 #include "qp_builder.hpp"
 
+#include <cstdlib>
+#include <iostream>
 #include <sstream>
 #include <stdexcept>
 
@@ -30,6 +32,7 @@ QpBuilder::QpBuilder(casadi_int horizon_steps, casadi_int safe_set_size,
   // needs to know scaling exists except the scale factors themselves.
   X = opti.variable(kStateDim, N + 1);
   U = opti.variable(kControlDim, N);
+  EySlack = opti.variable(1, N + 1);
   Alpha = opti.variable(1, 1);
   Lambda = MX::vertcat({1.0 - Alpha, Alpha});
   X_phys = this->scaling.x * X;
@@ -77,8 +80,31 @@ QpBuilder::QpBuilder(casadi_int horizon_steps, casadi_int safe_set_size,
   opti.subject_to(U(A, Slice()) <= bounds.a_max / scale_a);
   opti.subject_to(bounds.delta_min / scale_delta <= U(DELTA, Slice()));
   opti.subject_to(U(DELTA, Slice()) <= bounds.delta_max / scale_delta);
-  opti.subject_to(-bounds.ey_max / scale_ey <= X(EY, Slice()));
-  opti.subject_to(X(EY, Slice()) <= bounds.ey_max / scale_ey);
+  // The ey corridor is SOFT (per-stage slack, exact-plus-quadratic penalty
+  // in the cost below), not a hard box: x_0 is pinned to the measurement by
+  // equality, so one disturbance pushing the car past ey_max -- or a
+  // high-speed stage where the linearized reachable tube can't stay inside
+  // the corridor under the steering-rate limit -- would otherwise make the
+  // whole QP instantly infeasible ("Failed to calculate search direction")
+  // exactly when the controller most needs a recovery plan. The l1 term
+  // keeps the penalty exact (slack stays identically 0 whenever the hard
+  // corridor is achievable), so this changes nothing on the nominal path.
+  opti.subject_to(0 <= EySlack);
+  opti.subject_to(-bounds.ey_max / scale_ey - EySlack <= X(EY, Slice()));
+  opti.subject_to(X(EY, Slice()) <= bounds.ey_max / scale_ey + EySlack);
+  // Steering-rate constraint (QpBounds::ddelta_max's comment): every
+  // planned per-stage steering change must be executable by gym's
+  // rate-limited actuator. Anchored at u_prev_param for stage 0, the same
+  // anchor the control-rate cost below uses. Written in physical units;
+  // both sides encoded explicitly (no C++ chained comparisons -- see the
+  // U box constraints above).
+  for (casadi_int t = 0; t < N; ++t) {
+    const MX delta_prev =
+        (t == 0) ? MX(u_prev_param(DELTA)) : MX(U_phys(DELTA, t - 1));
+    const MX ddelta = U_phys(DELTA, t) - delta_prev;
+    opti.subject_to(-bounds.ddelta_max <= ddelta);
+    opti.subject_to(ddelta <= bounds.ddelta_max);
+  }
   // Minimal barycentric parameterization of the two-point terminal simplex.
   opti.subject_to(0 <= Alpha);
   opti.subject_to(Alpha <= 1.0);
@@ -90,13 +116,23 @@ QpBuilder::QpBuilder(casadi_int horizon_steps, casadi_int safe_set_size,
   // graph.
   MX cost = MX::mtimes(Jss_param.T(), Lambda);
   for (casadi_int t = 0; t < N; ++t) {
-    const MX u_t = U_phys(Slice(), t);
-    const MX u_prev_t = (t == 0) ? u_prev_param : MX(U_phys(Slice(), t - 1));
-    cost += (weights.c_u / this->scaling.j) * MX::sumsqr(u_t) +
-            (weights.c_du / this->scaling.j) * MX::sumsqr(u_t - u_prev_t);
+    const MX u_t = U(Slice(), t);
+    const MX u_prev_t =
+        (t == 0) ? u_prev_param / this->scaling.u : MX(U(Slice(), t - 1));
+    const MX du_t = u_t - u_prev_t;
+    cost += MX::dot(MX(weights.control), MX::sq(u_t)) +
+            MX::dot(MX(weights.control_rate), MX::sq(du_t));
   }
   cost += weights.terminal_slack *
           MX::sumsqr(weights.terminal_slack_state * TerminalSlack);
+  // Soft-ey penalty (constraint block above): l1 keeps it exact, l2 keeps
+  // the recovery direction well-scaled once a violation does occur.
+  cost += weights.ey_slack_l1 * MX::sum2(EySlack) +
+          weights.ey_slack_l2 * MX::sumsqr(EySlack);
+  // Regularize otherwise unpenalized scaled state/simplex directions.
+  constexpr double kRegularization = 1e-6;
+  cost += kRegularization * MX::sumsqr(X);
+  cost += kRegularization * MX::sumsqr(Alpha);
   opti.minimize(cost);
 
   // Every control step re-solves this same graph (class comment above), so
@@ -112,12 +148,12 @@ QpBuilder::QpBuilder(casadi_int horizon_steps, casadi_int safe_set_size,
   // "Unknown option: qrqp" (the literal nesting key itself rejected as an
   // unrecognized option). Flat options in the second argument avoid that
   // nesting entirely.
-  // error_on_fail=false: on a failed solve, qrqp otherwise dumps every
-  // input matrix to stdout before throwing (a wall of text per failure,
-  // every control step in closed-loop use) -- opti.solve() still throws
-  // its own concise status error regardless of this flag, which
-  // QpBuilder::solve()'s try/catch below handles either way.
-  opti.solver(solver_name, casadi::Dict{{"print_time", false},
+  // error_on_fail=false: on a failed solve, qrqp otherwise dumps every input
+  // matrix to stdout. solve_limited() accepts iteration-limited results but
+  // still throws for statuses such as infeasibility; the try/catch below
+  // handles those while the post-solve checks reject malformed iterates.
+  opti.solver(solver_name, casadi::Dict{{"max_iter", 1000},
+                                        {"print_time", false},
                                         {"print_iter", false},
                                         {"print_header", false},
                                         {"print_info", false},
@@ -162,11 +198,20 @@ QpSolution QpBuilder::solve(const casadi::DM &x_k, const casadi::DM &u_prev,
     opti.set_initial(U, u_warm / scaling.u);
     opti.set_initial(Alpha, lambda_warm(1));
 
-    const casadi::OptiSol sol = opti.solve();
+    const casadi::OptiSol sol = opti.solve_limited();
     const casadi::DM x_traj = sol.value(X_phys);
     const casadi::DM u_traj = sol.value(U_phys);
     const casadi::DM lambda = sol.value(Lambda);
     const casadi::DM terminal_slack = sol.value(TerminalSlack);
+
+    if (std::getenv("LMPC_DEBUG_TERMINAL") != nullptr) {
+      std::cerr << "x0=" << x_k.T() << "\n"
+                << "X_ss(VX,VY,OMEGA,EPSI,S,EY rows x 2 cols)=" << X_ss << "\n"
+                << "J_ss=" << J_ss.T() << " scale.j=" << scaling.j << "\n"
+                << "Alpha/Lambda=" << lambda.T()
+                << " x_N_phys=" << x_traj(casadi::Slice(), N).T()
+                << " terminal_slack(raw)=" << terminal_slack.T() << std::endl;
+    }
 
     const bool regular = x_traj.is_regular() && u_traj.is_regular() &&
                          lambda.is_regular() && terminal_slack.is_regular();
@@ -183,18 +228,35 @@ QpSolution QpBuilder::solve(const casadi::DM &x_k, const casadi::DM &u_prev,
         static_cast<double>(casadi::DM::mmax(lambda - 1.0));
     const double lambda_lo = static_cast<double>(casadi::DM::mmin(lambda));
 
-    constexpr double kBoundsTolerance = 1e-3;
-    const bool within_bounds =
-        regular && a_hi <= bounds.a_max + kBoundsTolerance &&
-        a_lo >= bounds.a_min - kBoundsTolerance &&
-        delta_hi <= bounds.delta_max + kBoundsTolerance &&
-        delta_lo >= bounds.delta_min - kBoundsTolerance &&
-        lambda_hi_over_bound <= kBoundsTolerance &&
-        lambda_lo >= -kBoundsTolerance;
+    // qrqp's convergence check declares success once no further active-set
+    // flip is attempted, which is NOT a strict primal-feasibility
+    // guarantee -- it can return solutions a fraction of a percent past a
+    // box bound (root-caused by reading casadi_qrqp.hpp's
+    // casadi_qrqp_prepare, this project's lmpc-solver-degeneracy memory).
+    // Accept violations up to kViolationFraction of each bound's own range
+    // WITHOUT mutating the solution: gym's own actuator layer
+    // (steering_constraint/accl_constraints in dynamic_models.py) clamps
+    // the realized input at the true physical limit regardless, so
+    // applying e.g. a = 9.58 vs the 9.51 bound is physically identical to
+    // applying 9.51 -- while post-hoc clamping the returned trajectory was
+    // measured (2026-07-13) to corrupt the warm start (x_traj is solved
+    // self-consistently against the UNCLAMPED u_traj). Anything past the
+    // fraction is still a genuine solver failure and throws.
+    constexpr double kViolationFraction = 0.02;
+    const double a_tol = kViolationFraction * (bounds.a_max - bounds.a_min);
+    const double delta_tol =
+        kViolationFraction * (bounds.delta_max - bounds.delta_min);
+    const double lambda_tol = kViolationFraction; // lambda's range is [0, 1]
+    const bool within_bounds = regular && a_hi <= bounds.a_max + a_tol &&
+                               a_lo >= bounds.a_min - a_tol &&
+                               delta_hi <= bounds.delta_max + delta_tol &&
+                               delta_lo >= bounds.delta_min - delta_tol &&
+                               lambda_hi_over_bound <= lambda_tol &&
+                               lambda_lo >= -lambda_tol;
 
     if (!within_bounds) {
       std::ostringstream diag;
-      diag << "solver (" << solver_name << ") reported success but returned a ";
+      diag << "solver (" << solver_name << ") returned a ";
       if (!regular) {
         diag << "non-finite (NaN/Inf) solution";
       } else {

@@ -8,7 +8,7 @@
 
 namespace lmpc {
 
-// Tunables settable from Python at construction time (LMPCController's
+// Tunables settable from Python at construction time (LMPCController's //
 // pybind11 binding). Every symbol here is traceable to a section of
 // controllers/lmpc/DESIGN.md -- see the per-field comments.
 struct LmpcConfig {
@@ -46,13 +46,28 @@ struct LmpcConfig {
   // yet wired up for this first pass -- DESIGN.md SS8 step 8).
   casadi_int K = 32;
 
-  // U = {u | u_l <= u <= u_u} (DESIGN.md SS3). Defaults mirror
-  // gym/f110_gym/envs/f110_env.py's DEFAULT_PARAMS: a in [-a_max, a_max],
-  // delta in [s_min, s_max] (the simulator's own steering-angle limits).
+  // U = {u | u_l <= u <= u_u} (DESIGN.md SS3).
   double a_min = -9.51;
   double a_max = 9.51;
   double delta_min = -0.4189;
   double delta_max = 0.4189;
+
+  // Gym's steering actuator is RATE-limited (dynamic_models.py's
+  // steering_constraint, sv in [sv_min, sv_max]): a commanded angle is
+  // approached at at most sv_max rad/s, so the realized delta can move at
+  // most sv_max*dt per control step. Without the matching per-stage rate
+  // constraint in the FHOCP (QpBuilder), the plan treats delta as
+  // instantaneous and happily flips full lock (+/-0.4189, ~0.84 rad) in a
+  // single 0.025s step -- ~10x beyond what the plant can execute -- which
+  // was measured (2026-07-13) to chatter the real simulator into its own
+  // documented low-speed steering divergence (omega hit -420 rad/s in the
+  // RAW sim state) during launch. Default mirrors gym DEFAULT_PARAMS.
+  double sv_max = 3.2;
+
+  // Gym velocity limits used when converting solved acceleration to the
+  // public velocity-setpoint action and when scaling vx.
+  double v_min = -5.0;
+  double v_max = 20.0;
 
   // The ey half of X = {x | -W/2 <= ey <= W/2} (DESIGN.md SS3). Default is
   // conservative for this track: f110_gym_10's centerline half-width is
@@ -62,22 +77,29 @@ struct LmpcConfig {
   // every s.
   double ey_max = 1.0;
 
-  // Phi(w)'s c_u (control effort) and c_du (control-rate) weights
-  // (DESIGN.md SS3). Not pinned by the paper or upstream (DESIGN.md's open
-  // items) -- placeholder magnitudes for the first dummy-A/B/C pass, to be
-  // tuned once the base mechanism is verified to work at all.
-  double c_u = 0.01;
-  double c_du = 0.1;
+  // Per-control effort/rate weights applied in scaled control coordinates.
+  double c_a = 0.0;
+  double c_delta = 0.01;
+  double c_d_a = 0.1;
+  double c_d_delta = 0.1;
 
   // Penalty on normalized terminal safe-set mismatch. Dynamic-state mismatch
   // is penalized less than epsi/s/ey mismatch in LMPCController.
   double terminal_slack_weight = 100.0;
 
-  // v_max: SCALING REFERENCE ONLY (see scale_x below), NOT a hard QP bound
-  // -- DESIGN.md SS3 pins X's box constraint to ey alone; this does not
-  // add a vx constraint. Default mirrors
-  // gym/f110_gym/envs/f110_env.py's DEFAULT_PARAMS.
-  double v_max = 20.0;
+  // Exact-plus-quadratic penalty on the per-stage ey corridor slack
+  // (QpBuilder softens the ey box with a >= 0 slack per stage). A HARD ey
+  // box makes the QP instantly infeasible whenever the measured x_0 -- or
+  // any linearized stage under the steering-rate limit -- can't sit inside
+  // the corridor, killing the solve exactly when recovery matters
+  // (measured 2026-07-13: iteration 2 outran its data to ~5.6 m/s and
+  // qrqp failed with "Failed to calculate search direction" twice). The l1
+  // weight is sized so the marginal cost of the first meter of violation
+  // (~10) dwarfs anything the cost-to-go can offer (J spans [0, 1] after
+  // scaling.j normalization), which is what keeps the penalty exact: slack
+  // stays 0 whenever the hard corridor is achievable.
+  double ey_slack_l1 = 10.0;
+  double ey_slack_l2 = 100.0;
 
   // DESIGN.md's open item: variable scaling. The QP's decision vector mixes
   // wildly different physical magnitudes (s up to ~164m, vx O(1-20), ey
@@ -99,20 +121,6 @@ struct LmpcConfig {
 
   // DESIGN.md SS7: qrqp for correctness-first bring-up.
   std::string solver_name = "qrqp";
-
-  // Floors |vx| used ONLY when evaluating a linearization reference point
-  // (never the true state x0, never a warm-start value stored/returned
-  // elsewhere) -- GymDynamics reparametrizes to (v, beta) via
-  // beta = atan2(vy, vx), whose JACOBIAN is singular at vx = vy = 0 (the
-  // VALUE is fine -- atan2(0,0) = 0 -- only its derivative blows up).
-  // Every lap launches from rest, so stage 0's linearization point hits
-  // this exactly on the very first solve. Flooring vx alone is sufficient:
-  // it keeps vx^2+vy^2 bounded away from zero regardless of vy, and the
-  // true rest state is still reached in the solved trajectory since x0 is
-  // pinned to the real (unfloored) x_k via the QP's equality constraint --
-  // this only accepts a small linearization-accuracy tradeoff at that one
-  // stage, not a change to what the car is allowed to do.
-  double linearization_speed_floor = 1.0;
 };
 
 } // namespace lmpc

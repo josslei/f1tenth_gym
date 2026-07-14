@@ -12,18 +12,31 @@ safe-set cost-to-go, a normalized terminal slack, and state-aware safe-set
 neighbors over `[vx, epsi, s, ey]`. Error-dynamics regression (§5/§6) is not
 implemented -- this pass genuinely skips 3a/3b as designed.
 
+The QP control convention is `[a, delta]`. The Python wrapper converts solved
+acceleration into Gym's target-velocity action by inverting Gym's proportional
+velocity controller. Control effort and rate penalties are applied directly
+to scaled controls; Hessian regularization and `solve_limited()` remain in the
+QP path. Closed-loop state (2026-07-13, after the fixes documented at the
+end of this file): **full standing-start laps complete** (44.52s on D^0
+alone) under the lap-as-iteration scheme, and each completed lap is fed
+back into the safe set (`add_lap`). The remaining blocker for actual
+iteration-over-iteration improvement is the §5/§6 error-dynamics
+regression: without it the min-time QP's sprint-and-brake plans outrun the
+nominal model's cornering accuracy a little above the demonstrated speeds
+(see "Lap-as-iteration" below).
+
 ## 1. State and control vectors
 
 ```
 x = [vx, vy, omega, epsi, s, ey]^T   in R^6   (velocity block first, then pose)
-u = [a, delta]^T                      in R^2   (long. accel, front steering angle)
+u = [a, delta]^T                      in R^2   (long. accel, steering angle)
 ```
 
 Canonical indices (to be mirrored as named constants in code):
 
 ```
 IDX_VX = 0, IDX_VY = 1, IDX_OMEGA = 2, IDX_EPSI = 3, IDX_S = 4, IDX_EY = 5
-IDX_A  = 0, IDX_DELTA = 1
+IDX_A = 0, IDX_DELTA = 1
 ```
 
 This is the paper's own ordering (Section II), not the old port's
@@ -84,7 +97,8 @@ At time `k` of lap `j`, using `D^{j-1}`:
 ```
 J_k^j(x_k, u_{k-1}, z̄_k; D^{j-1}) =
 
-  min_{x,u,λ,e_N} Σ_{t=0}^{N-1} [ 1_F(x_t) + c_u‖u_t‖² + c_Δu‖u_t - u_{t-1}‖² ]
+  min_{x,u,λ,e_N} Σ_{t=0}^{N-1} [ 1_F(x_t) + u_t^T R u_t
+                                  + (u_t-u_{t-1})^T Rd (u_t-u_{t-1}) ]
                    + (J_N^{j-1}/J_scale)^T λ + ρ_N‖W_N e_N‖²
 
   s.t.  x_0 = x_k,  u_{-1} = u_{k-1}
@@ -108,7 +122,7 @@ Decision vector: `w = (x_0,...,x_N, u_0,...,u_{N-1}, λ, e_N)`,
 `n=6, m=2, q=KP`.
 
 ```
-Φ(w) = Σ [ 1_F(x_t) + c_u‖u_t‖² + c_Δu‖u_t-u_{t-1}‖² ]
+Φ(w) = Σ [ 1_F(x_t) + u_t^T R u_t + (u_t-u_{t-1})^T Rd (u_t-u_{t-1}) ]
        + (J/J_scale)^T λ + ρ_N‖W_N e_N‖²
 
 g_eq(w) = 0:
@@ -132,14 +146,11 @@ general NLPs and re-linearizes internally, which is both redundant (we've
 already linearized) and was the exact cause of a "0% success" dead end in
 the previous C++ port.
 
-**Command interface, no separate integration step.** `X[:, 1]` in the
-solved trajectory already *is* the model-consistent one-step-ahead state —
-it's produced by the dynamics equality constraint as part of the solve, at
-zero marginal cost. The velocity command handed to `env.step` is simply
-`X[IDX_VX, k]` for whichever preview index `k` we choose (`k=1` for the very
-next step), not a hand-rolled Euler/RK integration. If a value were ever
-needed outside a solve, `v_cmd = vx_0 + a*dt` is a single FMA — still O(1),
-never a performance concern.
+**Command interface.** The QP solves `[a, delta]`, while Gym consumes target
+velocity and target steering angle. The Python wrapper inverts Gym's
+proportional velocity controller so the requested setpoint produces `a` before
+Gym applies its acceleration constraints. `R` and `Rd` act on scaled controls
+so acceleration and steering remain comparable despite their different units.
 
 ## 5. Error dynamics regression (paper eq. 5–8) — pinned sparsity
 
@@ -164,7 +175,7 @@ row omega: Ae[2, 0:3]·x[2:3] + Be[2,1]·delta + Ce[2]  =  omega+ - ω̂z+
 - Every row's covariates are restricted to `[vx, vy, omega]` — never
   `epsi, s, ey`.
 - The `vx` row's only control covariate is `a` (never `delta`).
-- The `vy` and `omega` rows' only control covariate is `delta` (never `a`).
+- The `vy` and `omega` rows' only control covariate is `delta`.
 - Each row's regressor `Γ_l = [Ae_row(0:3), Be_scalar, Ce_scalar]` is a
   5-vector.
 
@@ -287,9 +298,8 @@ if that isn't fast enough, given its higher, separate build cost.
    and cost-to-go, not the regression).
 5. Build and solve the QP (§4) over x_{0:N}, u_{0:N-1}, λ, using the
    per-stage A_t,B_t,C_t from step 3 and the terminal data from step 4.
-6. Apply u_0* = [a*, delta*]. Converted to
-   ControlCommand(steering=delta*, velocity=X[IDX_VX, 1]) in the Python
-   wrapper -- no separate integration (§4).
+6. Apply `u_0* = [a*, delta*]`; the Python wrapper converts `a*` to Gym's
+   target-velocity command.
 7. Observe the new state, go to 1.
 8. On lap completion, the closed-loop trajectory (recorded every step via
    a generic record_step-style mechanism, not a lap-end-only pass)
@@ -326,10 +336,10 @@ from the start means turning on regression later is additive (fill in
    safe-set query, QP solve, receding-horizon warm-start shift.
 
 **Structural feasibility fixes.** State/control decisions are normalized by
-`QpScaling`, and the full original objective is divided by the largest loaded
-cost-to-go (including the control terms, preserving their tradeoff with
-`J_ss`). The
-terminal safe-set equality includes normalized slack, with lower relative
+`QpScaling`, and safe-set cost-to-go is divided by the largest loaded value.
+Control effort and rate costs act directly on scaled `U`, making their weights
+independent of physical units and the seed lap's length. The terminal safe-set
+equality includes normalized slack, with lower relative
 penalties on `vy/omega`, a medium penalty on `vx`, and higher penalties on
 `epsi/s/ey`. The terminal neighbor query uses normalized
 `[vx, epsi, s, ey]` distance rather than position alone. Lambda retains the
@@ -385,9 +395,147 @@ first place -- swapped in
 validated), and the resulting D^0 completes cleanly (`mean|ey|=0.018m`,
 no spin).
 
+## Closed-loop integration fixes (2026-07-13)
+
+Six independent root causes, fixed in one pass, each diagnosed by direct
+measurement (the env-gated `LMPC_DEBUG_STAGES`/`LMPC_DEBUG_TERMINAL` dumps
+added to `lmpc_controller.cpp`/`qp_builder.cpp`) -- took the closed loop
+from "car never moves" to 46.5s (~the full lap) of stable 3.5-4.0 m/s
+driving. Each fix EXPOSED the next failure; the order below is causal.
+`recom.md` (repo root) has the longer narrative and the remaining-problem
+list.
+
+1. **Gym PID inversion needs gym's own 2/10 gain branch** (`lmpc.py`).
+   gym's `pid()` uses `kp = 10*a_max/...` only when `current_speed > 0`;
+   at a standing start (`0 > 0` is false) it uses `2*...` -- a constant-10
+   inversion under-delivers launch acceleration exactly 5x. Current speed
+   must be gym's signed `state[3]` (what obs `linear_vels_x` carries),
+   never a magnitude. Setpoint clipped to `[v_min, v_max]`.
+
+2. **First solve warm-starts from the recorded D^0 segment, not a
+   zero-control rollout** (`SafeSet::trajectory_segment`,
+   `LMPCController::seed_warm_start_from_safe_set`). From rest, a `u=0`
+   rollout parks the whole horizon at the start line; the terminal query
+   then finds D^0's own launch samples (near-max J, zero mismatch), every
+   cost term is ~0, and nothing pulls the car forward. `SafeSet` now keeps
+   the CSV's `a`/`delta` columns (`SafeSetSample::u`/`has_control`).
+   Related: `scripts/lmpc_collect_seed_lap.py` drives an unrecorded
+   warm-up lap and records lap 2, keeping launch transients out of D^0.
+
+3. **`x_warm` is re-rolled out from the MEASURED state before every solve;
+   only `u_warm` shifts** (`rollout_warm_states_from_current`,
+   `shift_warm_start`). Shifting predicted states and patching only column
+   0 with the measurement leaves stages 1..N as stale predictions that
+   drift from reality with nothing pulling them back -- the accumulated
+   inconsistency is what produced qrqp's "Failed to calculate search
+   direction". (Post-hoc clamping of slightly-violating solutions was
+   tried and reverted, twice across two architectures: x_traj is solved
+   self-consistently against the UNCLAMPED u_traj, so clamping corrupts
+   the next warm start worse than failing does.)
+
+4. **`GymDynamics` models BOTH of gym's regimes, C^1-blended over
+   v in [0.5, 1.0]** (kinematic weight exactly 1 below 0.5). The
+   tire-force branch's `1/v..1/v^2` terms have O(10^3) eigenvalues below
+   ~1 m/s, and the Euler rollout at `dt=0.025` is violently unstable there
+   under any nonzero steering (measured: omega 0 -> 19 -> -190 rad/s in
+   two stages, feeding garbage linearization references to the QP). Gym's
+   own `|v| < 0.5` kinematic switch is a REGIME boundary (the tire model
+   is invalid at low slip velocity, not merely stiff); the nominal model
+   must respect it, not smooth over it with a tiny epsilon floor.
+
+5. **Per-stage steering-rate constraint
+   `|delta_t - delta_{t-1}| <= sv_max*dt`** (`LmpcConfig::sv_max = 3.2`,
+   `QpBounds::ddelta_max`). Gym's steering actuator is rate-limited to
+   ~0.08 rad per 0.025s step; without the constraint the plan flips full
+   lock (~0.84 rad) in one step, 10x beyond executable, chattering the
+   real simulator into its documented low-speed steering divergence (raw
+   sim omega hit -420 rad/s). `LaunchSteeringGuard` is ALSO reinstated in
+   `runs/lmpc_drive.py` (zero steer below 2.0 m/s, latch at 3.0, same as
+   the seed collector): gym diverges at low speed even under small
+   rate-limited steering -- a plant defect no QP-side change reaches.
+
+6. **Safe-set locality metric is NOT the QP variable scaling**
+   (`LMPCController::safe_set_query_scale`). Normalizing the query
+   metric's `s` by track length (166m) makes position nearly free (2m of
+   s = 0.012), so "nearest" is decided by noise in the other coordinates
+   -- measured: the terminal query returned samples 2m BEHIND the
+   terminal reference, the cost-to-go stopped pulling forward, and the
+   car decelerated 3.8 -> 1.5 m/s until the QP failed. The query now uses
+   `s` in raw meters (§2's `D = diag(0,0,0,0,1,1)` spirit, with the
+   normalized `vx/epsi/ey` terms as mild tie-breakers); the QP keeps its
+   own conditioning scale. Two different concepts -- keep them separate.
+
+Robustness on top: a solve failure discards the warm start, reseeds
+`u_warm` from the D^0 segment at the current state, and retries once
+(`solve_once`); qrqp's known small-box-violation false-convergence is
+accepted up to 2% of each bound's range WITHOUT mutating the solution
+(gym's actuator clamps at the physical limit regardless).
+
+## Lap-as-iteration and the start/finish seam (2026-07-13, second pass)
+
+The seam blocker (terminal reference running past D^0's data end; across
+the line the query landed on lap-start samples with `J ~= max`, the
+cost-to-go pointed backward, the car braked 3.7 -> 2.3 m/s and the QP
+died at the start pose) is resolved by two coupled decisions:
+
+1. **Lap-as-iteration, not a wrapped-lap copy.** Crossing the line ends
+   iteration `j` exactly as the paper defines it: the runner
+   (`runs/lmpc_drive.py`) records the driven `(x_k, u_k)` per step,
+   computes `J_k = T - k` at the crossing, calls
+   `LMPCController::add_lap`, resets the sim + controller, and relaunches
+   from rest. `s` stays non-periodic; `J` keeps its single-task
+   steps-to-finish meaning; the reset initial state matches D^0's own
+   standing-start initial condition. The rejected alternative -- virtual
+   forward candidates `(s + L, J - T_lap)` -- fixes `J`'s continuity but
+   not the STATE's: the copied lap-start samples still have `vx ~= 0`, so
+   a flying finish would still brake toward a standing start. Continuous
+   multi-lap driving needs flying-lap data plus unwrapped-s/periodic-kappa
+   /continuing-task-J redefinitions -- out of scope.
+   Crashed/truncated laps are never added (the safe set's meaning rests
+   on every stored trajectory reaching the finish); `SafeSet` keeps at
+   most `kMaxLaps = 3` laps, evicting the oldest.
+2. **Finish-mode terminal set for the last horizons.** Even within one
+   lap, the terminal reference passes the stored data's end a few
+   horizons before the crossing; clamping the query onto each lap's final
+   samples anchors `x_N` BEHIND the reference with `J` already ~0, making
+   "park on the data endpoint" the optimum (the measured braking above).
+   When `s_ref > SafeSet::data_end_s()`, `solve_once` swaps in a forward
+   absorbing finish set: queried anchors keep their dynamic-state rows,
+   the `s` row is matched to the reference itself (no backward pull),
+   `J = 0`.
+
+Also in the second pass: the `ey` box is now SOFT (per-stage slack,
+exact-plus-quadratic penalty `ey_slack_l1/l2` -- a hard box made the QP
+instantly infeasible whenever `x_0` or the reachable tube left the
+corridor), and the runner has a controlled-brake fallback (~4.8 m/s^2,
+holding last steering, LMPC re-attempted every step) for double solve
+failures.
+
+**Measured after the second pass:** iteration 0 completes the full lap
+(44.52s, 1781 steps) and grows the safe set. Iteration 1 launches faster
+but self-terminates mid-lap: with `c_a = 0`, a soft terminal anchor, and
+J rewarding a further-along `x_N`, each solve rationally plans
+"sprint now, brake at horizon end" and the receding horizon re-defers the
+brake -- correct min-time behavior IF the model is right, but the
+uncorrected nominal model overestimates cornering grip slightly above the
+demonstrated 3.5-4 m/s (one-step vx prediction error is ~0; the failures
+are lateral: bursts to ~6.1 m/s ending in real slides, epsi -0.6 rad).
+This is precisely the mismatch §5/§6's regression corrects, which makes
+the regression the next milestone -- `add_lap` already stores the
+`(x_k, u_k, x_{k+1})` transitions it needs.
+
 ## Open items (not yet pinned)
 
-- `h` (kernel bandwidth) and `ε` (ridge regularization) for the error
-  regression — no upstream reference value exists at all (§6: upstream's
-  regression path is never exercised), so these need to be picked and
-  tuned from scratch, unlike `K`/`P`/`Q`/`D` above.
+- **§5/§6 error-dynamics regression -- the blocker for improvement past
+  D^0** (measurements above). `h` (kernel bandwidth) and `ε` (ridge
+  regularization) have no upstream reference value at all (§6: upstream's
+  regression path is never exercised), so both need picking and tuning
+  from scratch, unlike `K`/`P`/`Q`/`D` above.
+- Gym's speed-dependent acceleration cap (`accl_constraints`'s
+  `v_switch = 7.319` scaling) is not modeled -- the QP's constant
+  `a_max = 9.51` becomes optimistic once speeds rise well past D^0's 3.5.
+  Freeze `a_max,t = a_max * min(1, v_switch/v_ref,t)` per stage at the
+  linearization reference to stay convex.
+- Realized steering lags commanded by up to one rate-step; the faithful
+  formulation adds delta as a state with `u = [a, sv]`. Biggest schema
+  change -- last.

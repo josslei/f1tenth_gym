@@ -23,6 +23,27 @@ casadi::DM dm_from_array(const py::array_t<double> &arr) {
   return casadi::DM(std::vector<double>(data, data + info.shape[0]));
 }
 
+// 2-D counterpart for matrix-valued inputs (add_lap's trajectories). Same
+// explicit (i, j) loop rationale as array2d_from_dm below: sidesteps numpy
+// row-major vs. CasADi column-major layout reasoning, and add_lap runs once
+// per LAP, not per control step, so the loop's cost is irrelevant.
+casadi::DM dm2d_from_array(const py::array_t<double> &arr) {
+  const py::buffer_info info = arr.request();
+  if (info.ndim != 2) {
+    throw std::invalid_argument("expected a 2-D array");
+  }
+  const auto rows = static_cast<casadi_int>(info.shape[0]);
+  const auto cols = static_cast<casadi_int>(info.shape[1]);
+  casadi::DM dm = casadi::DM::zeros(rows, cols);
+  const auto view = arr.unchecked<2>();
+  for (casadi_int i = 0; i < rows; ++i) {
+    for (casadi_int j = 0; j < cols; ++j) {
+      dm(i, j) = view(static_cast<py::ssize_t>(i), static_cast<py::ssize_t>(j));
+    }
+  }
+  return dm;
+}
+
 py::array_t<double> array_from_dm(const casadi::DM &dm) {
   const std::vector<double> values = dm.get_elements();
   py::array_t<double> arr(static_cast<py::ssize_t>(values.size()));
@@ -87,20 +108,24 @@ PYBIND11_MODULE(lmpc_native, m) {
       .def_readwrite("K", &lmpc::LmpcConfig::K)
       .def_readwrite("a_min", &lmpc::LmpcConfig::a_min)
       .def_readwrite("a_max", &lmpc::LmpcConfig::a_max)
+      .def_readwrite("v_min", &lmpc::LmpcConfig::v_min)
+      .def_readwrite("v_max", &lmpc::LmpcConfig::v_max)
       .def_readwrite("delta_min", &lmpc::LmpcConfig::delta_min)
       .def_readwrite("delta_max", &lmpc::LmpcConfig::delta_max)
+      .def_readwrite("sv_max", &lmpc::LmpcConfig::sv_max)
       .def_readwrite("ey_max", &lmpc::LmpcConfig::ey_max)
-      .def_readwrite("c_u", &lmpc::LmpcConfig::c_u)
-      .def_readwrite("c_du", &lmpc::LmpcConfig::c_du)
+      .def_readwrite("c_a", &lmpc::LmpcConfig::c_a)
+      .def_readwrite("c_delta", &lmpc::LmpcConfig::c_delta)
+      .def_readwrite("c_d_a", &lmpc::LmpcConfig::c_d_a)
+      .def_readwrite("c_d_delta", &lmpc::LmpcConfig::c_d_delta)
       .def_readwrite("terminal_slack_weight",
                      &lmpc::LmpcConfig::terminal_slack_weight)
-      .def_readwrite("v_max", &lmpc::LmpcConfig::v_max)
+      .def_readwrite("ey_slack_l1", &lmpc::LmpcConfig::ey_slack_l1)
+      .def_readwrite("ey_slack_l2", &lmpc::LmpcConfig::ey_slack_l2)
       .def_readwrite("scale_x_vy", &lmpc::LmpcConfig::scale_x_vy)
       .def_readwrite("scale_x_omega", &lmpc::LmpcConfig::scale_x_omega)
       .def_readwrite("scale_x_epsi", &lmpc::LmpcConfig::scale_x_epsi)
-      .def_readwrite("solver_name", &lmpc::LmpcConfig::solver_name)
-      .def_readwrite("linearization_speed_floor",
-                     &lmpc::LmpcConfig::linearization_speed_floor);
+      .def_readwrite("solver_name", &lmpc::LmpcConfig::solver_name);
 
   py::class_<lmpc::LMPCController>(m, "NativeLMPCController")
       .def(py::init<const lmpc::LmpcConfig &>(), py::arg("config"))
@@ -118,7 +143,17 @@ PYBIND11_MODULE(lmpc_native, m) {
            [](const lmpc::LMPCController &self) {
              return array_from_dm(self.predicted_next_state());
            })
-      .def("predicted_trajectory", [](const lmpc::LMPCController &self) {
-        return array2d_from_dm(self.predicted_trajectory());
-      });
+      .def("predicted_trajectory",
+           [](const lmpc::LMPCController &self) {
+             return array2d_from_dm(self.predicted_trajectory());
+           })
+      .def(
+          "add_lap",
+          [](lmpc::LMPCController &self, const py::array_t<double> &x_lap,
+             const py::array_t<double> &u_lap,
+             const py::array_t<double> &J_lap) {
+            self.add_lap(dm2d_from_array(x_lap), dm2d_from_array(u_lap),
+                         dm_from_array(J_lap));
+          },
+          py::arg("x_lap"), py::arg("u_lap"), py::arg("J_lap"));
 }
