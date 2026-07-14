@@ -236,24 +236,19 @@ casadi::DM LMPCController::control() {
     seed_warm_start_from_safe_set();
   }
 
-  QpSolution solution = solve_once();
+  // No retry: exactly one solve per control() call, bounded by the
+  // solver's own max_iter, so per-step solve time stays bounded instead of
+  // silently doubling on every failure (measured 2026-07-14: a retry here
+  // was why solve time -- and therefore viewer FPS -- degraded so sharply
+  // once the QP started failing, since every failing step paid for TWO
+  // full solves before giving up). Every infeasibility is surfaced via
+  // this exception, not masked by a second attempt; the caller's fallback
+  // brake (runs/lmpc_drive.py) is what actually handles a real failure
+  // (including gym's own low-speed plant divergence), not this layer.
+  const QpSolution solution = solve_once();
   if (!solution.success) {
-    // One retry with the shifted warm start discarded and u_warm reseeded
-    // from the recorded D^0 segment at the CURRENT state: a solve failure
-    // caused by a degraded/diverged warm-start sequence is recoverable
-    // this way (the reseed is exactly the known-good initialization the
-    // very first solve uses), while a genuinely infeasible QP fails the
-    // same way twice and still throws below -- so this never masks a real
-    // failure, it only strips away warm-start corruption as a cause.
-    const std::string first_failure = solution.message;
-    seed_warm_start_from_safe_set();
-    solution = solve_once();
-    if (!solution.success) {
-      throw std::runtime_error(
-          "LMPCController::control: QP solve failed twice (first: " +
-          first_failure +
-          "; retry after D^0 warm-start reseed: " + solution.message + ")");
-    }
+    throw std::runtime_error("LMPCController::control: QP solve failed: " +
+                             solution.message);
   }
 
   x_pred = solution.x_traj;

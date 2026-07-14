@@ -351,11 +351,19 @@ def main() -> None:
                 # FALLBACK_BRAKE_DELTA_V's comment has the rationale; this is
                 # an actuator-level safety net like the steering guard above,
                 # not a second controller -- the LMPC is re-attempted every step.
+                # Every failure is printed, not just the one that exhausts the
+                # fallback budget: LMPCController::control() no longer retries
+                # internally (single solve per step, bounded by the solver's
+                # own max_iter), so each RuntimeError here is one genuine,
+                # unmasked solver report -- surfacing all of them is what lets
+                # an infeasibility be diagnosed from where it STARTS, not just
+                # from the final "gave up" message.
                 fallback_steps += 1
+                print(f"iteration {iteration} step fallback({fallback_steps}): {e}")
                 if fallback_steps > MAX_CONSECUTIVE_FALLBACK_STEPS:
                     print(
                         f"iteration {iteration}: solver never recovered under "
-                        f"the fallback brake: {e}"
+                        f"the fallback brake"
                     )
                     crashed = True
                     break
