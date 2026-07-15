@@ -81,6 +81,15 @@ std::vector<SafeSetSample> load_lap(const std::string &csv_path) {
   return samples;
 }
 
+void validate_lap_costs(const std::vector<SafeSetSample> &lap,
+                        const std::string &context) {
+  for (const SafeSetSample &sample : lap) {
+    if (!std::isfinite(sample.J)) {
+      throw std::runtime_error(context + ": lap contains non-finite cost");
+    }
+  }
+}
+
 // The query side of normalized_distance_sq below, precomputed once per
 // trajectory_segment() call rather than once per candidate.
 // inv_scale_* are 1/scale, so the hot loop multiplies instead of divides.
@@ -143,13 +152,16 @@ SafeSet::SafeSet(const std::string &seed_lap_csv_path, double track_length)
     throw std::invalid_argument(
         "SafeSet::SafeSet: track_length must be finite and positive");
   }
-  laps.push_back(load_lap(seed_lap_csv_path));
+  std::vector<SafeSetSample> lap = load_lap(seed_lap_csv_path);
+  validate_lap_costs(lap, "SafeSet::SafeSet");
+  laps.push_back(std::move(lap));
 }
 
 void SafeSet::add_lap(std::vector<SafeSetSample> lap) {
   if (lap.empty()) {
     throw std::invalid_argument("SafeSet::add_lap: empty lap");
   }
+  validate_lap_costs(lap, "SafeSet::add_lap");
   laps.push_back(std::move(lap));
   if (laps.size() > kMaxLaps) {
     laps.erase(laps.begin());
@@ -243,9 +255,32 @@ SafeSet::QueryResult SafeSet::query_local_segments(double s_query,
                         sample.J - static_cast<double>(cycle * period)});
     }
 
+    constexpr double kCostTolerance = 1e-9;
     const double endpoint_cost = selected.back().extended_J;
+    std::vector<double> local_costs;
+    local_costs.reserve(selected.size());
     for (const SelectedPoint &point : selected) {
       const double local_J = point.extended_J - endpoint_cost;
+      if (!std::isfinite(point.extended_J) || local_J < -kCostTolerance) {
+        throw std::runtime_error(
+            "SafeSet::query_local_segments: invalid local terminal cost");
+      }
+      if (!local_costs.empty() &&
+          local_J > local_costs.back() + kCostTolerance) {
+        throw std::runtime_error(
+            "SafeSet::query_local_segments: local terminal cost increases");
+      }
+      local_costs.push_back(local_J);
+    }
+    if (std::abs(local_costs.back()) > kCostTolerance) {
+      throw std::runtime_error(
+          "SafeSet::query_local_segments: final local terminal cost is not "
+          "zero");
+    }
+
+    for (std::size_t j = 0; j < selected.size(); ++j) {
+      const SelectedPoint &point = selected[j];
+      const double local_J = local_costs[j];
       const SafeSetSample &sample = *point.sample;
       casadi::DM x_shifted = sample.x;
       x_shifted(dynamics::S) = point.lifted_s;

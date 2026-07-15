@@ -1,7 +1,13 @@
 import numpy as np
 
 from utils.f110_env import F1TenthObservationConfig, build_observation, observation_dim
-from utils.waypoint_utils import nearest_waypoint_index, resample_path
+from utils.waypoint_utils import (
+    closed_path_length,
+    cumulative_arc_lengths,
+    nearest_waypoint_index,
+    project_to_closed_path,
+    resample_path,
+)
 
 
 # ── resample_path ─────────────────────────────────────────────────────────────
@@ -44,6 +50,24 @@ class TestNearestWaypointIndex:
         )
 
         assert nearest_waypoint_index(waypoints, np.array([125.2, 0.0])) == 125
+
+
+class TestClosedPathGeometry:
+    def test_length_includes_closing_segment(self):
+        path = np.array([[0.0, 0.0], [2.0, 0.0], [2.0, 1.0]])
+
+        assert np.isclose(closed_path_length(path), 3.0 + np.sqrt(5.0))
+
+    def test_projection_uses_closing_segment(self):
+        path = np.array([[0.0, 0.0], [2.0, 0.0], [2.0, 1.0]])
+        path_s = cumulative_arc_lengths(path)
+        midpoint = 0.5 * (path[-1] + path[0])
+
+        s, ey, heading = project_to_closed_path(path, path_s, midpoint, 0)
+
+        assert np.isclose(s, 3.0 + 0.5 * np.sqrt(5.0))
+        assert np.isclose(ey, 0.0)
+        assert np.isclose(heading, np.arctan2(-1.0, -2.0))
 
 
 # ── observation_dim with waypoints ────────────────────────────────────────────

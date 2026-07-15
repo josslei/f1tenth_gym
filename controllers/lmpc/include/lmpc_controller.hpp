@@ -15,6 +15,8 @@
 
 namespace lmpc {
 
+struct LMPCControllerTestAccess;
+
 // Per-phase wall-clock cost of the last solve_once() call, in milliseconds
 // (recom.md's requested profiling breakdown). rollout_lin_ms covers
 // solve_once()'s single combined rollout+linearize loop (recom.md item 1:
@@ -117,7 +119,15 @@ public:
   // has been called at least once (default-constructed/all-zero otherwise).
   const ControllerTimings &last_timings() const { return timings; }
 
+  // Normalized signed terminal error from the last accepted solve, in
+  // StateIndex order. Reset to zero with the controller.
+  const casadi::DM &last_terminal_slack_value() const {
+    return last_terminal_slack;
+  }
+
 private:
+  friend struct LMPCControllerTestAccess;
+
   LmpcConfig config;
 
   dynamics::GymDynamics dynamics_model;
@@ -156,10 +166,12 @@ private:
   // the first solve.
   casadi::DM lambda_warm; // safe_set_size x 1
   bool has_warm_start;
+  int consecutive_solve_failures;
 
   // The last solve's own predicted state trajectory (kStateDim x (N+1)) --
   // backs predicted_next_state()/predicted_trajectory() above.
   casadi::DM x_pred;
+  casadi::DM last_terminal_slack;
 
   // Backs last_timings() above; updated at the end of every solve_once().
   ControllerTimings timings;
@@ -189,6 +201,8 @@ private:
   // from the next measured state by solve_once()'s own rollout+linearize
   // loop.
   void shift_warm_start(const QpSolution &solution);
+  void record_solve_failure();
+  void record_solve_success();
 
   // One full FHOCP pass (rollout+linearize -> terminal query -> QP solve)
   // against the current x/u_warm -- factored out of control() for

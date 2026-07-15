@@ -158,6 +158,10 @@ PYBIND11_MODULE(lmpc_native, m) {
              return array2d_from_dm(self.predicted_trajectory());
            })
       .def("last_timings", &lmpc::LMPCController::last_timings)
+      .def("last_terminal_slack",
+           [](const lmpc::LMPCController &self) {
+             return array_from_dm(self.last_terminal_slack_value());
+           })
       .def(
           "add_lap",
           [](lmpc::LMPCController &self, const py::array_t<double> &x_lap,

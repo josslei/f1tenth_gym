@@ -291,7 +291,10 @@ QpSolution QpBuilder::solve(const casadi::DM &x_k, const casadi::DM &u_prev,
     opti.set_initial(X, x_warm / scaling.x);
     opti.set_initial(U, u_warm / scaling.u);
     opti.set_initial(Lambda, lambda_warm);
-    opti.set_initial(ETerminal, casadi::DM::zeros(dynamics::kStateDim, 1));
+    const casadi::DM projection_warm = casadi::DM::mtimes(X_ss, lambda_warm);
+    const casadi::DM terminal_slack_warm =
+        (x_warm(Slice(), N) - projection_warm) / scaling.x;
+    opti.set_initial(ETerminal, terminal_slack_warm);
     // recom.md item 2: dual warm start, IPOPT-only (this class's own member
     // comment has the scoping rationale). Skipped on a QpBuilder's first
     // solve (has_dual_warm_start starts false) or right after this instance

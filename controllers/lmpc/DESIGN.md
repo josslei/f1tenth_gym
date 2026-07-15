@@ -336,7 +336,7 @@ from the start means turning on regression later is additive (fill in
    `Linearizer`: builds the CasADi Jacobian graph once per
    (DynamicsModel, Integrator, dt), evaluates it at any numeric z̄).
 3. Safe-set loader — done (`include/safe_set.hpp`'s `SafeSet`: loads one or
-   more driven laps, K-NN query under §2's `D`).
+   more driven laps and selects periodic contiguous terminal segments).
 4. QP construction (§4) — done (`include/qp_builder.hpp`'s `QpBuilder`:
    builds the multi-shooting Opti('conic') graph once, re-parametrized and
    re-solved every control step).
@@ -347,13 +347,13 @@ from the start means turning on regression later is additive (fill in
 **Structural feasibility fixes.** State/control decisions are normalized by
 `QpScaling`, and safe-set cost-to-go is divided by D^0's fixed maximum value.
 Control effort and rate costs act directly on scaled `U`, making their weights
-independent of physical units and the seed lap's length. The terminal neighbor
-query uses normalized `[vx, epsi, s, ey]` distance rather than position alone.
-It returns exactly `K` points per stored lap, so `q = K*P`; `Lambda` is the
-full q-dimensional decision variable with `0<=Lambda<=1`, `1^T Lambda=1`, and
-the hard equality `x_N = X_ss Lambda`. No terminal slack or Lambda ridge is
-added. Because q grows as completed laps are stored, `QpBuilder` is rebuilt
-once after each `add_lap()`, while the cost-to-go scale remains fixed to D^0.
+independent of physical units and the seed lap's length. The terminal query
+selects a contiguous `K`-sample window per lap by periodic `s`, so `q = K*P`.
+`Lambda` is the full q-dimensional decision variable with `0<=Lambda<=1` and
+`1^T Lambda=1`. A normalized six-state terminal slack softens
+`x_N = X_ss Lambda + diag(scale_x)e_N` with a high quadratic penalty. Because
+q grows as completed laps are stored, `QpBuilder` is rebuilt once after each
+`add_lap()`, while the cost-to-go scale remains fixed to D^0.
 
 **`SIM_TIMESTEP` switched from an accidental 0.01 to the originally-
 intended 0.025 (2026-07-13)** -- `gym/f110_gym/envs/f110_env.py`'s
@@ -469,11 +469,12 @@ list.
    normalized `vx/epsi/ey` terms as mild tie-breakers); the QP keeps its
    own conditioning scale. Two different concepts -- keep them separate.
 
-Robustness on top: a solve failure discards the warm start, reseeds
-`u_warm` from the D^0 segment at the current state, and retries once
-(`solve_once`); qrqp's known small-box-violation false-convergence is
-accepted up to 2% of each bound's range WITHOUT mutating the solution
-(gym's actuator clamps at the physical limit regardless).
+Robustness on top: every `control()` performs exactly one solve. A failure
+clears stale IPOPT dual multipliers but retains the shifted primal controls;
+after three consecutive failures, the next control period reseeds `u_warm`
+from the safe-set trajectory. qrqp's known small-box-violation
+false-convergence is accepted up to 2% of each bound's range without mutating
+the solution (gym's actuator clamps at the physical limit regardless).
 
 ## Lap-as-iteration and the start/finish seam (2026-07-13, second pass)
 
@@ -481,6 +482,11 @@ The seam blocker (terminal reference running past D^0's data end; across
 the line the query landed on lap-start samples with `J ~= max`, the
 cost-to-go pointed backward, the car braked 3.7 -> 2.3 m/s and the QP
 died at the start pose) is resolved by two coupled decisions:
+
+The shared track period is the full closed-loop arclength: cumulative sample
+distance through the final centerline point plus the closing segment back to
+the first. Native curvature interpolates across that closing interval, and
+online/seed Frenet projection evaluates the same closed segment explicitly.
 
 1. **Lap-as-iteration, continuous physical episode (2026-07-15, third
    pass).** `env.reset()`/`controller.reset()` fire exactly ONCE for the

@@ -15,11 +15,9 @@ namespace lmpc {
 // or A_t/B_t/C_t would be linearized against a curvature that doesn't match
 // where the state actually says the car is.
 //
-// Matches that script's conventions exactly:
-//  - s: open (non-periodic) cumulative arc length over consecutive points,
-//    s[0] = 0 (utils/waypoint_utils.cumulative_arc_lengths). NOT wrapped
-//    modulo track length -- the seed lap's own s never wraps either, since
-//    it's recorded over a single lap.
+// Matches that script's closed-loop arclength convention exactly. Sample
+// coordinates s_[i] remain cumulative from point 0, while length() also
+// includes the final segment from the last point back to point 0.
 //  - heading: forward-difference tangent between consecutive points, with
 //    the last point's heading measured back to the first (the CSV already
 //    describes one closed loop, so this is the true closing tangent, not a
@@ -36,8 +34,8 @@ class Track {
 public:
   explicit Track(const std::string &centerline_csv_path);
 
-  // Total arclength spanned by the loaded centerline (open path, one lap).
-  double length() const { return s_.back(); }
+  // Total closed-loop arclength, including last point -> first point.
+  double length() const { return track_length_; }
 
   // Curvature at arclength s (positive = left turn). PERIODIC in s (s mod
   // length()), not clamped: a receding-horizon prediction that starts near
@@ -54,6 +52,7 @@ public:
 private:
   std::vector<double> s_; // cumulative arclength per sample, size N, s_[0]=0
   std::vector<double> kappa_; // curvature per sample, size N
+  double track_length_;
 };
 
 } // namespace lmpc

@@ -24,7 +24,12 @@ from typing import Any, Callable
 import numpy as np
 
 from controllers.controller_base import ControlCommand, Controller, VehicleState
-from utils.waypoint_utils import cumulative_arc_lengths, nearest_waypoint_index
+from utils.waypoint_utils import (
+    closed_path_length,
+    cumulative_arc_lengths,
+    nearest_waypoint_index,
+    project_to_closed_path,
+)
 
 _NATIVE_DIR = Path(__file__).resolve().parent
 if str(_NATIVE_DIR) not in sys.path:
@@ -46,8 +51,8 @@ class _PeriodicProgress:
     earlier version of this class did: `self._lap_origin =
     self._unwrapped`), each lap's own s=0 would sit at a slightly
     different PHYSICAL point on the track -- s=2 in lap 0, lap 1, and lap
-    2 would each mean a different location, even though SafeSet::query()
-    treats them as the same coordinate system for its KNN/convex-hull
+    2 would each mean a different location, even though the safe-set query
+    treats them as the same coordinate system for its segment/convex-hull
     match, and Track::curvature(s) would be evaluated at the wrong
     physical position from lap 2 onward (a silently phase-shifted
     curvature profile). Anchoring instead to lap_index * track_length
@@ -161,10 +166,11 @@ class LMPCController(Controller):
         self._path_psi = heading - np.pi / 2
         self._path_s = cumulative_arc_lengths(xy)
         self._last_idx = -1
-        # Same convention/algorithm as native Track::length() (cumulative
-        # open arclength over the same CSV) -- not an independent second
-        # definition, see _project_frenet().
-        self.track_length = float(self._path_s[-1])
+        # Same closed-loop convention as native Track::length(), including the
+        # last-point -> first-point segment.
+        self.track_length = closed_path_length(xy)
+        self._closed_path_s = np.append(self._path_s, self.track_length)
+        self._closed_path_xy = np.vstack([xy, xy[0]])
         self._progress = _PeriodicProgress(self.track_length)
 
         # A fixed index-count search window silently becomes physically
@@ -326,6 +332,10 @@ class LMPCController(Controller):
             "postcheck": t.postcheck_ms,
         }
 
+    def last_terminal_slack(self) -> np.ndarray:
+        """Normalized terminal relaxation from the last successful solve."""
+        return self._native.last_terminal_slack()
+
     def predicted_horizon_xy(self) -> np.ndarray:
         """World-frame (x, y) of the last solve's predicted state trajectory.
 
@@ -353,9 +363,11 @@ class LMPCController(Controller):
         # pile-up-onto-the-last-waypoint artifact: wrapped points land at
         # their true position near the start of the track, not the end.
         s = np.mod(s, self.track_length)
-        x = np.interp(s, self._path_s, self._path_xy[:, 0])
-        y = np.interp(s, self._path_s, self._path_xy[:, 1])
-        heading = np.interp(s, self._path_s, self._path_psi) + np.pi / 2
+        x = np.interp(s, self._closed_path_s, self._closed_path_xy[:, 0])
+        y = np.interp(s, self._closed_path_s, self._closed_path_xy[:, 1])
+        segment_idx = np.searchsorted(self._closed_path_s, s, side="right") - 1
+        segment_idx = np.clip(segment_idx, 0, self._path_xy.shape[0] - 1)
+        heading = self._path_psi[segment_idx] + np.pi / 2
         normal_x = -np.sin(heading)
         normal_y = np.cos(heading)
         return np.column_stack([x + ey * normal_x, y + ey * normal_y])
@@ -367,14 +379,9 @@ class LMPCController(Controller):
         idx = nearest_waypoint_index(
             self._path_xy, position, self._last_idx, search_window=self._search_window
         )
-        # Same +pi/2 correction as scripts/lmpc_collect_seed_lap.py's
-        # project_frenet(): the stored psi is offset -pi/2 from true heading.
-        heading = float(self._path_psi[idx]) + np.pi / 2
-        tangent = np.array([np.cos(heading), np.sin(heading)])
-        normal = np.array([-np.sin(heading), np.cos(heading)])
-        delta = position - self._path_xy[idx]
-        s_mod = float(self._path_s[idx] + np.dot(delta, tangent))
-        ey = float(np.dot(delta, normal))
+        s_mod, ey, heading = project_to_closed_path(
+            self._path_xy, self._path_s, position, idx
+        )
         epsi = _wrap_angle(vehicle_state.yaw - heading)
         self._last_idx = idx
         # s_mod is the raw geometric projection (periodic on the closed

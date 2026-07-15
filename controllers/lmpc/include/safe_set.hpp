@@ -41,8 +41,8 @@ struct SafeSetSample {
 class SafeSet {
 public:
   // DESIGN.md SS2's P: at most this many laps are kept; add_lap() evicts
-  // the OLDEST lap once full. Without a cap the per-query work (a KNN pass
-  // over every stored lap) grows without bound as laps accumulate --
+  // the OLDEST lap once full. Without a cap the per-query work (a segment
+  // search over every stored lap) grows without bound as laps accumulate --
   // another FPS-degrades-with-progress source, and later laps are faster
   // (lower J) than what they evict anyway, so nothing of value is lost.
   static constexpr std::size_t kMaxLaps = 3;

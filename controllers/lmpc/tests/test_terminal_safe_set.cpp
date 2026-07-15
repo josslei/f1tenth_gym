@@ -8,8 +8,36 @@
 #include <vector>
 
 #include "dynamics/common.hpp"
+#include "lmpc_controller.hpp"
 #include "qp_builder.hpp"
 #include "safe_set.hpp"
+#include "track.hpp"
+
+namespace lmpc {
+
+struct LMPCControllerTestAccess {
+  static void set_warm_start(LMPCController &controller, bool ready) {
+    controller.has_warm_start = ready;
+  }
+
+  static bool has_warm_start(const LMPCController &controller) {
+    return controller.has_warm_start;
+  }
+
+  static int failure_count(const LMPCController &controller) {
+    return controller.consecutive_solve_failures;
+  }
+
+  static void fail(LMPCController &controller) {
+    controller.record_solve_failure();
+  }
+
+  static void succeed(LMPCController &controller) {
+    controller.record_solve_success();
+  }
+};
+
+} // namespace lmpc
 
 namespace {
 
@@ -26,24 +54,37 @@ void require_close(double actual, double expected, double tolerance,
               std::to_string(actual));
 }
 
+void write_lap_csv(const std::filesystem::path &path, int period,
+                   double track_length) {
+  std::ofstream csv(path);
+  csv << "vx,vy,omega,epsi,s,ey,t,a,delta,J\n";
+  for (int k = 0; k <= period; ++k) {
+    csv << "1,0,0,0," << track_length * k / period << ",0," << k;
+    csv << (k < period ? ",0,0," : ",,,");
+    csv << period - k << '\n';
+  }
+}
+
+std::vector<lmpc::SafeSetSample> make_lap(int period, double track_length) {
+  std::vector<lmpc::SafeSetSample> lap;
+  lap.reserve(static_cast<std::size_t>(period + 1));
+  for (int k = 0; k <= period; ++k) {
+    casadi::DM x = casadi::DM::zeros(lmpc::dynamics::kStateDim, 1);
+    x(lmpc::dynamics::S) = track_length * k / period;
+    lap.emplace_back(x, casadi::DM::zeros(lmpc::dynamics::kControlDim, 1),
+                     period - k, k < period);
+  }
+  return lap;
+}
+
 void test_contiguous_periodic_segment() {
   const std::filesystem::path csv_path =
       std::filesystem::temp_directory_path() / "lmpc_safe_set_segment.csv";
-  {
-    std::ofstream csv(csv_path);
-    csv << "vx,vy,omega,epsi,s,ey,t,a,delta,J\n";
-    for (int k = 0; k <= 10; ++k) {
-      csv << "1,0,0,0," << k << ",0," << k;
-      csv << (k < 10 ? ",0,0," : ",,,");
-      csv << 10 - k << '\n';
-    }
-  }
+  write_lap_csv(csv_path, 10, 10.0);
 
   lmpc::SafeSet safe_set(csv_path.string(), 10.0);
   const lmpc::SafeSet::QueryResult result =
       safe_set.query_local_segments(8.5, 6);
-  std::filesystem::remove(csv_path);
-
   const std::vector<double> expected_s{6, 7, 8, 9, 10, 11};
   const std::vector<double> expected_J{5, 4, 3, 2, 1, 0};
   const std::vector<long> expected_indices{6, 7, 8, 9, 10, 1};
@@ -57,6 +98,49 @@ void test_contiguous_periodic_segment() {
     require(result.selected[i].sample_index == expected_indices[i],
             "selected samples are not temporally contiguous");
   }
+
+  const lmpc::SafeSet::QueryResult forward_cycles =
+      safe_set.query_local_segments(28.5, 6);
+  const lmpc::SafeSet::QueryResult reverse_cycles =
+      safe_set.query_local_segments(-11.5, 6);
+  for (std::size_t i = 0; i < expected_s.size(); ++i) {
+    require_close(
+        static_cast<double>(forward_cycles.X_ss(lmpc::dynamics::S, i)),
+        expected_s[i] + 20.0, 1e-12, "positive multi-cycle lift is incorrect");
+    require_close(
+        static_cast<double>(reverse_cycles.X_ss(lmpc::dynamics::S, i)),
+        expected_s[i] - 20.0, 1e-12, "negative multi-cycle lift is incorrect");
+  }
+
+  safe_set.add_lap(make_lap(13, 10.0));
+  const lmpc::SafeSet::QueryResult different_periods =
+      safe_set.query_local_segments(8.5, 6);
+  for (casadi_int lap_index = 0; lap_index < 2; ++lap_index) {
+    for (casadi_int j = 0; j < 6; ++j) {
+      require_close(
+          static_cast<double>(different_periods.J_ss(lap_index * 6 + j)), 5 - j,
+          1e-12, "lap-specific transition period produced the wrong cost");
+    }
+  }
+  std::filesystem::remove(csv_path);
+}
+
+void test_closed_track_length_and_curvature_seam() {
+  const std::filesystem::path csv_path =
+      std::filesystem::temp_directory_path() / "lmpc_closed_track.csv";
+  {
+    std::ofstream csv(csv_path);
+    csv << "# x_m,y_m,w_tr_right_m,w_tr_left_m\n";
+    csv << "0,0,1,1\n2,0,1,1\n2,1,1,1\n";
+  }
+
+  const lmpc::Track track(csv_path.string());
+  const double expected_length = 3.0 + std::sqrt(5.0);
+  require_close(track.length(), expected_length, 1e-12,
+                "track length omits the closing segment");
+  require_close(track.curvature(expected_length - 1e-8), track.curvature(0.0),
+                1e-7, "curvature is discontinuous at the closing seam");
+  std::filesystem::remove(csv_path);
 }
 
 void test_normalized_terminal_slack() {
@@ -91,10 +175,50 @@ void test_normalized_terminal_slack() {
   qp.clear_dual_warm_start();
 }
 
+void test_consecutive_failure_recovery() {
+  const std::filesystem::path track_path =
+      std::filesystem::temp_directory_path() / "lmpc_failure_track.csv";
+  const std::filesystem::path lap_path =
+      std::filesystem::temp_directory_path() / "lmpc_failure_lap.csv";
+  {
+    std::ofstream csv(track_path);
+    csv << "# x_m,y_m,w_tr_right_m,w_tr_left_m\n";
+    csv << "0,0,1,1\n2,0,1,1\n2,1,1,1\n";
+  }
+  write_lap_csv(lap_path, 10, 3.0 + std::sqrt(5.0));
+
+  lmpc::LmpcConfig config;
+  config.centerline_csv_path = track_path.string();
+  config.seed_lap_csv_path = lap_path.string();
+  config.horizon_steps = 1;
+  config.K = 2;
+  config.solver_name = "qrqp";
+  lmpc::LMPCController controller(config);
+  lmpc::LMPCControllerTestAccess::set_warm_start(controller, true);
+
+  lmpc::LMPCControllerTestAccess::fail(controller);
+  require(lmpc::LMPCControllerTestAccess::has_warm_start(controller),
+          "first failure discarded the primal warm start");
+  lmpc::LMPCControllerTestAccess::fail(controller);
+  require(lmpc::LMPCControllerTestAccess::has_warm_start(controller),
+          "second failure discarded the primal warm start");
+  lmpc::LMPCControllerTestAccess::fail(controller);
+  require(!lmpc::LMPCControllerTestAccess::has_warm_start(controller),
+          "failure threshold did not request a primal reseed");
+
+  lmpc::LMPCControllerTestAccess::succeed(controller);
+  require(lmpc::LMPCControllerTestAccess::failure_count(controller) == 0,
+          "successful solve did not reset the failure count");
+  std::filesystem::remove(track_path);
+  std::filesystem::remove(lap_path);
+}
+
 } // namespace
 
 int main() {
   test_contiguous_periodic_segment();
+  test_closed_track_length_and_curvature_seam();
   test_normalized_terminal_slack();
+  test_consecutive_failure_recovery();
   return 0;
 }

@@ -74,7 +74,7 @@ SIM_TIMESTEP = 0.025
 # LMPC iterations (laps) to drive before parking the viewer. Each completed
 # lap grows the safe set, so later iterations should be at least as fast as
 # earlier ones (the paper's core property).
-MAX_ITERATIONS = 10
+MAX_ITERATIONS = 20
 # Perf-metrics reporting cadence (PerfMonitor below): print one aggregated
 # p50/p95/p99 block every this many control steps, instead of a line per
 # step -- recom.md asks for exactly this profiling breakdown but explicitly
@@ -166,6 +166,8 @@ EY_MAX = 0.375
 # time pull. The old cost_to_go_weight=5.0 value (git history) was swept
 # against f110_gym_10 specifically and does not carry over to this track.
 COST_TO_GO_WEIGHT = 1.0
+# Quadratic penalty on the normalized six-state terminal relaxation.
+TERMINAL_SLACK_WEIGHT = 800.0
 # Control effort/rate weights, applied uniformly to the scaled control
 # vector (the paper's own c_u/c_d_u -- a plain L2 norm, not a
 # per-component-weighted Q-norm; lmpc_config.hpp's own comment has the
@@ -201,6 +203,7 @@ CONFIG_OVERRIDES: dict[str, Any] = {
     "v_max": V_MAX,
     "ey_max": EY_MAX,
     "cost_to_go_weight": COST_TO_GO_WEIGHT,
+    "terminal_slack_weight": TERMINAL_SLACK_WEIGHT,
     "c_u": C_U,
     "c_d_u": C_D_U,
     "ey_slack_l1": EY_SLACK_L1,
@@ -319,14 +322,27 @@ class PerfMonitor:
         "env",
         "render",
     )
+    SLACK_METRICS = (
+        "slack_vx",
+        "slack_vy",
+        "slack_omega",
+        "slack_epsi",
+        "slack_s",
+        "slack_ey",
+    )
 
     def __init__(self, interval_steps: int = PERF_REPORT_INTERVAL_STEPS) -> None:
         self._interval_steps = interval_steps
         self._samples: dict[str, list[float]] = {name: [] for name in self.METRICS}
+        self._terminal_slack_samples: list[np.ndarray] = []
 
-    def record(self, **metrics_ms: float) -> None:
+    def record(
+        self, *, terminal_slack: np.ndarray | None = None, **metrics_ms: float
+    ) -> None:
         for name in self.METRICS:
             self._samples[name].append(metrics_ms[name])
+        if terminal_slack is not None:
+            self._terminal_slack_samples.append(terminal_slack)
         if len(self._samples["env"]) >= self._interval_steps:
             self.report()
 
@@ -357,6 +373,22 @@ class PerfMonitor:
         )
         print(f"--- perf (last {n} steps, ms) ---")
         print("\n".join(rows))
+        if self._terminal_slack_samples:
+            slack = np.abs(np.asarray(self._terminal_slack_samples))
+            slack_rows = [f"{'terminal slack':<16}{'p50':>10}{'p95':>10}{'max':>10}"]
+            for idx, name in enumerate(self.SLACK_METRICS):
+                values = slack[:, idx]
+                slack_rows.append(
+                    f"{name:<16}{np.percentile(values, 50):>10.4f}"
+                    f"{np.percentile(values, 95):>10.4f}{values.max():>10.4f}"
+                )
+            norm_inf = slack.max(axis=1)
+            slack_rows.append(
+                f"{'slack_norm_inf':<16}{np.percentile(norm_inf, 50):>10.4f}"
+                f"{np.percentile(norm_inf, 95):>10.4f}{norm_inf.max():>10.4f}"
+            )
+            print("\n".join(slack_rows))
+            self._terminal_slack_samples.clear()
         for name in self.METRICS:
             self._samples[name].clear()
 
@@ -425,8 +457,10 @@ def main() -> None:
         lap_done = False
 
         while not (lap_done or crashed or viewer.closed):
+            terminal_slack = None
             try:
                 cmd = controller.control()
+                terminal_slack = controller.last_terminal_slack()
                 fallback_steps = 0
                 steer = apply_low_speed_steering_guard(cmd.steering, state.speed)
                 velocity = cmd.velocity
@@ -466,6 +500,7 @@ def main() -> None:
                 **controller.last_timings(),
                 env=(t_env1 - t_env0) * 1000.0,
                 render=(t_render1 - t_env1) * 1000.0,
+                terminal_slack=terminal_slack,
             )
 
             crashed = bool(f110_env.collisions[ego_idx]) or truncated

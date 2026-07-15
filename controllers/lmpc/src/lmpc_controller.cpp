@@ -18,7 +18,9 @@ LMPCController::LMPCController(const LmpcConfig &config_in)
       x_warm(casadi::DM::zeros(kStateDim, config.horizon_steps + 1)),
       u_warm(casadi::DM::zeros(kControlDim, config.horizon_steps)),
       lambda_warm(casadi::DM::zeros(0, 1)), has_warm_start(false),
-      x_pred(casadi::DM::zeros(kStateDim, config.horizon_steps + 1)) {
+      consecutive_solve_failures(0),
+      x_pred(casadi::DM::zeros(kStateDim, config.horizon_steps + 1)),
+      last_terminal_slack(casadi::DM::zeros(kStateDim, 1)) {
   rebuild_qp_builder();
 }
 
@@ -57,7 +59,9 @@ void LMPCController::reset() {
   u_warm = casadi::DM::zeros(kControlDim, config.horizon_steps);
   reset_lambda_warm_start();
   has_warm_start = false;
+  consecutive_solve_failures = 0;
   x_pred = casadi::DM::zeros(kStateDim, config.horizon_steps + 1);
+  last_terminal_slack = casadi::DM::zeros(kStateDim, 1);
 }
 
 void LMPCController::update(const casadi::DM &x_in, double t_in,
@@ -123,6 +127,17 @@ void LMPCController::shift_warm_start(const QpSolution &solution) {
   u_warm(Slice(), N - 1) = solution.u_traj(Slice(), N - 1);
   has_warm_start = true;
 }
+
+void LMPCController::record_solve_failure() {
+  qp_builder->clear_dual_warm_start();
+  ++consecutive_solve_failures;
+  constexpr int kPrimalWarmStartResetFailures = 3;
+  if (consecutive_solve_failures >= kPrimalWarmStartResetFailures) {
+    has_warm_start = false;
+  }
+}
+
+void LMPCController::record_solve_success() { consecutive_solve_failures = 0; }
 
 QpSolution LMPCController::solve_once() {
   // recom.md's t_rollout+lin/t_knn checkpoints -- ControllerTimings'
@@ -235,12 +250,14 @@ casadi::DM LMPCController::control() {
   // (including gym's own low-speed plant divergence), not this layer.
   const QpSolution solution = solve_once();
   if (!solution.success) {
-    qp_builder->clear_dual_warm_start();
+    record_solve_failure();
     throw std::runtime_error("LMPCController::control: QP solve failed: " +
                              solution.message);
   }
 
+  record_solve_success();
   x_pred = solution.x_traj;
+  last_terminal_slack = solution.terminal_slack;
   shift_warm_start(solution);
 
   // DESIGN.md SS8 step 6: apply u_0*.

@@ -8,6 +8,46 @@ def cumulative_arc_lengths(waypoints_xy: np.ndarray) -> np.ndarray:
     return np.concatenate([[0.0], np.cumsum(seg_lengths)])
 
 
+def closed_path_length(waypoints_xy: np.ndarray) -> float:
+    path_s = cumulative_arc_lengths(waypoints_xy)
+    closing_length = np.linalg.norm(waypoints_xy[0] - waypoints_xy[-1])
+    return float(path_s[-1] + closing_length)
+
+
+def project_to_closed_path(
+    waypoints_xy: np.ndarray,
+    path_s: np.ndarray,
+    position: np.ndarray,
+    nearest_idx: int,
+) -> tuple[float, float, float]:
+    """Project onto either segment adjacent to the nearest closed-path point."""
+    best_distance_sq = np.inf
+    best_projection = (0.0, 0.0, 0.0)
+    point_count = waypoints_xy.shape[0]
+    for start_idx in ((nearest_idx - 1) % point_count, nearest_idx):
+        end_idx = (start_idx + 1) % point_count
+        segment = waypoints_xy[end_idx] - waypoints_xy[start_idx]
+        segment_length = float(np.linalg.norm(segment))
+        tangent = segment / segment_length
+        along = float(
+            np.clip(
+                np.dot(position - waypoints_xy[start_idx], tangent), 0.0, segment_length
+            )
+        )
+        projected = waypoints_xy[start_idx] + along * tangent
+        distance_sq = float(np.sum((position - projected) ** 2))
+        if distance_sq < best_distance_sq:
+            heading = float(np.arctan2(tangent[1], tangent[0]))
+            normal = np.array([-tangent[1], tangent[0]])
+            best_distance_sq = distance_sq
+            best_projection = (
+                float(path_s[start_idx] + along),
+                float(np.dot(position - projected, normal)),
+                heading,
+            )
+    return best_projection
+
+
 def nearest_waypoint_index(
     waypoints: np.ndarray,
     position: np.ndarray,

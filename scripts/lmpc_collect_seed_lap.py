@@ -33,7 +33,12 @@ import f110_gym  # noqa: F401 - registers f110-v0
 from controllers.controller_base import VehicleState
 from controllers.lmpc.lap_data import LapSample, build_lap_arrays
 from controllers.pure_pursuit import DynamicLookaheadDistance, PurePursuit
-from utils.waypoint_utils import cumulative_arc_lengths, nearest_waypoint_index
+from utils.waypoint_utils import (
+    closed_path_length,
+    cumulative_arc_lengths,
+    nearest_waypoint_index,
+    project_to_closed_path,
+)
 from utils.waypoint_view import initial_pose_from_waypoints
 
 MAP = "maps/custom/barc_oval/barc_oval_map"
@@ -191,16 +196,7 @@ def project_frenet(
     idx = nearest_waypoint_index(
         path_xy, position, last_idx, search_window=search_window
     )
-    # The raceline CSV's psi_rad column is offset -90 degrees from the
-    # direction of travel -- controllers/stanley.py's own control law adds
-    # this same +pi/2 to get its heading reference (psi_path); matching it
-    # here so epsi is actually a small heading error, not a constant ~pi/2.
-    heading = float(path_psi[idx]) + np.pi / 2
-    tangent = np.array([np.cos(heading), np.sin(heading)])
-    normal = np.array([-np.sin(heading), np.cos(heading)])
-    delta = position - path_xy[idx]
-    s = float(path_s[idx] + np.dot(delta, tangent))
-    ey = float(np.dot(delta, normal))
+    s, ey, heading = project_to_closed_path(path_xy, path_s, position, idx)
     return s, ey, heading, idx
 
 
@@ -259,6 +255,7 @@ def main(visualize: bool = False) -> None:
     )
     path_xy = controller.waypoints[:, :2]
     path_s = cumulative_arc_lengths(path_xy)
+    track_length = closed_path_length(path_xy)
 
     initial_pose = initial_pose_from_waypoints(path_xy)
     obs, _info = env.reset(options={"poses": initial_pose})
@@ -294,6 +291,7 @@ def main(visualize: bool = False) -> None:
         controller.search_window,
     )
     samples = [initial_sample]
+    last_s_mod = float(initial_sample.x[4])
     steering_guard = LaunchSteeringGuard()
 
     while True:
@@ -316,13 +314,25 @@ def main(visualize: bool = False) -> None:
             last_idx,
             controller.search_window,
         )
+        s_mod = float(post_step_sample.x[4])
+        ds = s_mod - last_s_mod
+        if ds < -0.5 * track_length:
+            ds += track_length
+        elif ds > 0.5 * track_length:
+            ds -= track_length
+        x_unwrapped = post_step_sample.x.copy()
+        x_unwrapped[4] = samples[-1].x[4] + ds
+        post_step_sample = LapSample(
+            x_unwrapped, post_step_sample.actual_delta, post_step_sample.raw_speed
+        )
+        last_s_mod = s_mod
         samples.append(post_step_sample)
 
         if viewer is not None:
             viewer.update(obs)
             viewer.render()
 
-        if float(obs["lap_counts"][ego_idx]) >= 1.0 or terminated or truncated:
+        if post_step_sample.x[4] >= track_length or terminated or truncated:
             break
 
     if viewer is not None:
@@ -332,7 +342,7 @@ def main(visualize: bool = False) -> None:
     env.close()
 
     lap_completed = (
-        float(obs["lap_counts"][ego_idx]) >= 1.0
+        samples[-1].x[4] >= track_length
         and not bool(f110_env.collisions[ego_idx])
         and not truncated
     )

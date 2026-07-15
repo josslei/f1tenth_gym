@@ -76,6 +76,7 @@ Track::Track(const std::string &centerline_csv_path) {
     const double dy = xy[0].second - xy[n - 1].second;
     seg_len[n - 1] = std::sqrt(dx * dx + dy * dy);
   }
+  track_length_ = s_.back() + seg_len.back();
 
   // Forward-difference heading at every sample, wrapping the last sample to
   // the first -- matches load_centerline_waypoints()'s use of np.roll.
@@ -113,10 +114,15 @@ double Track::curvature(double s) const {
   // Nonnegative modulo: fmod alone can return a negative result for
   // negative s (e.g. a small reverse prediction just before the finish
   // line wrapping to just before s=length, not to a negative value).
-  const double length = s_.back();
-  double s_periodic = std::fmod(s, length);
+  double s_periodic = std::fmod(s, track_length_);
   if (s_periodic < 0.0) {
-    s_periodic += length;
+    s_periodic += track_length_;
+  }
+
+  if (s_periodic >= s_.back()) {
+    const double span = track_length_ - s_.back();
+    const double t = (s_periodic - s_.back()) / span;
+    return kappa_.back() + t * (kappa_.front() - kappa_.back());
   }
 
   // Binary search for the bracketing segment, then linearly interpolate.
