@@ -28,6 +28,17 @@ struct SafeSetSample {
 // state, the K nearest samples FROM EACH stored lap under the weighted
 // normalized distance over [vx, epsi, s, ey]. Stacked across laps this gives
 // X^j (kStateDim x KP) and J^j (KP x 1), P = number of laps currently loaded.
+//
+// Every stored lap's s is assumed to already share ONE fixed Frenet origin
+// across laps (lmpc.py's _PeriodicProgress -- lap_index * track_length, not
+// a rebase to each lap's own crossing sample); query() itself is what makes
+// the track's PHYSICAL periodicity visible to the KNN search, by also
+// considering each real sample shifted by -track_length/+track_length
+// (recom.md's periodic-copy construction, matching upstream's X_repeat/
+// J_repeat). This is what lets a terminal reference just past s=L match
+// real forward-lap data instead of being clamped to a lap's own endpoint --
+// no vertex is ever fabricated the way the removed finish-mode block used
+// to.
 class SafeSet {
 public:
   // DESIGN.md SS2's P: at most this many laps are kept; add_lap() evicts
@@ -37,10 +48,14 @@ public:
   // (lower J) than what they evict anyway, so nothing of value is lost.
   static constexpr std::size_t kMaxLaps = 3;
 
+  // track_length is needed for the periodic candidate shifts query()
+  // constructs (see class comment) -- callers already have it (Track is
+  // built before SafeSet in LMPCController's member-init order).
+  //
   // Loads one lap (DESIGN.md SS8's first pass only ever has D^0, i.e. one
   // lap; add_lap() below is what makes P > 1 possible once later laps are
   // recorded).
-  explicit SafeSet(const std::string &seed_lap_csv_path);
+  SafeSet(const std::string &seed_lap_csv_path, double track_length);
 
   // Appends another lap's worth of samples (e.g. the lap just driven,
   // DESIGN.md SS8 step 8), evicting the oldest lap beyond kMaxLaps. The
@@ -57,15 +72,6 @@ public:
 
   double cost_scale() const;
 
-  // Where the recorded data runs out along the track, i.e. the earliest
-  // lap-final s over the stored laps (each lap ends where gym's finish
-  // detection fired, slightly short of the geometric line). Once a horizon's
-  // terminal reference passes this, there is no data ahead of it to query --
-  // LMPCController::solve_once switches to its finish-mode terminal set
-  // instead of letting the query clamp to (and pull back toward) the last
-  // samples.
-  double data_end_s() const;
-
   struct QueryResult {
     casadi::DM X_ss; // kStateDim x (K * num_laps())
     casadi::DM J_ss; // (K * num_laps()) x 1
@@ -74,7 +80,12 @@ public:
   // Select exactly K nearest samples independently from each stored lap,
   // sorted by ascending distance within each lap, and concatenate all of
   // them. No affine-rank or global fixed-size reduction is applied.
-  // state_scale follows StateIndex order.
+  // state_scale follows StateIndex order. Each real sample is considered
+  // at THREE periodic candidate positions (s-track_length, s, s+track_length
+  // with J correspondingly J+T, J, J-T, T = that lap's transition count) --
+  // class comment has the rationale; this is what lets a terminal query
+  // near/past the seam match real data instead of needing the removed
+  // finish-mode fabrication.
   QueryResult query(const casadi::DM &x_query, casadi_int K,
                     const casadi::DM &state_scale) const;
 
@@ -101,6 +112,7 @@ public:
 
 private:
   std::vector<std::vector<SafeSetSample>> laps;
+  double track_length;
 };
 
 } // namespace lmpc

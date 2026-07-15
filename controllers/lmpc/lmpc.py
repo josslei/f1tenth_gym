@@ -38,12 +38,25 @@ def _wrap_angle(angle: float) -> float:
 
 class _PeriodicProgress:
     """Unwraps a periodic Frenet s (mod track_length) into a continuous
-    coordinate, with an explicit rebase point for "the next LMPC
-    iteration's s=0". The nearest-lift construction on R -> R/LZ: crossing
-    the start/finish seam is detected from a jump larger than half the
-    track length between consecutive observations and folded back in,
-    rather than reset -- so the geometric wrap itself is never a lap
-    boundary. Only begin_lap() moves the origin.
+    coordinate, then rebases each LMPC iteration onto a FIXED multiple of
+    track_length -- not onto wherever the current crossing sample actually
+    landed. This distinction matters: gym's discrete-time finish detection
+    fires slightly past the geometric line by a different amount every
+    lap, so if begin_lap() rebased to the exact crossing position (an
+    earlier version of this class did: `self._lap_origin =
+    self._unwrapped`), each lap's own s=0 would sit at a slightly
+    different PHYSICAL point on the track -- s=2 in lap 0, lap 1, and lap
+    2 would each mean a different location, even though SafeSet::query()
+    treats them as the same coordinate system for its KNN/convex-hull
+    match, and Track::curvature(s) would be evaluated at the wrong
+    physical position from lap 2 onward (a silently phase-shifted
+    curvature profile). Anchoring instead to lap_index * track_length
+    keeps every lap on the SAME Frenet gauge: the paper's single fixed
+    parameterization tau(s) = tau(s mod L), required for D^{j-1}'s samples
+    to be comparable at all. The next lap's first observed s is then
+    whatever it actually is (e.g. 0.04, from the real overshoot) -- not
+    forced to exactly 0 -- since forcing it would be the same gauge
+    distortion in a smaller disguise.
     """
 
     def __init__(self, track_length: float) -> None:
@@ -52,41 +65,41 @@ class _PeriodicProgress:
         self._length = track_length
         self._last_s_mod = 0.0
         self._unwrapped = 0.0
-        self._lap_origin = 0.0
+        self._lap_index = 0
         self._initialized = False
 
     def reset(self) -> None:
         self._last_s_mod = 0.0
         self._unwrapped = 0.0
-        self._lap_origin = 0.0
+        self._lap_index = 0
         self._initialized = False
 
     def update(self, s_mod: float) -> float:
         """Feed one new periodic observation, return s relative to the
-        current lap origin."""
+        current lap's fixed origin (lap_index * track_length)."""
         if not np.isfinite(s_mod):
             raise ValueError("s_mod must be finite")
         if not self._initialized:
             self._last_s_mod = s_mod
             self._unwrapped = s_mod
-            self._lap_origin = s_mod
             self._initialized = True
-            return 0.0
-        ds = s_mod - self._last_s_mod
-        half_length = 0.5 * self._length
-        if ds < -half_length:
-            ds += self._length
-        elif ds > half_length:
-            ds -= self._length
-        self._unwrapped += ds
-        self._last_s_mod = s_mod
-        return self._unwrapped - self._lap_origin
+        else:
+            ds = s_mod - self._last_s_mod
+            half_length = 0.5 * self._length
+            if ds < -half_length:
+                ds += self._length
+            elif ds > half_length:
+                ds -= self._length
+            self._unwrapped += ds
+            self._last_s_mod = s_mod
+        return self._unwrapped - self._lap_index * self._length
 
     def begin_lap(self) -> None:
-        """Rebase: the state of the last update() call becomes s=0."""
+        """Advance to the next lap's fixed origin (lap_index += 1) -- NOT a
+        rebase to the current position. See class docstring for why."""
         if not self._initialized:
             raise RuntimeError("_PeriodicProgress.begin_lap: update() was never called")
-        self._lap_origin = self._unwrapped
+        self._lap_index += 1
 
 
 class LMPCController(Controller):
@@ -106,8 +119,8 @@ class LMPCController(Controller):
         config.dt = dt
         config.horizon_steps = horizon_steps
         # Any other LmpcConfig field by name -- the cost-term weights are
-        # the usual reason (cost_to_go_weight, c_a/c_delta/c_d_a/c_d_delta,
-        # ey_slack_l1/l2; the objective they weight is spelled out in
+        # the usual reason (cost_to_go_weight, c_u/c_d_u, ey_slack_l1/l2;
+        # the objective they weight is spelled out in
         # controllers/lmpc/include/lmpc_config.hpp). LmpcConfig is a
         # non-dynamic pybind11 class, so a mistyped name raises
         # AttributeError instead of being silently ignored.
@@ -120,8 +133,8 @@ class LMPCController(Controller):
         # nominal model overestimating cornering grip (DESIGN.md's SS5/SS6
         # discussion) until the error-dynamics regression is implemented:
         # it directly shrinks what the QP believes is achievable, rather
-        # than adding a synthetic control-effort cost (c_a) that isn't part
-        # of the paper's formulation.
+        # than raising c_u, which isn't part of the paper's formulation
+        # for this purpose.
         for name, value in (config_overrides or {}).items():
             if name == "vehicle_params" and isinstance(value, dict):
                 for vp_name, vp_value in value.items():
@@ -224,17 +237,22 @@ class LMPCController(Controller):
         self._progress.reset()
 
     def begin_next_lap(self) -> None:
-        """Rebase Frenet progress so the CURRENT physical state becomes s=0
-        for the next LMPC iteration, without resetting anything physical.
+        """Advance Frenet progress to the next LMPC iteration's fixed origin
+        (lap_index * track_length), without resetting anything physical.
 
         Unlike reset(), this touches only the progress tracker: it does not
         call native.reset(), so it does not clear native u_prev,
         actual_delta, or the shifted u_warm trajectory -- the vehicle keeps
         driving through the finish line instead of restarting from rest.
         The caller must immediately call update() again on the same
-        post-crossing observation so native_state is rewritten with s=0
-        (the physical state is unchanged, only which origin s is measured
-        from).
+        post-crossing observation so native_state is rewritten against the
+        new origin (the physical state is unchanged, only which origin s is
+        measured from). The resulting s is NOT forced to exactly 0 -- the
+        crossing sample generally overshoots the geometric line by a small,
+        lap-varying amount, and forcing it to 0 would reintroduce the same
+        per-lap gauge drift _PeriodicProgress's own docstring explains
+        (every lap must share ONE fixed Frenet origin, not one anchored to
+        wherever each crossing sample happened to land).
         """
         self._progress.begin_lap()
         self._prediction_valid = False

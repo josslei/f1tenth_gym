@@ -9,7 +9,8 @@ namespace lmpc {
 LMPCController::LMPCController(const LmpcConfig &config_in)
     : config(config_in), dynamics_model(config.vehicle_params), integrator(),
       linearizer(dynamics_model, integrator, config.dt),
-      track(config.centerline_csv_path), safe_set(config.seed_lap_csv_path),
+      track(config.centerline_csv_path),
+      safe_set(config.seed_lap_csv_path, track.length()),
       cost_to_go_scale(safe_set.cost_scale()), qp_builder(nullptr),
       x(casadi::DM::zeros(kStateDim, 1)), t(0.0), has_state(false),
       u_prev(casadi::DM::zeros(kControlDim, 1)), actual_delta(0.0),
@@ -185,27 +186,17 @@ QpSolution LMPCController::solve_once() {
     throw std::runtime_error("LMPCController::solve_once: safe-set query "
                              "returned invalid dimensions");
   }
-  // Finish-mode terminal set: within the last few horizons of a lap the
-  // terminal reference runs past the end of the recorded data (s is
-  // non-periodic, each stored lap ends where gym's finish detection fired).
-  // The plain query can then only clamp onto each lap's final samples, whose
-  // s sits BEHIND the reference, so the hard terminal equality can pull the
-  // prediction backward after J has already bottomed out at ~0 and the QP's
-  // optimum is to brake and park exactly on the data's endpoint instead of
-  // driving through the line (the measured 3.7 -> 2.3 m/s braking at the seam).
-  // Past the data's end the real target is the finish set {x : s >= L}: keep
-  // the queried samples' dynamic states as the terminal anchor but free the s
-  // row (match it to the reference itself, no backward pull) and zero the
-  // cost-to-go -- a forward absorbing extension of the safe set. The lap
-  // ends (lap-as-iteration: runs/lmpc_drive.py resets and starts iteration
-  // j+1) before the horizon runs meaningfully past the line, so no data is
-  // ever fabricated beyond that.
-  if (static_cast<double>(x_terminal_ref(dynamics::S)) >
-      safe_set.data_end_s()) {
-    safe_set_result.X_ss(dynamics::S, casadi::Slice()) =
-        x_terminal_ref(dynamics::S);
-    safe_set_result.J_ss = casadi::DM::zeros(safe_set_result.J_ss.size1(), 1);
-  }
+  // No finish-mode terminal fabrication here anymore: an earlier version
+  // overwrote X_ss's S row with the terminal reference and zeroed J_ss
+  // once s passed the recorded data's end, to avoid the hard terminal
+  // equality pulling backward toward a lap's final sample. That vertex was
+  // never actually visited -- it broke the safe set's own meaning (SS2's
+  // conv{x_k^i} is only valid over REAL recorded samples). SafeSet::query()
+  // now constructs real periodic copies of every stored sample instead
+  // (its own class comment has the rationale), so a terminal reference
+  // near/past the seam matches genuine forward-lap data on its own,
+  // without this layer needing to intervene.
+  //
   // Safe-set vertices are reselected every control step, so the previous
   // lambda entries no longer refer to the same columns. Seed the new simplex
   // at its feasible centroid instead of carrying incompatible coordinates.

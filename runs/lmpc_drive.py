@@ -152,7 +152,7 @@ COST_TO_GO_WEIGHT = 1.0
 # rationale for why a single scalar is correct here, not separate
 # accel/steering weights).
 C_U = 0.01
-C_D_U = 0.17
+C_D_U = 0.15
 
 # Soft ey-corridor slack penalty (exact L1 + quadratic L2 on violation).
 EY_SLACK_L1 = 10.0

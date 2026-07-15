@@ -3,9 +3,9 @@
 #include <algorithm>
 #include <cmath>
 #include <fstream>
-#include <limits>
 #include <sstream>
 #include <stdexcept>
+#include <tuple>
 #include <utility>
 
 #include "dynamics/common.hpp"
@@ -93,7 +93,12 @@ double normalized_distance_sq(const casadi::DM &a, const casadi::DM &b,
 
 } // namespace
 
-SafeSet::SafeSet(const std::string &seed_lap_csv_path) {
+SafeSet::SafeSet(const std::string &seed_lap_csv_path, double track_length)
+    : track_length(track_length) {
+  if (!(track_length > 0.0) || !std::isfinite(track_length)) {
+    throw std::invalid_argument(
+        "SafeSet::SafeSet: track_length must be finite and positive");
+  }
   laps.push_back(load_lap(seed_lap_csv_path));
 }
 
@@ -109,14 +114,6 @@ void SafeSet::add_lap(std::vector<SafeSetSample> lap) {
 
 void SafeSet::add_lap(const std::string &lap_csv_path) {
   add_lap(load_lap(lap_csv_path));
-}
-
-double SafeSet::data_end_s() const {
-  double end_s = std::numeric_limits<double>::infinity();
-  for (const std::vector<SafeSetSample> &lap : laps) {
-    end_s = std::min(end_s, static_cast<double>(lap.back().x(dynamics::S)));
-  }
-  return end_s;
 }
 
 double SafeSet::cost_scale() const {
@@ -156,21 +153,40 @@ SafeSet::QueryResult SafeSet::query(const casadi::DM &x_query, casadi_int K,
   casadi_int output_col = 0;
 
   for (const std::vector<SafeSetSample> &lap : laps) {
-    // Carry the sample index as a deterministic tie-breaker for equal
-    // distances.
-    std::vector<std::pair<double, std::size_t>> ranked;
-    ranked.reserve(lap.size());
+    // T = transitions in this lap (lap.size() samples = T+1 states, per
+    // add_lap()'s own convention). Ranks a PERIODIC candidate pool: every
+    // real sample considered at THREE shifted positions -- shift=-1
+    // (s-track_length, J+T), shift=0 (s, J), shift=+1 (s+track_length,
+    // J-T) -- so a terminal reference near/past the seam naturally matches
+    // real data from the adjacent lap wraparound instead of being clamped
+    // to this lap's own endpoint (class comment has the full rationale;
+    // this replaces the removed finish-mode fabrication in
+    // LMPCController::solve_once). shift/sample_idx are carried as
+    // deterministic tie-breakers for equal distances.
+    const double T = static_cast<double>(lap.size()) - 1.0;
+    std::vector<std::tuple<double, std::size_t, int>> ranked;
+    ranked.reserve(lap.size() * 3);
     for (std::size_t sample_idx = 0; sample_idx < lap.size(); ++sample_idx) {
-      ranked.emplace_back(
-          normalized_distance_sq(lap[sample_idx].x, x_query, state_scale),
-          sample_idx);
+      for (int shift = -1; shift <= 1; ++shift) {
+        casadi::DM x_shifted = lap[sample_idx].x;
+        x_shifted(dynamics::S) =
+            static_cast<double>(x_shifted(dynamics::S)) + shift * track_length;
+        ranked.emplace_back(
+            normalized_distance_sq(x_shifted, x_query, state_scale), sample_idx,
+            shift);
+      }
     }
     std::partial_sort(ranked.begin(), ranked.begin() + K, ranked.end());
     for (casadi_int selected = 0; selected < K; ++selected) {
-      const SafeSetSample &sample =
-          lap[ranked[static_cast<std::size_t>(selected)].second];
-      result.X_ss(casadi::Slice(), output_col) = sample.x;
-      result.J_ss(output_col, 0) = sample.J;
+      const auto &[distance, sample_idx, shift] =
+          ranked[static_cast<std::size_t>(selected)];
+      (void)distance;
+      const SafeSetSample &sample = lap[sample_idx];
+      casadi::DM x_shifted = sample.x;
+      x_shifted(dynamics::S) =
+          static_cast<double>(x_shifted(dynamics::S)) + shift * track_length;
+      result.X_ss(casadi::Slice(), output_col) = x_shifted;
+      result.J_ss(output_col, 0) = sample.J - shift * T;
       ++output_col;
     }
   }

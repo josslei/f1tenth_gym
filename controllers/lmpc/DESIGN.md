@@ -16,12 +16,17 @@ is not implemented -- this pass genuinely skips 3a/3b as designed.
 The QP control convention is `[a, delta]`. The Python wrapper converts solved
 acceleration into Gym's target-velocity action by inverting Gym's proportional
 velocity controller. Control effort and rate penalties are applied directly
-to scaled controls; Hessian regularization and `solve_limited()` remain in the
-QP path. Closed-loop state (2026-07-13, after the fixes documented at the
-end of this file): **full standing-start laps complete** (44.52s on D^0
-alone) under the lap-as-iteration scheme, and each completed lap is fed
-back into the safe set (`add_lap`). The remaining blocker for actual
-iteration-over-iteration improvement is the §5/§6 error-dynamics
+to scaled controls (as a single scalar `c_u`/`c_d_u` times the control
+vector's own L2 norm -- the paper's own formulation, not a
+per-component-weighted Q-norm); Hessian regularization and `solve_limited()`
+remain in the QP path. Closed-loop state (2026-07-15, after the fixes
+documented at the end of this file): the vehicle drives CONTINUOUSLY across
+lap boundaries (one `env.reset()`/`controller.reset()` for the whole run,
+`f110_gym_10` measured at 4/4 iterations, zero fallback steps, monotonically
+decreasing lap times), on a periodic Frenet gauge shared by every stored
+lap and a `SafeSet` that queries real periodic copies of its data rather
+than fabricating terminal vertices at the seam. The remaining blocker for
+further iteration-over-iteration improvement is the §5/§6 error-dynamics
 regression: without it the min-time QP's sprint-and-brake plans outrun the
 nominal model's cornering accuracy a little above the demonstrated speeds
 (see "Lap-as-iteration" below).
@@ -477,44 +482,61 @@ the line the query landed on lap-start samples with `J ~= max`, the
 cost-to-go pointed backward, the car braked 3.7 -> 2.3 m/s and the QP
 died at the start pose) is resolved by two coupled decisions:
 
-1. **Lap-as-iteration, not a wrapped-lap copy.** Crossing the line ends
-   iteration `j` exactly as the paper defines it: the runner
-   (`runs/lmpc_drive.py`) records each pre/post-transition plant state,
-   computes `J_k = T - k` at the crossing, calls
-   `LMPCController::add_lap`, resets the sim + controller, and relaunches
-   from rest. `s` stays non-periodic; `J` keeps its single-task
-   steps-to-finish meaning; the reset initial state matches D^0's own
-   standing-start initial condition. The rejected alternative -- virtual
-   forward candidates `(s + L, J - T_lap)` -- fixes `J`'s continuity but
-   not the STATE's: the copied lap-start samples still have `vx ~= 0`, so
-   a flying finish would still brake toward a standing start. Continuous
-   multi-lap driving needs flying-lap data plus unwrapped-s/periodic-kappa
-   /continuing-task-J redefinitions -- out of scope.
-   Crashed/truncated laps are never added (the safe set's meaning rests
-   on every stored trajectory reaching the finish); `SafeSet` keeps at
-   most `kMaxLaps = 3` laps, evicting the oldest.
+1. **Lap-as-iteration, continuous physical episode (2026-07-15, third
+   pass).** `env.reset()`/`controller.reset()` fire exactly ONCE for the
+   whole run (`runs/lmpc_drive.py`); only iteration 0 launches from rest.
+   Crossing the line ends iteration `j` and begins `j+1` WITHOUT resetting
+   anything physical: `LMPCController.begin_next_lap()`
+   (`controllers/lmpc/lmpc.py`'s `_PeriodicProgress`) rebases the Frenet
+   progress onto the next lap's FIXED origin, `lap_index * track_length`
+   -- not onto wherever that lap's crossing sample happened to land. This
+   distinction is load-bearing: gym's discrete-time finish detection
+   overshoots the geometric line by a different amount every lap, so an
+   earlier version that rebased to the exact crossing position gave every
+   lap a slightly different physical meaning for the same `s` value (lap
+   0's `s=2` and lap 2's `s=2` were different track locations), which also
+   silently phase-shifted the nominal curvature `Track::curvature(s)` used
+   for stages recorded after lap 1. Anchoring to `lap_index * L` keeps
+   every stored lap's `s` on the SAME Frenet gauge, which `SafeSet`'s
+   cross-lap KNN/convex-hull query requires to be meaningful at all (a
+   query mixing differently-gauged laps was root-caused as the actual
+   cause of "iteration 2 fails," not `K*P` growing to 96 -- see the
+   commit that added this section). Crashed/truncated laps are never
+   added (the safe set's meaning rests on every stored trajectory reaching
+   the finish); `SafeSet` keeps at most `kMaxLaps = 3` laps, evicting the
+   oldest. D^0 itself remains a standing-start recording (not regenerated
+   as a flying lap) even though iterations 1+ now begin flying -- a known,
+   deliberately out-of-scope quality/feasibility caveat at the seam.
 
    One completed lap with T transitions stores T+1 states `x_0..x_T`, T
    realized inputs, and T+1 costs with `J_k=T-k`. `x_T` is the first
    post-step finish-crossing state. Both D^0 and online laps reconstruct
    `a_k` from raw scalar-speed finite differences and use the plant's actual
    pre-transition steering state, never commanded steering.
-2. **Finish-mode terminal set for the last horizons.** Even within one
-   lap, the terminal reference passes the stored data's end a few
-   horizons before the crossing; clamping the query onto each lap's final
-   samples anchors `x_N` BEHIND the reference with `J` already ~0, making
-   "park on the data endpoint" the optimum (the measured braking above).
-   When `s_ref > SafeSet::data_end_s()`, `solve_once` swaps in a forward
-   absorbing finish set: queried anchors keep their dynamic-state rows,
-   the `s` row is matched to the reference itself (no backward pull),
-   `J = 0`.
+2. **Periodic safe-set query, not a finish-mode fabrication.** An earlier
+   version clamped `SafeSet::query()` to each lap's own raw samples, then
+   special-cased `LMPCController::solve_once()` to overwrite the queried
+   terminal states' `s` row and zero their `J` once the terminal reference
+   ran past the stored data's end -- fabricating a vertex that was never
+   actually visited, which broke the safe set's own meaning (`SS2`'s
+   `conv{x_k^i}` is only valid over REAL recorded samples) and anchored
+   `x_N` BEHIND the reference with `J` already ~0 (measured: 3.7 -> 2.3
+   m/s braking at the seam). `SafeSet::query()` now constructs the real
+   periodic copies instead, matching upstream's `X_repeat`/`J_repeat`:
+   every stored sample is ranked at THREE candidate positions, `(s-L,
+   J+T)`, `(s, J)`, `(s+L, J-T)` (`T` = that lap's own transition count),
+   so a terminal reference near or past the seam naturally matches real
+   forward-lap data on its own. No fabrication, no `data_end_s()` special
+   case -- both are gone.
 
 Also in the second pass: the `ey` box is now SOFT (per-stage slack,
 exact-plus-quadratic penalty `ey_slack_l1/l2` -- a hard box made the QP
 instantly infeasible whenever `x_0` or the reachable tube left the
 corridor), and the runner has a controlled-brake fallback (~4.8 m/s^2,
-holding last steering, LMPC re-attempted every step) for double solve
-failures.
+holding last steering, LMPC re-attempted every step) for solve failures
+(`LMPCController::control()` does exactly one solve attempt per step, no
+internal retry -- a retry was measured to double solve time, and
+therefore collapse viewer FPS, on every failing step).
 
 **Measured after the second pass:** iteration 0 completes the full lap
 (44.52s, 1781 steps) and grows the safe set. Iteration 1 launches faster
@@ -529,6 +551,17 @@ are lateral: bursts to ~6.1 m/s ending in real slides, epsi -0.6 rad).
 This is precisely the mismatch §5/§6's regression corrects, which makes
 the regression the next milestone -- `add_lap` already stores the
 `(x_k, u_k, x_{k+1})` transitions it needs.
+
+**Measured after the third pass** (periodic Frenet gauge + periodic
+safe-set query, this section's current text): on `f110_gym_10`, 4/4
+continuous iterations complete with ZERO fallback steps and monotonically
+decreasing lap times (45.35s -> 42.58s -> 40.88s -> 39.35s), including
+iteration 2 -- the specific point where `K*P` first reaches 96 (three
+differently-gauged laps coexisting in one query was the actual root
+cause, not the dimension change itself; see point 1 above). Mean
+per-solve time increased somewhat (up to ~80ms, worst-case spikes to
+~700ms) versus the second pass, consistent with `query()` now ranking 3x
+the candidates per lap -- real but bounded overhead, not a failure.
 
 ## Open items (not yet pinned)
 
