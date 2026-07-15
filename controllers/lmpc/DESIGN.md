@@ -55,20 +55,21 @@ no silent reindexing between docs and code.
 
 Given data from previous laps `D^{j-1} = {(x^i_0,u^i_0),...,(x^i_{T^i},u^i_{T^i})}_{i<j}`:
 
-- For a query state `x`, take the `K` nearest neighbors from each of the
-  previous `P` laps under the weighted distance `(x^i_k - x)^T D (x^i_k - x)`,
-  `D ⪰ 0`. Stack them into `X^j(x; D^j) ∈ R^{n×KP}`.
-- Local convex terminal (target) set:
-  `X_N^j(x; D^j) = { x̄ | ∃ λ ∈ R^{KP}, 0 ≤ λ ≤ 1, 1^T λ = 1, X^j(x;D^j) λ = x̄ }`.
+- Project the terminal reference onto scalar progress `s`, find the nearest
+  periodic phase sample in each previous lap, and take a contiguous `K`-sample
+  window around it. Lift the window's `s` values onto the reference's continuous
+  branch and stack the windows into `X^j(s) ∈ R^{n×KP}`.
+- The terminal interpolation uses `λ ∈ R^{KP}`, `0 ≤ λ ≤ 1`, and
+  `1^T λ = 1`.
 - Cost-to-go for each stored sample `x^i_k` is `T^i - k` (steps remaining to
   the finish line in that lap). Collect these into `J_N^j(x; D^j) ∈ R^{KP}`.
-- Local terminal cost:
-  `Q_N^j(x̄, x; D^j) = min_λ J_N^j(x;D^j)^T λ` s.t. the same `0≤λ≤1, 1^Tλ=1,
-  X^j(x;D^j)λ = x̄` constraints.
+- Local terminal cost uses each lap window's recorded cost-to-go after
+  subtracting that window's forward-end cost, so all values are nonnegative.
+  The terminal constraint is `x_N = X^j(s)λ + diag(scale_x)e_N`, where the
+  normalized signed error `e_N` carries a high quadratic penalty.
 
-`D` (neighbor distance metric) and `K`/`P` are ours to choose — the paper
-only requires `D ⪰ 0`. Pinned below from upstream (`ref/Racing-LMPC-ROS2`,
-BARC config — the 1/10-scale reference, apples-to-apples with our vehicle).
+`K`/`P` are pinned below from upstream (`ref/Racing-LMPC-ROS2`, BARC config —
+the 1/10-scale reference, apples-to-apples with our vehicle).
 
 ### Pinned: K, P (from `barc_lmpc.param.yaml`)
 
@@ -91,10 +92,9 @@ knob back to the paper's symbol without re-deriving it from upstream again.
 
 ### Safe-set query metric
 
-The terminal query uses normalized distance over `[vx, epsi, s, ey]`.
-Including speed and heading error avoids selecting points that are nearby on
-the track but cannot represent the predicted terminal dynamic state. The
-normalization uses the same per-state scales as the QP.
+The terminal query uses periodic scalar `s` distance only. Differences in
+`vx`, `vy`, `omega`, `epsi`, and `ey` are handled by convex interpolation and
+the normalized terminal slack rather than by selecting disconnected samples.
 
 ## 3. Online FHOCP (paper eq. 4a–4f)
 
@@ -498,7 +498,7 @@ died at the start pose) is resolved by two coupled decisions:
    silently phase-shifted the nominal curvature `Track::curvature(s)` used
    for stages recorded after lap 1. Anchoring to `lap_index * L` keeps
    every stored lap's `s` on the SAME Frenet gauge, which `SafeSet`'s
-   cross-lap KNN/convex-hull query requires to be meaningful at all (a
+   cross-lap periodic-segment/convex-hull query requires to be meaningful (a
    query mixing differently-gauged laps was root-caused as the actual
    cause of "iteration 2 fails," not `K*P` growing to 96 -- see the
    commit that added this section). Crashed/truncated laps are never
@@ -513,21 +513,15 @@ died at the start pose) is resolved by two coupled decisions:
    post-step finish-crossing state. Both D^0 and online laps reconstruct
    `a_k` from raw scalar-speed finite differences and use the plant's actual
    pre-transition steering state, never commanded steering.
-2. **Periodic safe-set query, not a finish-mode fabrication.** An earlier
-   version clamped `SafeSet::query()` to each lap's own raw samples, then
-   special-cased `LMPCController::solve_once()` to overwrite the queried
-   terminal states' `s` row and zero their `J` once the terminal reference
-   ran past the stored data's end -- fabricating a vertex that was never
-   actually visited, which broke the safe set's own meaning (`SS2`'s
-   `conv{x_k^i}` is only valid over REAL recorded samples) and anchored
-   `x_N` BEHIND the reference with `J` already ~0 (measured: 3.7 -> 2.3
-   m/s braking at the seam). `SafeSet::query()` now constructs the real
-   periodic copies instead, matching upstream's `X_repeat`/`J_repeat`:
-   every stored sample is ranked at THREE candidate positions, `(s-L,
-   J+T)`, `(s, J)`, `(s+L, J-T)` (`T` = that lap's own transition count),
-   so a terminal reference near or past the seam naturally matches real
-   forward-lap data on its own. No fabrication, no `data_end_s()` special
-   case -- both are gone.
+2. **Periodic contiguous terminal segments.** Regression retains all `T+1`
+   states, while terminal queries use the canonical `x_1..x_T` phase view.
+   Each lap is searched only by periodic `s`; the query then takes a contiguous
+   `K`-sample window, lifts its `s` values across the seam, and offsets recorded
+   cost by the window endpoint. This follows the reference controller's local
+   trajectory construction without duplicate seam phases or negative QP costs.
+   A six-dimensional normalized terminal slack absorbs nominal-model and
+   finite-sampling mismatch instead of requiring the predicted terminal state
+   to intersect the sampled convex hull exactly.
 
 Also in the second pass: the `ey` box is now SOFT (per-stage slack,
 exact-plus-quadratic penalty `ey_slack_l1/l2` -- a hard box made the QP
@@ -552,16 +546,16 @@ This is precisely the mismatch §5/§6's regression corrects, which makes
 the regression the next milestone -- `add_lap` already stores the
 `(x_k, u_k, x_{k+1})` transitions it needs.
 
-**Measured after the third pass** (periodic Frenet gauge + periodic
-safe-set query, this section's current text): on `f110_gym_10`, 4/4
+**Measured after the third pass** (the earlier three-copy periodic KNN,
+before the contiguous-segment/slack change above): on `f110_gym_10`, 4/4
 continuous iterations complete with ZERO fallback steps and monotonically
 decreasing lap times (45.35s -> 42.58s -> 40.88s -> 39.35s), including
 iteration 2 -- the specific point where `K*P` first reaches 96 (three
 differently-gauged laps coexisting in one query was the actual root
 cause, not the dimension change itself; see point 1 above). Mean
 per-solve time increased somewhat (up to ~80ms, worst-case spikes to
-~700ms) versus the second pass, consistent with `query()` now ranking 3x
-the candidates per lap -- real but bounded overhead, not a failure.
+~700ms) versus the second pass. These measurements have not yet been repeated
+with the current contiguous-segment query and terminal slack.
 
 ## Open items (not yet pinned)
 

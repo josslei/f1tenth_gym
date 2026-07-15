@@ -5,7 +5,6 @@
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
-#include <tuple>
 #include <utility>
 
 #include "dynamics/common.hpp"
@@ -82,8 +81,8 @@ std::vector<SafeSetSample> load_lap(const std::string &csv_path) {
   return samples;
 }
 
-// The query side of normalized_distance_sq below, precomputed ONCE per
-// query()/trajectory_segment() call (not per candidate) -- recom.md item 4.
+// The query side of normalized_distance_sq below, precomputed once per
+// trajectory_segment() call rather than once per candidate.
 // inv_scale_* are 1/scale, so the hot loop multiplies instead of divides.
 struct DistanceQuery {
   double vx;
@@ -110,10 +109,7 @@ DistanceQuery make_distance_query(const casadi::DM &x_query,
   };
 }
 
-// Plain-double distance from `sample` (optionally shifted by s_shift, the
-// periodic candidate construction query()'s own comment documents) to a
-// precomputed query point -- no casadi::DM construction/indexing per
-// candidate, unlike the version this replaced (recom.md item 4).
+// Plain-double distance from `sample` to a precomputed warm-start query.
 double normalized_distance_sq(const SafeSetSample &sample, double s_shift,
                               const DistanceQuery &query) {
   const double dvx = (sample.vx - query.vx) * query.inv_scale_vx;
@@ -121,6 +117,22 @@ double normalized_distance_sq(const SafeSetSample &sample, double s_shift,
   const double ds = (sample.s + s_shift - query.s) * query.inv_scale_s;
   const double dey = (sample.ey - query.ey) * query.inv_scale_ey;
   return dvx * dvx + depsi * depsi + ds * ds + dey * dey;
+}
+
+long positive_mod(long value, long modulus) {
+  const long remainder = value % modulus;
+  return remainder < 0 ? remainder + modulus : remainder;
+}
+
+long floor_div(long value, long divisor) {
+  const long quotient = value / divisor;
+  const long remainder = value % divisor;
+  return remainder < 0 ? quotient - 1 : quotient;
+}
+
+double periodic_delta(double value, double reference, double period) {
+  const double delta = value - reference;
+  return delta - period * std::round(delta / period);
 }
 
 } // namespace
@@ -168,7 +180,7 @@ casadi_int SafeSet::terminal_point_count(casadi_int K) const {
         "SafeSet::terminal_point_count: safe set contains no laps");
   }
   for (std::size_t lap_idx = 0; lap_idx < laps.size(); ++lap_idx) {
-    if (laps[lap_idx].size() < static_cast<std::size_t>(K)) {
+    if (laps[lap_idx].size() - 1 < static_cast<std::size_t>(K)) {
       throw std::runtime_error("SafeSet::terminal_point_count: lap " +
                                std::to_string(lap_idx) +
                                " contains fewer than K samples");
@@ -177,47 +189,70 @@ casadi_int SafeSet::terminal_point_count(casadi_int K) const {
   return K * num_laps();
 }
 
-SafeSet::QueryResult SafeSet::query(const casadi::DM &x_query, casadi_int K,
-                                    const casadi::DM &state_scale) const {
+SafeSet::QueryResult SafeSet::query_local_segments(double s_query,
+                                                   casadi_int K) const {
   const casadi_int q = terminal_point_count(K);
-  QueryResult result{casadi::DM::zeros(dynamics::kStateDim, q),
-                     casadi::DM::zeros(q, 1)};
+  QueryResult result{
+      casadi::DM::zeros(dynamics::kStateDim, q), casadi::DM::zeros(q, 1), {}};
+  result.selected.reserve(static_cast<std::size_t>(q));
   casadi_int output_col = 0;
 
-  const DistanceQuery dq = make_distance_query(x_query, state_scale);
-
-  for (const std::vector<SafeSetSample> &lap : laps) {
-    // T = transitions in this lap (lap.size() samples = T+1 states, per
-    // add_lap()'s own convention). Ranks a PERIODIC candidate pool: every
-    // real sample considered at THREE shifted positions -- shift=-1
-    // (s-track_length, J+T), shift=0 (s, J), shift=+1 (s+track_length,
-    // J-T) -- so a terminal reference near/past the seam naturally matches
-    // real data from the adjacent lap wraparound instead of being clamped
-    // to this lap's own endpoint (class comment has the full rationale;
-    // this replaces the removed finish-mode fabrication in
-    // LMPCController::solve_once). shift/sample_idx are carried as
-    // deterministic tie-breakers for equal distances.
-    const double T = static_cast<double>(lap.size()) - 1.0;
-    std::vector<std::tuple<double, std::size_t, int>> ranked;
-    ranked.reserve(lap.size() * 3);
-    for (std::size_t sample_idx = 0; sample_idx < lap.size(); ++sample_idx) {
-      for (int shift = -1; shift <= 1; ++shift) {
-        ranked.emplace_back(
-            normalized_distance_sq(lap[sample_idx], shift * track_length, dq),
-            sample_idx, shift);
+  for (std::size_t lap_index = 0; lap_index < laps.size(); ++lap_index) {
+    const std::vector<SafeSetSample> &lap = laps[lap_index];
+    // The canonical terminal phase view is x_1..x_T. phase_index therefore
+    // maps to stored sample phase_index+1.
+    const long period = static_cast<long>(lap.size()) - 1;
+    long nearest = 0;
+    double best_distance =
+        std::abs(periodic_delta(lap[1].s, s_query, track_length));
+    for (long phase_index = 1; phase_index < period; ++phase_index) {
+      const double distance = std::abs(
+          periodic_delta(lap[static_cast<std::size_t>(phase_index + 1)].s,
+                         s_query, track_length));
+      if (distance < best_distance) {
+        best_distance = distance;
+        nearest = phase_index;
       }
     }
-    std::partial_sort(ranked.begin(), ranked.begin() + K, ranked.end());
-    for (casadi_int selected = 0; selected < K; ++selected) {
-      const auto &[distance, sample_idx, shift] =
-          ranked[static_cast<std::size_t>(selected)];
-      (void)distance;
-      const SafeSetSample &sample = lap[sample_idx];
+
+    const SafeSetSample &nearest_sample =
+        lap[static_cast<std::size_t>(nearest + 1)];
+    const long base_cycle = static_cast<long>(
+        std::llround((s_query - nearest_sample.s) / track_length));
+    const long start = nearest - (K - 1) / 2;
+
+    struct SelectedPoint {
+      const SafeSetSample *sample;
+      long sample_index;
+      long cycle;
+      double lifted_s;
+      double extended_J;
+    };
+    std::vector<SelectedPoint> selected;
+    selected.reserve(static_cast<std::size_t>(K));
+    for (casadi_int j = 0; j < K; ++j) {
+      const long raw_index = start + j;
+      const long phase_index = positive_mod(raw_index, period);
+      const long relative_wrap = floor_div(raw_index, period);
+      const long sample_index = phase_index + 1;
+      const long cycle = base_cycle + relative_wrap;
+      const SafeSetSample &sample = lap[static_cast<std::size_t>(sample_index)];
+      selected.push_back(
+          SelectedPoint{&sample, sample_index, cycle,
+                        sample.s + static_cast<double>(cycle) * track_length,
+                        sample.J - static_cast<double>(cycle * period)});
+    }
+
+    const double endpoint_cost = selected.back().extended_J;
+    for (const SelectedPoint &point : selected) {
+      const double local_J = point.extended_J - endpoint_cost;
+      const SafeSetSample &sample = *point.sample;
       casadi::DM x_shifted = sample.x;
-      x_shifted(dynamics::S) =
-          static_cast<double>(x_shifted(dynamics::S)) + shift * track_length;
+      x_shifted(dynamics::S) = point.lifted_s;
       result.X_ss(casadi::Slice(), output_col) = x_shifted;
-      result.J_ss(output_col, 0) = sample.J - shift * T;
+      result.J_ss(output_col, 0) = local_J;
+      result.selected.push_back(QueryResult::SelectedPointInfo{
+          lap_index, point.sample_index, point.cycle, point.lifted_s, local_J});
       ++output_col;
     }
   }
@@ -226,8 +261,9 @@ SafeSet::QueryResult SafeSet::query(const casadi::DM &x_query, casadi_int K,
       result.X_ss.size2() != q || result.J_ss.size1() != q ||
       result.J_ss.size2() != 1 || !result.X_ss.is_regular() ||
       !result.J_ss.is_regular()) {
-    throw std::runtime_error("SafeSet::query: constructed terminal matrices "
-                             "have invalid dimensions or values");
+    throw std::runtime_error(
+        "SafeSet::query_local_segments: constructed terminal matrices have "
+        "invalid dimensions or values");
   }
   return result;
 }

@@ -163,3 +163,14 @@ elseif(UNIX AND NOT MSVC)
   target_compile_options(lmpc_native PRIVATE -ffunction-sections -fdata-sections)
   target_link_options(lmpc_native PRIVATE "-Wl,--gc-sections")
 endif()
+
+include(CTest)
+if(BUILD_TESTING)
+  add_executable(lmpc_terminal_tests tests/test_terminal_safe_set.cpp)
+  target_link_libraries(lmpc_terminal_tests PRIVATE lmpc_core)
+  add_dependencies(lmpc_terminal_tests casadi_conic_qrqp)
+  add_test(NAME lmpc_terminal_tests COMMAND lmpc_terminal_tests)
+  set_tests_properties(lmpc_terminal_tests PROPERTIES
+    ENVIRONMENT "CASADIPATH=${CMAKE_CURRENT_BINARY_DIR}/casadi/lib"
+  )
+endif()

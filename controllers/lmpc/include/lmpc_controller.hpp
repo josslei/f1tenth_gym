@@ -21,7 +21,7 @@ namespace lmpc {
 // this used to be TWO passes -- a rollout-only pass calling Linearizer::
 // step(), then a second pass re-linearizing the same states -- merged into
 // one so each stage's Jacobians are computed exactly once). knn_ms is the
-// terminal safe_set.query() call.
+// terminal safe_set.query_local_segments() call.
 // set_params_ms/solver_ms/postcheck_ms are copied through from the QpBuilder
 // call's own QpSolveTimings (qp_builder.hpp) unchanged. Populated on every
 // solve_once() call regardless of whether the QP itself succeeded --

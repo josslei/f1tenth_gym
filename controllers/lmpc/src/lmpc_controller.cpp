@@ -36,8 +36,9 @@ void LMPCController::rebuild_qp_builder() {
       config.horizon_steps, terminal_set_size(),
       QpBounds{config.a_min, config.a_max, config.delta_min, config.delta_max,
                config.ey_max, config.sv_max * config.dt},
-      QpWeights{config.cost_to_go_weight, config.c_u, config.c_d_u,
-                config.ey_slack_l1, config.ey_slack_l2},
+      QpWeights{config.cost_to_go_weight, config.terminal_slack_weight,
+                config.c_u, config.c_d_u, config.ey_slack_l1,
+                config.ey_slack_l2},
       QpScaling{
           casadi::DM({config.v_max, config.scale_x_vy, config.scale_x_omega,
                       config.scale_x_epsi, track.length(), config.ey_max}),
@@ -169,12 +170,11 @@ QpSolution LMPCController::solve_once() {
 
   const Clock::time_point t_rollout_lin_done = Clock::now();
 
-  // DESIGN.md SS8 step 4: terminal safe-set query at x_bar_{k+N} -- a
-  // DIFFERENT query than the per-stage ones above: terminal neighbors are
-  // selected in normalized [vx, epsi, s, ey] space.
+  // Select a contiguous local trajectory segment from each lap using only
+  // periodic track progress. Terminal slack handles dynamic-state mismatch.
   const casadi::DM x_terminal_ref = x_warm(casadi::Slice(), N);
-  SafeSet::QueryResult safe_set_result =
-      safe_set.query(x_terminal_ref, config.K, safe_set_query_scale());
+  SafeSet::QueryResult safe_set_result = safe_set.query_local_segments(
+      static_cast<double>(x_terminal_ref(dynamics::S)), config.K);
   const Clock::time_point t_knn_done = Clock::now();
   const casadi_int expected_q = terminal_set_size();
   if (safe_set_result.X_ss.size1() != kStateDim ||
@@ -184,17 +184,6 @@ QpSolution LMPCController::solve_once() {
     throw std::runtime_error("LMPCController::solve_once: safe-set query "
                              "returned invalid dimensions");
   }
-  // No finish-mode terminal fabrication here anymore: an earlier version
-  // overwrote X_ss's S row with the terminal reference and zeroed J_ss
-  // once s passed the recorded data's end, to avoid the hard terminal
-  // equality pulling backward toward a lap's final sample. That vertex was
-  // never actually visited -- it broke the safe set's own meaning (SS2's
-  // conv{x_k^i} is only valid over REAL recorded samples). SafeSet::query()
-  // now constructs real periodic copies of every stored sample instead
-  // (its own class comment has the rationale), so a terminal reference
-  // near/past the seam matches genuine forward-lap data on its own,
-  // without this layer needing to intervene.
-  //
   // Safe-set vertices are reselected every control step, so the previous
   // lambda entries no longer refer to the same columns. Seed the new simplex
   // at its feasible centroid instead of carrying incompatible coordinates.
@@ -246,6 +235,7 @@ casadi::DM LMPCController::control() {
   // (including gym's own low-speed plant divergence), not this layer.
   const QpSolution solution = solve_once();
   if (!solution.success) {
+    qp_builder->clear_dual_warm_start();
     throw std::runtime_error("LMPCController::control: QP solve failed: " +
                              solution.message);
   }

@@ -115,6 +115,8 @@ PYBIND11_MODULE(lmpc_native, m) {
       .def_readwrite("sv_max", &lmpc::LmpcConfig::sv_max)
       .def_readwrite("ey_max", &lmpc::LmpcConfig::ey_max)
       .def_readwrite("cost_to_go_weight", &lmpc::LmpcConfig::cost_to_go_weight)
+      .def_readwrite("terminal_slack_weight",
+                     &lmpc::LmpcConfig::terminal_slack_weight)
       .def_readwrite("c_u", &lmpc::LmpcConfig::c_u)
       .def_readwrite("c_d_u", &lmpc::LmpcConfig::c_d_u)
       .def_readwrite("ey_slack_l1", &lmpc::LmpcConfig::ey_slack_l1)

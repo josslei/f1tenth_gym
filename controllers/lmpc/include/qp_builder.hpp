@@ -35,6 +35,7 @@ struct QpWeights {
   // Multiplier on the normalized terminal cost-to-go J^T lambda
   // (LmpcConfig::cost_to_go_weight's comment).
   double cost_to_go;
+  double terminal_slack;
   double control;
   double control_rate;
   // Exact-plus-quadratic penalty on the per-stage ey slack (LmpcConfig::
@@ -76,9 +77,10 @@ struct QpSolveTimings {
 };
 
 struct QpSolution {
-  casadi::DM x_traj; // kStateDim x (N+1)
-  casadi::DM u_traj; // kControlDim x N
-  casadi::DM lambda; // safe_set_size x 1
+  casadi::DM x_traj;         // kStateDim x (N+1)
+  casadi::DM u_traj;         // kControlDim x N
+  casadi::DM lambda;         // safe_set_size x 1
+  casadi::DM terminal_slack; // normalized kStateDim x 1 signed error
   bool success;
   std::string message; // populated with the solver's own error text on failure
   QpSolveTimings timings;
@@ -109,6 +111,10 @@ public:
 
   casadi_int safe_set_size() const { return q; }
 
+  // A failed solve may leave IPOPT multipliers tied to a stale plant state.
+  // Keep the primal trajectory warm start, but discard those duals.
+  void clear_dual_warm_start();
+
 private:
   casadi_int N;
   casadi_int q;
@@ -118,16 +124,17 @@ private:
   QpScaling scaling;
 
   casadi::Opti opti;
-  casadi::MX X;       // kStateDim x (N+1), SCALED (O(1)) decision variable
-  casadi::MX U;       // kControlDim x N, SCALED (O(1)) decision variable
-  casadi::MX EySlack; // 1 x (N+1), per-stage ey corridor slack (scaled ey
-                      // units, >= 0) -- keeps the QP feasible when the
-                      // measured/predicted state is pushed outside the ey
-                      // box (QpWeights::ey_slack_l1's comment)
-  casadi::MX Lambda;  // q x 1 decision variable
-  casadi::MX X_phys;  // scaling.x * X -- physical-unit state, used in every
-                      // constraint/cost and extracted at solve time
-  casadi::MX U_phys;  // scaling.u * U -- physical-unit control, likewise
+  casadi::MX X;         // kStateDim x (N+1), SCALED (O(1)) decision variable
+  casadi::MX U;         // kControlDim x N, SCALED (O(1)) decision variable
+  casadi::MX EySlack;   // 1 x (N+1), per-stage ey corridor slack (scaled ey
+                        // units, >= 0) -- keeps the QP feasible when the
+                        // measured/predicted state is pushed outside the ey
+                        // box (QpWeights::ey_slack_l1's comment)
+  casadi::MX Lambda;    // q x 1 decision variable
+  casadi::MX ETerminal; // normalized kStateDim x 1 signed terminal error
+  casadi::MX X_phys;    // scaling.x * X -- physical-unit state, used in every
+                        // constraint/cost and extracted at solve time
+  casadi::MX U_phys;    // scaling.u * U -- physical-unit control, likewise
 
   casadi::MX x0_param;
   casadi::MX u_prev_param;

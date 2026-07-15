@@ -15,14 +15,8 @@ namespace lmpc {
 // out as the first solve's warm start, where they must mean the same
 // [a, delta] the FHOCP's own u does.
 struct SafeSetSample {
-  // vx/epsi/s/ey below are derived from x_in automatically -- POD mirrors of
-  // its [vx, epsi, s, ey] entries (StateIndex order), precomputed ONCE here
-  // rather than re-read through casadi::DM on every query() candidate
-  // evaluation (recom.md item 4: query() runs every control step, over
-  // every sample x3 periodic shifts -- reading a handful of scalars through
-  // DM's reference-counted/heap-backed representation was measurable
-  // overhead multiplied by a large candidate count). Defined out-of-line
-  // (safe_set.cpp) since it needs dynamics::StateIndex.
+  // POD mirrors used by trajectory_segment()'s first-solve warm-start search.
+  // Defined out-of-line since construction needs dynamics::StateIndex.
   SafeSetSample(casadi::DM x_in, casadi::DM u_in, double J_in,
                 bool has_control_in);
 
@@ -39,22 +33,11 @@ struct SafeSetSample {
   double ey;
 };
 
-// Holds up to P previous laps of driven data and answers the SS2
-// K-nearest-neighbor query the FHOCP's terminal safe set needs: for a query
-// state, the K nearest samples FROM EACH stored lap under the weighted
-// normalized distance over [vx, epsi, s, ey]. Stacked across laps this gives
-// X^j (kStateDim x KP) and J^j (KP x 1), P = number of laps currently loaded.
-//
-// Every stored lap's s is assumed to already share ONE fixed Frenet origin
-// across laps (lmpc.py's _PeriodicProgress -- lap_index * track_length, not
-// a rebase to each lap's own crossing sample); query() itself is what makes
-// the track's PHYSICAL periodicity visible to the KNN search, by also
-// considering each real sample shifted by -track_length/+track_length
-// (recom.md's periodic-copy construction, matching upstream's X_repeat/
-// J_repeat). This is what lets a terminal reference just past s=L match
-// real forward-lap data instead of being clamped to a lap's own endpoint --
-// no vertex is ever fabricated the way the removed finish-mode block used
-// to.
+// Holds up to P previous laps of driven data. Terminal queries select one
+// contiguous K-sample trajectory window from every lap using periodic Frenet
+// progress only. Each stored lap remains T+1 states for regression and warm
+// starts, while the terminal phase view is x_1..x_T (exactly T samples), so
+// the physically identical seam states x_0/x_T are not both counted.
 class SafeSet {
 public:
   // DESIGN.md SS2's P: at most this many laps are kept; add_lap() evicts
@@ -64,9 +47,7 @@ public:
   // (lower J) than what they evict anyway, so nothing of value is lost.
   static constexpr std::size_t kMaxLaps = 3;
 
-  // track_length is needed for the periodic candidate shifts query()
-  // constructs (see class comment) -- callers already have it (Track is
-  // built before SafeSet in LMPCController's member-init order).
+  // track_length defines periodic distance and continuous s lifting.
   //
   // Loads one lap (DESIGN.md SS8's first pass only ever has D^0, i.e. one
   // lap; add_lap() below is what makes P > 1 possible once later laps are
@@ -83,7 +64,7 @@ public:
 
   casadi_int num_laps() const { return static_cast<casadi_int>(laps.size()); }
 
-  // Number of terminal vertices returned by query(): K from every stored lap.
+  // Number of terminal vertices returned by query_local_segments().
   casadi_int terminal_point_count(casadi_int K) const;
 
   double cost_scale() const;
@@ -91,19 +72,21 @@ public:
   struct QueryResult {
     casadi::DM X_ss; // kStateDim x (K * num_laps())
     casadi::DM J_ss; // (K * num_laps()) x 1
+    struct SelectedPointInfo {
+      std::size_t lap_index;
+      long sample_index;
+      long wrap_count;
+      double lifted_s;
+      double local_J;
+    };
+    std::vector<SelectedPointInfo> selected;
   };
 
-  // Select exactly K nearest samples independently from each stored lap,
-  // sorted by ascending distance within each lap, and concatenate all of
-  // them. No affine-rank or global fixed-size reduction is applied.
-  // state_scale follows StateIndex order. Each real sample is considered
-  // at THREE periodic candidate positions (s-track_length, s, s+track_length
-  // with J correspondingly J+T, J, J-T, T = that lap's transition count) --
-  // class comment has the rationale; this is what lets a terminal query
-  // near/past the seam match real data instead of needing the removed
-  // finish-mode fabrication.
-  QueryResult query(const casadi::DM &x_query, casadi_int K,
-                    const casadi::DM &state_scale) const;
+  // Select a contiguous K-point phase window per lap around the sample with
+  // minimum periodic s distance. Selected s values are lifted onto the
+  // continuous branch nearest s_query, and each lap's recorded cost-to-go is
+  // offset by the window endpoint before being returned.
+  QueryResult query_local_segments(double s_query, casadi_int K) const;
 
   struct TrajectorySegment {
     casadi::DM x_traj; // kStateDim x (horizon_steps + 1)
@@ -111,7 +94,7 @@ public:
   };
 
   // The recorded trajectory segment starting at the stored sample nearest
-  // x_query (same normalized metric as query()), horizon_steps transitions
+  // x_query under its normalized warm-start metric, horizon_steps transitions
   // long -- the first solve's warm start (LMPCController::
   // seed_warm_start_from_safe_set). A zero-control naive rollout from rest
   // parks the whole horizon at the start line, which locks the terminal

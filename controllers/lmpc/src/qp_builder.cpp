@@ -58,6 +58,7 @@ QpBuilder::QpBuilder(casadi_int horizon_steps, casadi_int safe_set_size,
   U = opti.variable(kControlDim, N);
   EySlack = opti.variable(1, N + 1);
   Lambda = opti.variable(q, 1);
+  ETerminal = opti.variable(kStateDim, 1);
   X_phys = this->scaling.x * X;
   U_phys = this->scaling.u * U;
 
@@ -126,7 +127,8 @@ QpBuilder::QpBuilder(casadi_int horizon_steps, casadi_int safe_set_size,
     opti.subject_to(-bounds.ddelta_max <= ddelta);
     opti.subject_to(ddelta <= bounds.ddelta_max);
   }
-  opti.subject_to(X_phys(Slice(), N) == MX::mtimes(Xss_param, Lambda));
+  opti.subject_to(X_phys(Slice(), N) ==
+                  MX::mtimes(Xss_param, Lambda) + this->scaling.x * ETerminal);
   opti.subject_to(0 <= Lambda);
   opti.subject_to(Lambda <= 1.0);
   opti.subject_to(MX::sum1(Lambda) == 1.0);
@@ -137,6 +139,7 @@ QpBuilder::QpBuilder(casadi_int horizon_steps, casadi_int safe_set_size,
   // argmin, so it is omitted rather than adding dead cost terms to the
   // graph.
   MX cost = weights.cost_to_go * MX::mtimes(Jss_param.T(), Lambda);
+  cost += weights.terminal_slack * MX::sumsqr(ETerminal);
   for (casadi_int t = 0; t < N; ++t) {
     const MX u_t = U(Slice(), t);
     const MX u_prev_t =
@@ -288,6 +291,7 @@ QpSolution QpBuilder::solve(const casadi::DM &x_k, const casadi::DM &u_prev,
     opti.set_initial(X, x_warm / scaling.x);
     opti.set_initial(U, u_warm / scaling.u);
     opti.set_initial(Lambda, lambda_warm);
+    opti.set_initial(ETerminal, casadi::DM::zeros(dynamics::kStateDim, 1));
     // recom.md item 2: dual warm start, IPOPT-only (this class's own member
     // comment has the scoping rationale). Skipped on a QpBuilder's first
     // solve (has_dual_warm_start starts false) or right after this instance
@@ -303,23 +307,29 @@ QpSolution QpBuilder::solve(const casadi::DM &x_k, const casadi::DM &u_prev,
     const casadi::DM x_traj = sol.value(X_phys);
     const casadi::DM u_traj = sol.value(U_phys);
     const casadi::DM lambda = sol.value(Lambda);
+    const casadi::DM terminal_slack = sol.value(ETerminal);
     const casadi::DM terminal_projection = casadi::DM::mtimes(X_ss, lambda);
     const casadi::DM terminal_residual =
-        (x_traj(Slice(), N) - terminal_projection) / scaling.x;
+        (x_traj(Slice(), N) - terminal_projection -
+         scaling.x * terminal_slack) /
+        scaling.x;
     const double lambda_sum = static_cast<double>(casadi::DM::sum1(lambda));
 
     SPDLOG_LOGGER_DEBUG(
         log(),
         "q={} X_ss={}x{} J_ss={}x{}\nx0={}\nX_ss={}\nJ_ss={} scale.j={}\n"
         "lambda sum={} min={} max={}\nx_N={}\nX_ss*lambda={}\n"
+        "normalized terminal slack={} norm_inf={}\n"
         "normalized terminal equality residual={}",
         q, X_ss.size1(), X_ss.size2(), J_ss.size1(), J_ss.size2(), x_k.T(),
         X_ss, J_ss.T(), scaling.j, lambda_sum, casadi::DM::mmin(lambda),
         casadi::DM::mmax(lambda), x_traj(casadi::Slice(), N).T(),
-        terminal_projection.T(), terminal_residual.T());
+        terminal_projection.T(), terminal_slack.T(),
+        casadi::DM::mmax(fabs(terminal_slack)), terminal_residual.T());
 
     const bool regular = x_traj.is_regular() && u_traj.is_regular() &&
-                         lambda.is_regular() && terminal_residual.is_regular();
+                         lambda.is_regular() && terminal_slack.is_regular() &&
+                         terminal_residual.is_regular();
 
     const double a_hi =
         static_cast<double>(casadi::DM::mmax(u_traj(dynamics::A, Slice())));
@@ -395,6 +405,7 @@ QpSolution QpBuilder::solve(const casadi::DM &x_k, const casadi::DM &u_prev,
     result.x_traj = x_traj;
     result.u_traj = u_traj;
     result.lambda = lambda;
+    result.terminal_slack = terminal_slack;
     result.success = true;
 
     // recom.md item 2: captured only on a genuinely accepted solve (past
@@ -412,6 +423,7 @@ QpSolution QpBuilder::solve(const casadi::DM &x_k, const casadi::DM &u_prev,
     result.x_traj = x_warm;
     result.u_traj = u_warm;
     result.lambda = lambda_warm;
+    result.terminal_slack = casadi::DM::zeros(dynamics::kStateDim, 1);
     result.success = false;
     result.message = e.what();
     // Attribution on failure: t_solve_done never advanced past whatever it
@@ -426,6 +438,11 @@ QpSolution QpBuilder::solve(const casadi::DM &x_k, const casadi::DM &u_prev,
   result.timings.solver_ms = elapsed_ms(t_params_done, t_solve_done);
   result.timings.postcheck_ms = elapsed_ms(t_solve_done, Clock::now());
   return result;
+}
+
+void QpBuilder::clear_dual_warm_start() {
+  has_dual_warm_start = false;
+  lam_g_warm = casadi::DM();
 }
 
 } // namespace lmpc

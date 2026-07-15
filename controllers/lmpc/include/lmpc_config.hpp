@@ -82,6 +82,7 @@ struct LmpcConfig {
   //   cost_to_go_weight * J^T lambda / scaling.j          (min-time pull)
   // + sum_t c_u * ||u_t||^2                               (control effort)
   // + sum_t c_d_u * ||u_t - u_{t-1}||^2                   (control rate)
+  // + terminal_slack_weight * ||e_N||^2                   (terminal error)
   // + ey_slack_l1 * sum sigma + ey_slack_l2 * sum sigma^2 (soft corridor)
   //
   // c_u/c_d_u are SCALAR (the paper's own formulation: a plain scaled L2
@@ -108,6 +109,11 @@ struct LmpcConfig {
   // normalized J gradient is small against the effort terms below,
   // which reads as "not actually seeking the fastest path".
   double cost_to_go_weight = 1.0;
+
+  // Quadratic penalty on the signed terminal error in normalized state
+  // coordinates. This keeps the terminal safe-set condition usable when the
+  // nominal reachable set does not intersect a finite sampled convex hull.
+  double terminal_slack_weight = 800.0;
 
   // Control effort/rate weights, applied uniformly to the scaled control
   // vector (see the block comment above -- NOT per-component).

@@ -119,8 +119,8 @@ class LMPCController(Controller):
         config.dt = dt
         config.horizon_steps = horizon_steps
         # Any other LmpcConfig field by name -- the cost-term weights are
-        # the usual reason (cost_to_go_weight, c_u/c_d_u, ey_slack_l1/l2;
-        # the objective they weight is spelled out in
+        # the usual reason (cost_to_go_weight, terminal_slack_weight,
+        # c_u/c_d_u, ey_slack_l1/l2; the objective they weight is spelled out in
         # controllers/lmpc/include/lmpc_config.hpp). LmpcConfig is a
         # non-dynamic pybind11 class, so a mistyped name raises
         # AttributeError instead of being silently ignored.
