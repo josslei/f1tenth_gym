@@ -29,6 +29,7 @@ guarantee rests on every stored trajectory actually finishing.
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import gymnasium as gym
@@ -61,7 +62,7 @@ MAP = "maps/custom/barc_oval/barc_oval_map"
 # speed/lookahead tuning.
 CENTERLINE_CSV = "maps/custom/barc_oval/barc_oval_centerline.csv"
 SEED_LAP_CSV = "outputs/lmpc_seed_laps/barc_oval_seed_lap.csv"
-HORIZON_STEPS = 30
+HORIZON_STEPS = 40
 # gym/f110_gym/envs/f110_env.py's F110Env defaults timestep to 0.01 unless a
 # caller overrides it -- explicit here rather than editing that vendored
 # default (CLAUDE.md: treat gym/ as a black box). 0.025 is the value
@@ -74,6 +75,12 @@ SIM_TIMESTEP = 0.025
 # lap grows the safe set, so later iterations should be at least as fast as
 # earlier ones (the paper's core property).
 MAX_ITERATIONS = 10
+# Perf-metrics reporting cadence (PerfMonitor below): print one aggregated
+# p50/p95/p99 block every this many control steps, instead of a line per
+# step -- recom.md asks for exactly this profiling breakdown but explicitly
+# wants percentiles, not just an average, so a single periodic block is both
+# the more useful view and the one that keeps stdout readable.
+PERF_REPORT_INTERVAL_STEPS = 200
 # ---------------------------------------------------------------------
 # LmpcConfig overrides. Every constant below maps 1:1 to a
 # controllers/lmpc/include/lmpc_config.hpp field (see that file for the
@@ -165,7 +172,7 @@ COST_TO_GO_WEIGHT = 1.0
 # rationale for why a single scalar is correct here, not separate
 # accel/steering weights).
 C_U = 0.01
-C_D_U = 0.17
+C_D_U = 0.5
 
 # Soft ey-corridor slack penalty (exact L1 + quadratic L2 on violation).
 EY_SLACK_L1 = 10.0
@@ -233,7 +240,7 @@ WINDOW_HEIGHT = 800
 # plant-level speed regime, not a launch-specific one. This is an
 # actuator-level safety mask, not a second controller -- the LMPC still
 # plans/solves every step, only what reaches gym's action is suppressed.
-LOW_SPEED_STEER_ZERO_BELOW = 2.0
+LOW_SPEED_STEER_ZERO_BELOW = 1.0
 LOW_SPEED_STEER_RESTORE_AT = 3.0
 
 
@@ -291,6 +298,69 @@ def raw_steer_and_speed(f110_env: Any, ego_idx: int) -> tuple[float, float]:
     return float(raw_state[2]), float(raw_state[3])
 
 
+class PerfMonitor:
+    """Accumulates per-step phase timings (ms) and prints ONE compact
+    p50/p95/p99 summary block every `interval_steps` steps, instead of a
+    line per step -- recom.md's requested profiling
+    (t_rollout+lin/t_knn/t_set-params/t_solver/t_postcheck/t_env/t_render),
+    without the messy stdout a per-step print would produce. Tumbling
+    window: each report covers exactly the steps since the previous one,
+    then the buffers clear -- so a stretch of the run that gets slower (or
+    recovers) shows up as a new block, not smeared into a running average
+    since program start.
+    """
+
+    METRICS = (
+        "rollout+lin",
+        "knn",
+        "set-params",
+        "solver",
+        "postcheck",
+        "env",
+        "render",
+    )
+
+    def __init__(self, interval_steps: int = PERF_REPORT_INTERVAL_STEPS) -> None:
+        self._interval_steps = interval_steps
+        self._samples: dict[str, list[float]] = {name: [] for name in self.METRICS}
+
+    def record(self, **metrics_ms: float) -> None:
+        for name in self.METRICS:
+            self._samples[name].append(metrics_ms[name])
+        if len(self._samples["env"]) >= self._interval_steps:
+            self.report()
+
+    def report(self) -> None:
+        n = len(self._samples["env"])
+        if n == 0:
+            return
+        rows = [
+            f"{'metric':<12}{'n':>5}{'mean':>8}{'p50':>8}{'p95':>8}{'p99':>8}{'max':>8}"
+        ]
+        total = np.zeros(n)
+        for name in self.METRICS:
+            values = np.asarray(self._samples[name])
+            total += values
+            rows.append(
+                f"{name:<12}{n:>5}{values.mean():>8.2f}"
+                f"{np.percentile(values, 50):>8.2f}"
+                f"{np.percentile(values, 95):>8.2f}"
+                f"{np.percentile(values, 99):>8.2f}"
+                f"{values.max():>8.2f}"
+            )
+        rows.append(
+            f"{'total':<12}{n:>5}{total.mean():>8.2f}"
+            f"{np.percentile(total, 50):>8.2f}"
+            f"{np.percentile(total, 95):>8.2f}"
+            f"{np.percentile(total, 99):>8.2f}"
+            f"{total.max():>8.2f}"
+        )
+        print(f"--- perf (last {n} steps, ms) ---")
+        print("\n".join(rows))
+        for name in self.METRICS:
+            self._samples[name].clear()
+
+
 def main() -> None:
     env = gym.make("f110-v0", map=MAP, num_agents=1, timestep=SIM_TIMESTEP)
     f110_env: Any = env.unwrapped
@@ -340,6 +410,7 @@ def main() -> None:
     crashed = False
     last_steer = 0.0
     fallback_steps = 0
+    perf = PerfMonitor()
 
     for iteration in range(MAX_ITERATIONS):
         if crashed or viewer.closed:
@@ -384,10 +455,18 @@ def main() -> None:
             last_steer = steer
             action = np.array([[steer, velocity]], dtype=np.float64)
 
+            t_env0 = time.perf_counter()
             obs, _reward, _terminated, truncated, _info = env.step(action)
+            t_env1 = time.perf_counter()
             sim_t += dt
             viewer.update(obs)
             viewer.render()
+            t_render1 = time.perf_counter()
+            perf.record(
+                **controller.last_timings(),
+                env=(t_env1 - t_env0) * 1000.0,
+                render=(t_render1 - t_env1) * 1000.0,
+            )
 
             crashed = bool(f110_env.collisions[ego_idx]) or truncated
             if not crashed:
@@ -427,6 +506,8 @@ def main() -> None:
             samples = [
                 LapSample(controller.native_state.copy(), actual_delta, raw_speed)
             ]
+
+    perf.report()  # flush whatever partial window hasn't hit the interval yet
 
     while not viewer.closed:
         viewer.render()

@@ -15,6 +15,28 @@
 
 namespace lmpc {
 
+// Per-phase wall-clock cost of the last solve_once() call, in milliseconds
+// (recom.md's requested profiling breakdown). rollout_lin_ms covers the
+// CURRENT solve_once() structure -- the separate rollout_warm_states_from_
+// current() pass plus the per-stage linearizer(...) loop -- as ONE combined
+// bucket; if/when those two passes are ever merged into a single rollout-
+// and-linearize loop, this same field keeps meaning "the combined cost of
+// getting z_bar and (A_t, B_t, C_t)", so a before/after comparison stays
+// apples-to-apples. knn_ms is the terminal safe_set.query() call.
+// set_params_ms/solver_ms/postcheck_ms are copied through from the QpBuilder
+// call's own QpSolveTimings (qp_builder.hpp) unchanged. Populated on every
+// solve_once() call regardless of whether the QP itself succeeded --
+// control() only throws AFTER solve_once() already recorded these, so a
+// failed step's timings are still visible to callers (e.g. for perf
+// reporting around a fallback-braking step, not just successful ones).
+struct ControllerTimings {
+  double rollout_lin_ms = 0.0;
+  double knn_ms = 0.0;
+  double set_params_ms = 0.0;
+  double solver_ms = 0.0;
+  double postcheck_ms = 0.0;
+};
+
 // State/control index conventions live in dynamics/common.hpp (the dynamics
 // functors need them too); re-exported here so lmpc::StateIndex etc. keep
 // working unqualified.
@@ -91,6 +113,11 @@ public:
   // caveat.
   casadi::DM predicted_trajectory() const { return x_pred; }
 
+  // Per-phase timing of the last solve_once() call (struct comment above
+  // has the full field-by-field breakdown). Only meaningful after control()
+  // has been called at least once (default-constructed/all-zero otherwise).
+  const ControllerTimings &last_timings() const { return timings; }
+
 private:
   LmpcConfig config;
 
@@ -134,6 +161,9 @@ private:
   // The last solve's own predicted state trajectory (kStateDim x (N+1)) --
   // backs predicted_next_state()/predicted_trajectory() above.
   casadi::DM x_pred;
+
+  // Backs last_timings() above; updated at the end of every solve_once().
+  ControllerTimings timings;
 
   // The normalized-distance scale for LOCATING safe-set data (query /
   // trajectory_segment) -- deliberately different from the QP's

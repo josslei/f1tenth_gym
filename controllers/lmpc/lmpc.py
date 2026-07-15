@@ -309,6 +309,23 @@ class LMPCController(Controller):
         )
         return ControlCommand(steering=float(u[1]), velocity=target_velocity)
 
+    def last_timings(self) -> dict[str, float]:
+        """Per-phase cost (ms) of the most recent control() call's native
+        solve_once(), keyed to match recom.md's t_rollout+lin/t_knn/
+        t_set-params/t_solver/t_postcheck names. Valid even after a failed
+        solve (control() only raises AFTER solve_once() already recorded
+        these) -- e.g. for perf reporting around a fallback-braking step,
+        not just successful ones.
+        """
+        t = self._native.last_timings()
+        return {
+            "rollout+lin": t.rollout_lin_ms,
+            "knn": t.knn_ms,
+            "set-params": t.set_params_ms,
+            "solver": t.solver_ms,
+            "postcheck": t.postcheck_ms,
+        }
+
     def predicted_horizon_xy(self) -> np.ndarray:
         """World-frame (x, y) of the last solve's predicted state trajectory.
 

@@ -63,6 +63,18 @@ add_subdirectory(
   EXCLUDE_FROM_ALL
 )
 
+# spdlog (2026-07-15): debug/perf logging (include/log.hpp), header-only so
+# no extra plugin dylib to copy next to lmpc_native.so (unlike the CasADi
+# solver plugins below). Its own tests/examples aren't needed here.
+set(SPDLOG_BUILD_EXAMPLE OFF CACHE BOOL "Do not build spdlog's own example" FORCE)
+set(SPDLOG_BUILD_TESTS OFF CACHE BOOL "Do not build spdlog's own tests" FORCE)
+set(SPDLOG_INSTALL OFF CACHE BOOL "Do not generate an spdlog install target" FORCE)
+add_subdirectory(
+  "${LMPC_THIRDPARTY_DIR}/spdlog"
+  "${CMAKE_CURRENT_BINARY_DIR}/spdlog"
+  EXCLUDE_FROM_ALL
+)
+
 add_library(lmpc_core STATIC
   src/lmpc_controller.cpp
   src/track.cpp
@@ -74,7 +86,17 @@ target_compile_features(lmpc_core PUBLIC cxx_std_17)
 target_compile_options(lmpc_core PRIVATE
   $<$<CXX_COMPILER_ID:AppleClang,Clang,GNU>:-O3>
 )
-target_link_libraries(lmpc_core PUBLIC ${LMPC_CASADI_TARGET})
+target_link_libraries(lmpc_core PUBLIC ${LMPC_CASADI_TARGET} spdlog::spdlog_header_only)
+# SPDLOG_ACTIVE_LEVEL is spdlog's COMPILE-TIME cost knob (include/log.hpp's
+# comment has the full rationale): below this level, SPDLOG_LOGGER_TRACE/
+# _DEBUG calls are stripped from the binary entirely, not just
+# runtime-skipped. Release (this project's default CMAKE_BUILD_TYPE, set
+# above if the caller didn't choose one) strips both debug/perf logging
+# tiers out completely; any other build type keeps everything compiled in,
+# gated at runtime instead via the standard SPDLOG_LEVEL env var.
+target_compile_definitions(lmpc_core PUBLIC
+  $<IF:$<CONFIG:Release>,SPDLOG_ACTIVE_LEVEL=SPDLOG_LEVEL_INFO,SPDLOG_ACTIVE_LEVEL=SPDLOG_LEVEL_TRACE>
+)
 
 pybind11_add_module(lmpc_native MODULE
   src/bindings.cpp

@@ -124,6 +124,15 @@ PYBIND11_MODULE(lmpc_native, m) {
       .def_readwrite("scale_x_epsi", &lmpc::LmpcConfig::scale_x_epsi)
       .def_readwrite("solver_name", &lmpc::LmpcConfig::solver_name);
 
+  // recom.md's requested profiling breakdown -- lmpc_controller.hpp's
+  // ControllerTimings comment has the full per-field rationale.
+  py::class_<lmpc::ControllerTimings>(m, "ControllerTimings")
+      .def_readonly("rollout_lin_ms", &lmpc::ControllerTimings::rollout_lin_ms)
+      .def_readonly("knn_ms", &lmpc::ControllerTimings::knn_ms)
+      .def_readonly("set_params_ms", &lmpc::ControllerTimings::set_params_ms)
+      .def_readonly("solver_ms", &lmpc::ControllerTimings::solver_ms)
+      .def_readonly("postcheck_ms", &lmpc::ControllerTimings::postcheck_ms);
+
   py::class_<lmpc::LMPCController>(m, "NativeLMPCController")
       .def(py::init<const lmpc::LmpcConfig &>(), py::arg("config"))
       .def("reset", &lmpc::LMPCController::reset)
@@ -146,6 +155,7 @@ PYBIND11_MODULE(lmpc_native, m) {
            [](const lmpc::LMPCController &self) {
              return array2d_from_dm(self.predicted_trajectory());
            })
+      .def("last_timings", &lmpc::LMPCController::last_timings)
       .def(
           "add_lap",
           [](lmpc::LMPCController &self, const py::array_t<double> &x_lap,

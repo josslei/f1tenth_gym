@@ -63,12 +63,25 @@ struct QpStage {
   casadi::DM C; // kStateDim x 1
 };
 
+// Per-phase wall-clock cost of one QpBuilder::solve() call, in milliseconds
+// (recom.md's t_set-params/t_solver/t_postcheck). Populated on BOTH the
+// success and failure paths -- on failure, whatever ran after
+// set_params_ms is attributed to solver_ms (postcheck never got a chance to
+// run; see solve()'s own comment for the exact attribution rule), so these
+// three always sum to the call's total wall time either way.
+struct QpSolveTimings {
+  double set_params_ms = 0.0;
+  double solver_ms = 0.0;
+  double postcheck_ms = 0.0;
+};
+
 struct QpSolution {
   casadi::DM x_traj; // kStateDim x (N+1)
   casadi::DM u_traj; // kControlDim x N
   casadi::DM lambda; // safe_set_size x 1
   bool success;
   std::string message; // populated with the solver's own error text on failure
+  QpSolveTimings timings;
 };
 
 // Builds the multi-shooting QP graph (DESIGN.md SS4) ONCE for a fixed

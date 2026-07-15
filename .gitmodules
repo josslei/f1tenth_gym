@@ -28,3 +28,6 @@
 	path = thirdparty/boost
 	url = https://github.com/boostorg/boost.git
 	ignore = all
+[submodule "thirdparty/spdlog"]
+	path = thirdparty/spdlog
+	url = git@github.com:gabime/spdlog

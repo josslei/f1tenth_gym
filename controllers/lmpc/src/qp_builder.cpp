@@ -1,13 +1,13 @@
 #include "qp_builder.hpp"
 
+#include <chrono>
 #include <cmath>
-#include <cstdlib>
-#include <iostream>
 #include <limits>
 #include <sstream>
 #include <stdexcept>
 
 #include "dynamics/common.hpp"
+#include "log.hpp"
 
 namespace lmpc {
 
@@ -223,6 +223,21 @@ QpSolution QpBuilder::solve(const casadi::DM &x_k, const casadi::DM &u_prev,
         "QpBuilder::solve: lambda_warm must contain only finite values");
   }
 
+  // recom.md's t_set-params/t_solver/t_postcheck: checkpoints declared
+  // outside the try block, each pre-initialized to t_start, so a failure
+  // partway through still yields non-negative, correctly-attributed
+  // durations (the catch block below documents the exact attribution rule
+  // on failure) instead of the negative spans a naive "diff two timestamps
+  // taken inside try" scheme would produce once an earlier phase never
+  // reaches its own checkpoint.
+  using Clock = std::chrono::steady_clock;
+  const auto elapsed_ms = [](Clock::time_point from, Clock::time_point to) {
+    return std::chrono::duration<double, std::milli>(to - from).count();
+  };
+  const Clock::time_point t_start = Clock::now();
+  Clock::time_point t_params_done = t_start;
+  Clock::time_point t_solve_done = t_start;
+
   QpSolution result;
   try {
     // set_value/set_initial calls are INSIDE this try block deliberately,
@@ -248,8 +263,10 @@ QpSolution QpBuilder::solve(const casadi::DM &x_k, const casadi::DM &u_prev,
     opti.set_initial(X, x_warm / scaling.x);
     opti.set_initial(U, u_warm / scaling.u);
     opti.set_initial(Lambda, lambda_warm);
+    t_params_done = Clock::now();
 
     const casadi::OptiSol sol = opti.solve_limited();
+    t_solve_done = Clock::now();
     const casadi::DM x_traj = sol.value(X_phys);
     const casadi::DM u_traj = sol.value(U_phys);
     const casadi::DM lambda = sol.value(Lambda);
@@ -258,20 +275,15 @@ QpSolution QpBuilder::solve(const casadi::DM &x_k, const casadi::DM &u_prev,
         (x_traj(Slice(), N) - terminal_projection) / scaling.x;
     const double lambda_sum = static_cast<double>(casadi::DM::sum1(lambda));
 
-    if (std::getenv("LMPC_DEBUG_TERMINAL") != nullptr) {
-      std::cerr << "q=" << q << " X_ss=" << X_ss.size1() << "x" << X_ss.size2()
-                << " J_ss=" << J_ss.size1() << "x" << J_ss.size2() << "\n"
-                << "x0=" << x_k.T() << "\n"
-                << "X_ss=" << X_ss << "\n"
-                << "J_ss=" << J_ss.T() << " scale.j=" << scaling.j << "\n"
-                << "lambda sum=" << lambda_sum
-                << " min=" << casadi::DM::mmin(lambda)
-                << " max=" << casadi::DM::mmax(lambda) << "\n"
-                << "x_N=" << x_traj(casadi::Slice(), N).T() << "\n"
-                << "X_ss*lambda=" << terminal_projection.T() << "\n"
-                << "normalized terminal equality residual="
-                << terminal_residual.T() << std::endl;
-    }
+    SPDLOG_LOGGER_DEBUG(
+        log(),
+        "q={} X_ss={}x{} J_ss={}x{}\nx0={}\nX_ss={}\nJ_ss={} scale.j={}\n"
+        "lambda sum={} min={} max={}\nx_N={}\nX_ss*lambda={}\n"
+        "normalized terminal equality residual={}",
+        q, X_ss.size1(), X_ss.size2(), J_ss.size1(), J_ss.size2(), x_k.T(),
+        X_ss, J_ss.T(), scaling.j, lambda_sum, casadi::DM::mmin(lambda),
+        casadi::DM::mmax(lambda), x_traj(casadi::Slice(), N).T(),
+        terminal_projection.T(), terminal_residual.T());
 
     const bool regular = x_traj.is_regular() && u_traj.is_regular() &&
                          lambda.is_regular() && terminal_residual.is_regular();
@@ -357,7 +369,17 @@ QpSolution QpBuilder::solve(const casadi::DM &x_k, const casadi::DM &u_prev,
     result.lambda = lambda_warm;
     result.success = false;
     result.message = e.what();
+    // Attribution on failure: t_solve_done never advanced past whatever it
+    // was when the exception fired (still == t_params_done if params
+    // succeeded and solve_limited()/postcheck is what threw), so folding
+    // "now" into it here means the elapsed_ms() calls below attribute all
+    // of that time to solver_ms, not postcheck_ms -- postcheck never ran on
+    // a failed solve, so it should never show non-zero time.
+    t_solve_done = Clock::now();
   }
+  result.timings.set_params_ms = elapsed_ms(t_start, t_params_done);
+  result.timings.solver_ms = elapsed_ms(t_params_done, t_solve_done);
+  result.timings.postcheck_ms = elapsed_ms(t_solve_done, Clock::now());
   return result;
 }
 

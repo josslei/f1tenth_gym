@@ -1,8 +1,9 @@
 #include "lmpc_controller.hpp"
 
-#include <cstdlib>
-#include <iostream>
+#include <chrono>
 #include <stdexcept>
+
+#include "log.hpp"
 
 namespace lmpc {
 
@@ -141,6 +142,15 @@ void LMPCController::shift_warm_start(const QpSolution &solution) {
 }
 
 QpSolution LMPCController::solve_once() {
+  // recom.md's t_rollout+lin/t_knn checkpoints -- ControllerTimings'
+  // comment (lmpc_controller.hpp) has the full rationale for what each
+  // bucket covers.
+  using Clock = std::chrono::steady_clock;
+  const auto elapsed_ms = [](Clock::time_point from, Clock::time_point to) {
+    return std::chrono::duration<double, std::milli>(to - from).count();
+  };
+  const Clock::time_point t_start = Clock::now();
+
   // Every solve linearizes against a fresh nominal rollout from the
   // measured state under u_warm -- never against the previous solve's own
   // stale predicted states (rollout_warm_states_from_current()'s header
@@ -164,13 +174,13 @@ QpSolution LMPCController::solve_once() {
         linearizer(x_ref, u_ref, u_prev_ref, kappa_ref);
     stages.push_back(QpStage{lin.A, lin.B, lin.C});
 
-    if (std::getenv("LMPC_DEBUG_STAGES") != nullptr) {
-      std::cerr << "stage " << stg << ": x_ref=" << x_ref.T()
-                << " u_ref=" << u_ref.T()
-                << " |A|max=" << casadi::DM::mmax(fabs(lin.A))
-                << " |B|max=" << casadi::DM::mmax(fabs(lin.B)) << std::endl;
-    }
+    SPDLOG_LOGGER_TRACE(log(),
+                        "stage {}: x_ref={} u_ref={} |A|max={} |B|max={}", stg,
+                        x_ref.T(), u_ref.T(), casadi::DM::mmax(fabs(lin.A)),
+                        casadi::DM::mmax(fabs(lin.B)));
   }
+
+  const Clock::time_point t_rollout_lin_done = Clock::now();
 
   // DESIGN.md SS8 step 4: terminal safe-set query at x_bar_{k+N} -- a
   // DIFFERENT query than the per-stage ones above: terminal neighbors are
@@ -178,6 +188,7 @@ QpSolution LMPCController::solve_once() {
   const casadi::DM x_terminal_ref = x_warm(casadi::Slice(), N);
   SafeSet::QueryResult safe_set_result =
       safe_set.query(x_terminal_ref, config.K, safe_set_query_scale());
+  const Clock::time_point t_knn_done = Clock::now();
   const casadi_int expected_q = terminal_set_size();
   if (safe_set_result.X_ss.size1() != kStateDim ||
       safe_set_result.X_ss.size2() != expected_q ||
@@ -212,8 +223,20 @@ QpSolution LMPCController::solve_once() {
   u_prev_anchor(dynamics::DELTA) = actual_delta;
 
   // DESIGN.md SS8 step 5.
-  return qp_builder->solve(x, u_prev_anchor, stages, safe_set_result.X_ss,
-                           safe_set_result.J_ss, x_warm, u_warm, lambda_warm);
+  QpSolution solution =
+      qp_builder->solve(x, u_prev_anchor, stages, safe_set_result.X_ss,
+                        safe_set_result.J_ss, x_warm, u_warm, lambda_warm);
+
+  // Populated regardless of solution.success -- see this function's own
+  // return path in control(): the failure throw happens AFTER solve_once()
+  // returns, so these are already valid by then.
+  timings.rollout_lin_ms = elapsed_ms(t_start, t_rollout_lin_done);
+  timings.knn_ms = elapsed_ms(t_rollout_lin_done, t_knn_done);
+  timings.set_params_ms = solution.timings.set_params_ms;
+  timings.solver_ms = solution.timings.solver_ms;
+  timings.postcheck_ms = solution.timings.postcheck_ms;
+
+  return solution;
 }
 
 casadi::DM LMPCController::control() {
