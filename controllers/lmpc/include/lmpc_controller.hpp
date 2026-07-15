@@ -16,13 +16,12 @@
 namespace lmpc {
 
 // Per-phase wall-clock cost of the last solve_once() call, in milliseconds
-// (recom.md's requested profiling breakdown). rollout_lin_ms covers the
-// CURRENT solve_once() structure -- the separate rollout_warm_states_from_
-// current() pass plus the per-stage linearizer(...) loop -- as ONE combined
-// bucket; if/when those two passes are ever merged into a single rollout-
-// and-linearize loop, this same field keeps meaning "the combined cost of
-// getting z_bar and (A_t, B_t, C_t)", so a before/after comparison stays
-// apples-to-apples. knn_ms is the terminal safe_set.query() call.
+// (recom.md's requested profiling breakdown). rollout_lin_ms covers
+// solve_once()'s single combined rollout+linearize loop (recom.md item 1:
+// this used to be TWO passes -- a rollout-only pass calling Linearizer::
+// step(), then a second pass re-linearizing the same states -- merged into
+// one so each stage's Jacobians are computed exactly once). knn_ms is the
+// terminal safe_set.query() call.
 // set_params_ms/solver_ms/postcheck_ms are copied through from the QpBuilder
 // call's own QpSolveTimings (qp_builder.hpp) unchanged. Populated on every
 // solve_once() call regardless of whether the QP itself succeeded --
@@ -185,26 +184,28 @@ private:
   // lost its search direction on the resulting near-flat KKT system).
   void seed_warm_start_from_safe_set();
 
-  // Rebuilds x_warm as a nominal-model rollout from the MEASURED current
-  // state under u_warm -- called every control(), not just the first.
-  // Shifting the previous solution's predicted states and only patching
-  // column 0 with the measurement (the previous scheme) leaves columns
-  // 1..N as stale predictions; whenever realized dynamics diverge from
-  // what was predicted (gym's actuator layer guarantees some divergence),
-  // the linearization sequence drifts from reality with nothing pulling
-  // it back, and the accumulated inconsistency is what ultimately broke
-  // the solver. Re-rolling out from the measurement keeps the whole
-  // sequence dynamically consistent with where the car actually is.
-  void rollout_warm_states_from_current();
-
   // Shifts the just-solved CONTROL trajectory by one stage for the next
   // control step (receding horizon). Only u_warm -- x_warm is re-derived
-  // from the next measured state by rollout_warm_states_from_current().
+  // from the next measured state by solve_once()'s own rollout+linearize
+  // loop.
   void shift_warm_start(const QpSolution &solution);
 
-  // One full FHOCP pass (rollout -> linearize -> terminal query -> QP
-  // solve) against the current x/u_warm -- factored out so control() can
-  // retry it once with a freshly reseeded warm start after a failure.
+  // One full FHOCP pass (rollout+linearize -> terminal query -> QP solve)
+  // against the current x/u_warm -- factored out of control() for
+  // testability. Rebuilds x_warm as a nominal-model rollout from the
+  // MEASURED current state under u_warm on every call, not just the first:
+  // shifting the previous solution's predicted states and only patching
+  // column 0 with the measurement (an earlier scheme) leaves columns 1..N
+  // as stale predictions, and whenever realized dynamics diverge from what
+  // was predicted (gym's actuator layer guarantees some divergence), the
+  // linearization sequence drifts from reality with nothing pulling it
+  // back -- re-rolling out from the measurement every time keeps the whole
+  // sequence dynamically consistent with where the car actually is. The
+  // rollout and the per-stage linearization are done in ONE pass (recom.md):
+  // Linearizer::operator() already computes x_next alongside (A_t, B_t, C_t)
+  // at the same evaluation, so stage stg+1's x_ref is exactly stage stg's
+  // x_next -- no separate rollout-only pass re-deriving the same states
+  // before a second pass re-linearizes them.
   QpSolution solve_once();
 };
 

@@ -12,6 +12,14 @@
 
 namespace lmpc {
 
+SafeSetSample::SafeSetSample(casadi::DM x_in, casadi::DM u_in, double J_in,
+                             bool has_control_in)
+    : x(x_in), u(std::move(u_in)), J(J_in), has_control(has_control_in),
+      vx(static_cast<double>(x_in(dynamics::VX))),
+      epsi(static_cast<double>(x_in(dynamics::EPSI))),
+      s(static_cast<double>(x_in(dynamics::S))),
+      ey(static_cast<double>(x_in(dynamics::EY))) {}
+
 namespace {
 
 // Parses the header written by
@@ -74,20 +82,44 @@ std::vector<SafeSetSample> load_lap(const std::string &csv_path) {
   return samples;
 }
 
-double normalized_distance_sq(const casadi::DM &a, const casadi::DM &b,
-                              const casadi::DM &scale) {
-  const double dvx = (static_cast<double>(a(dynamics::VX)) -
-                      static_cast<double>(b(dynamics::VX))) /
-                     static_cast<double>(scale(dynamics::VX));
-  const double depsi = (static_cast<double>(a(dynamics::EPSI)) -
-                        static_cast<double>(b(dynamics::EPSI))) /
-                       static_cast<double>(scale(dynamics::EPSI));
-  const double ds = (static_cast<double>(a(dynamics::S)) -
-                     static_cast<double>(b(dynamics::S))) /
-                    static_cast<double>(scale(dynamics::S));
-  const double dey = (static_cast<double>(a(dynamics::EY)) -
-                      static_cast<double>(b(dynamics::EY))) /
-                     static_cast<double>(scale(dynamics::EY));
+// The query side of normalized_distance_sq below, precomputed ONCE per
+// query()/trajectory_segment() call (not per candidate) -- recom.md item 4.
+// inv_scale_* are 1/scale, so the hot loop multiplies instead of divides.
+struct DistanceQuery {
+  double vx;
+  double epsi;
+  double s;
+  double ey;
+  double inv_scale_vx;
+  double inv_scale_epsi;
+  double inv_scale_s;
+  double inv_scale_ey;
+};
+
+DistanceQuery make_distance_query(const casadi::DM &x_query,
+                                  const casadi::DM &state_scale) {
+  return DistanceQuery{
+      static_cast<double>(x_query(dynamics::VX)),
+      static_cast<double>(x_query(dynamics::EPSI)),
+      static_cast<double>(x_query(dynamics::S)),
+      static_cast<double>(x_query(dynamics::EY)),
+      1.0 / static_cast<double>(state_scale(dynamics::VX)),
+      1.0 / static_cast<double>(state_scale(dynamics::EPSI)),
+      1.0 / static_cast<double>(state_scale(dynamics::S)),
+      1.0 / static_cast<double>(state_scale(dynamics::EY)),
+  };
+}
+
+// Plain-double distance from `sample` (optionally shifted by s_shift, the
+// periodic candidate construction query()'s own comment documents) to a
+// precomputed query point -- no casadi::DM construction/indexing per
+// candidate, unlike the version this replaced (recom.md item 4).
+double normalized_distance_sq(const SafeSetSample &sample, double s_shift,
+                              const DistanceQuery &query) {
+  const double dvx = (sample.vx - query.vx) * query.inv_scale_vx;
+  const double depsi = (sample.epsi - query.epsi) * query.inv_scale_epsi;
+  const double ds = (sample.s + s_shift - query.s) * query.inv_scale_s;
+  const double dey = (sample.ey - query.ey) * query.inv_scale_ey;
   return dvx * dvx + depsi * depsi + ds * ds + dey * dey;
 }
 
@@ -152,6 +184,8 @@ SafeSet::QueryResult SafeSet::query(const casadi::DM &x_query, casadi_int K,
                      casadi::DM::zeros(q, 1)};
   casadi_int output_col = 0;
 
+  const DistanceQuery dq = make_distance_query(x_query, state_scale);
+
   for (const std::vector<SafeSetSample> &lap : laps) {
     // T = transitions in this lap (lap.size() samples = T+1 states, per
     // add_lap()'s own convention). Ranks a PERIODIC candidate pool: every
@@ -168,12 +202,9 @@ SafeSet::QueryResult SafeSet::query(const casadi::DM &x_query, casadi_int K,
     ranked.reserve(lap.size() * 3);
     for (std::size_t sample_idx = 0; sample_idx < lap.size(); ++sample_idx) {
       for (int shift = -1; shift <= 1; ++shift) {
-        casadi::DM x_shifted = lap[sample_idx].x;
-        x_shifted(dynamics::S) =
-            static_cast<double>(x_shifted(dynamics::S)) + shift * track_length;
         ranked.emplace_back(
-            normalized_distance_sq(x_shifted, x_query, state_scale), sample_idx,
-            shift);
+            normalized_distance_sq(lap[sample_idx], shift * track_length, dq),
+            sample_idx, shift);
       }
     }
     std::partial_sort(ranked.begin(), ranked.begin() + K, ranked.end());
@@ -209,10 +240,11 @@ SafeSet::trajectory_segment(const casadi::DM &x_query, casadi_int horizon_steps,
   const std::vector<SafeSetSample> &lap = laps.back();
   const std::size_t n = lap.size();
 
+  const DistanceQuery dq = make_distance_query(x_query, state_scale);
   std::size_t nearest = 0;
-  double best = normalized_distance_sq(lap[0].x, x_query, state_scale);
+  double best = normalized_distance_sq(lap[0], 0.0, dq);
   for (std::size_t i = 1; i < n; ++i) {
-    const double d = normalized_distance_sq(lap[i].x, x_query, state_scale);
+    const double d = normalized_distance_sq(lap[i], 0.0, dq);
     if (d < best) {
       best = d;
       nearest = i;

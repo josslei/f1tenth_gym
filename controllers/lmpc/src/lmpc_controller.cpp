@@ -97,40 +97,22 @@ void LMPCController::seed_warm_start_from_safe_set() {
   // First-solve warm start: the recorded D^0 controls nearest the current
   // state (header comment has the full rationale for why NOT a
   // zero-control naive rollout). Only u_warm is taken from the recording;
-  // x_warm is derived from the measured state by
-  // rollout_warm_states_from_current() so the linearization sequence stays
-  // dynamically consistent with the nominal model regardless of how the
-  // recorded lap's own dynamics differed.
+  // x_warm is derived from the measured state by solve_once()'s own
+  // rollout+linearize loop so the linearization sequence stays dynamically
+  // consistent with the nominal model regardless of how the recorded lap's
+  // own dynamics differed.
   const SafeSet::TrajectorySegment segment = safe_set.trajectory_segment(
       x, config.horizon_steps, safe_set_query_scale());
   u_warm = segment.u_traj;
   has_warm_start = true;
 }
 
-void LMPCController::rollout_warm_states_from_current() {
-  // Header comment has the rationale: x_warm must be re-derived from the
-  // MEASURED state under u_warm every step, not carried over as the
-  // previous solve's (increasingly stale) prediction.
-  using casadi::Slice;
-
-  x_warm(Slice(), 0) = x;
-  for (casadi_int stg = 0; stg < config.horizon_steps; ++stg) {
-    const casadi::DM x_stage = x_warm(Slice(), stg);
-    const casadi::DM u_stage = u_warm(Slice(), stg);
-    const casadi::DM u_prev_stage =
-        (stg == 0) ? u_prev : casadi::DM(u_warm(Slice(), stg - 1));
-    const double kappa =
-        track.curvature(static_cast<double>(x_stage(dynamics::S)));
-    x_warm(Slice(), stg + 1) =
-        linearizer.step(x_stage, u_stage, u_prev_stage, kappa);
-  }
-}
-
 void LMPCController::shift_warm_start(const QpSolution &solution) {
   // Only the CONTROL trajectory shifts (receding horizon); the freed final
   // slot holds the last control constant. x_warm is deliberately NOT
-  // shifted from solution.x_traj -- rollout_warm_states_from_current()
-  // rebuilds it from the next measured state instead (header comment).
+  // shifted from solution.x_traj -- solve_once()'s own rollout+linearize
+  // loop rebuilds it from the next measured state instead (its header
+  // comment has the rationale).
   using casadi::Slice;
 
   const casadi_int N = config.horizon_steps;
@@ -151,11 +133,15 @@ QpSolution LMPCController::solve_once() {
   };
   const Clock::time_point t_start = Clock::now();
 
-  // Every solve linearizes against a fresh nominal rollout from the
-  // measured state under u_warm -- never against the previous solve's own
-  // stale predicted states (rollout_warm_states_from_current()'s header
-  // comment has the failure mode that motivated this).
-  rollout_warm_states_from_current();
+  // x_warm is rebuilt as a nominal-model rollout from the MEASURED current
+  // state under u_warm on EVERY call, not just the first (solve_once()'s
+  // header comment has the full rationale) -- fused with the per-stage
+  // linearization below into a single pass (recom.md item 1):
+  // Linearizer::operator() already evaluates x_next alongside (A_t, B_t,
+  // C_t) at the same call, so stage stg+1's x_ref is exactly stage stg's
+  // x_next, and no state is ever linearized twice.
+  using casadi::Slice;
+  x_warm(Slice(), 0) = x;
 
   // DESIGN.md SS8 step 3 (dummy-A/B/C pass: steps 3a/3b skipped, so
   // A_t = A^f_t, B_t = B^f_t, C_t = C^f_t -- no learned error correction).
@@ -163,15 +149,16 @@ QpSolution LMPCController::solve_once() {
   std::vector<QpStage> stages;
   stages.reserve(static_cast<std::size_t>(N));
   for (casadi_int stg = 0; stg < N; ++stg) {
-    casadi::DM x_ref = x_warm(casadi::Slice(), stg);
-    const casadi::DM u_ref = u_warm(casadi::Slice(), stg);
+    const casadi::DM x_ref = x_warm(Slice(), stg);
+    const casadi::DM u_ref = u_warm(Slice(), stg);
     const casadi::DM u_prev_ref =
-        (stg == 0) ? u_prev : casadi::DM(u_warm(casadi::Slice(), stg - 1));
+        (stg == 0) ? u_prev : casadi::DM(u_warm(Slice(), stg - 1));
     const double kappa_ref =
         track.curvature(static_cast<double>(x_ref(dynamics::S)));
 
     const LinearizedDynamics lin =
         linearizer(x_ref, u_ref, u_prev_ref, kappa_ref);
+    x_warm(Slice(), stg + 1) = lin.x_next;
     stages.push_back(QpStage{lin.A, lin.B, lin.C});
 
     SPDLOG_LOGGER_TRACE(log(),

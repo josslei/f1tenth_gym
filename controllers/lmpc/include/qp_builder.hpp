@@ -136,6 +136,17 @@ private:
   std::vector<casadi::MX> C_params;
   casadi::MX Xss_param;
   casadi::MX Jss_param;
+
+  // Dual (constraint multiplier) warm start (recom.md item 2) -- IPOPT-only:
+  // scoped to solver_name == "ipopt" in solve()'s own body, since dual warm
+  // starting is specifically an interior-point-method concept (paired with
+  // "warm_start_init_point"=yes below) that qrqp/qpoases's active-set
+  // methods don't share the same warm-start contract for. Reset implicitly
+  // whenever a new QpBuilder is constructed (q/N changed, e.g. a completed
+  // lap resized the safe set) since lam_g's own dimension depends on the
+  // constraint count baked into THIS instance's graph.
+  casadi::DM lam_g_warm;
+  bool has_dual_warm_start = false;
 };
 
 } // namespace lmpc

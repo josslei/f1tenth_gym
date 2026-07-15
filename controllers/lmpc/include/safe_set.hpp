@@ -15,12 +15,28 @@ namespace lmpc {
 // out as the first solve's warm start, where they must mean the same
 // [a, delta] the FHOCP's own u does.
 struct SafeSetSample {
+  // vx/epsi/s/ey below are derived from x_in automatically -- POD mirrors of
+  // its [vx, epsi, s, ey] entries (StateIndex order), precomputed ONCE here
+  // rather than re-read through casadi::DM on every query() candidate
+  // evaluation (recom.md item 4: query() runs every control step, over
+  // every sample x3 periodic shifts -- reading a handful of scalars through
+  // DM's reference-counted/heap-backed representation was measurable
+  // overhead multiplied by a large candidate count). Defined out-of-line
+  // (safe_set.cpp) since it needs dynamics::StateIndex.
+  SafeSetSample(casadi::DM x_in, casadi::DM u_in, double J_in,
+                bool has_control_in);
+
   casadi::DM x; // kStateDim x 1, StateIndex order
   casadi::DM u; // kControlDim x 1, ControlIndex order -- zeros if !has_control
   double J;     // cost-to-go: steps remaining to the finish line
   // False only for a lap's final sample (the CSV's last row has no
   // successor state, so its a/delta columns are blank by construction).
   bool has_control;
+
+  double vx;
+  double epsi;
+  double s;
+  double ey;
 };
 
 // Holds up to P previous laps of driven data and answers the SS2

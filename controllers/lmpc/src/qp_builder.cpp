@@ -167,15 +167,40 @@ QpBuilder::QpBuilder(casadi_int horizon_steps, casadi_int safe_set_size,
     // {"ipopt": {"ipopt": {...}}}, which is exactly what produced
     // "No such IPOPT option: ipopt" (IpoptInterface tried to set a
     // literal option NAMED "ipopt" from the surviving outer key) when
-    // first tried (2026-07-14). print_time is a generic nlpsol-level
-    // option, so it goes in the SECOND (plugin_options) arg instead.
+    // first tried (2026-07-14). print_time/expand are generic nlpsol-level
+    // options, so they go in the SECOND (plugin_options) arg instead.
     // sb="yes" silences ipopt's startup banner (no print_header/
     // print_info equivalent for it). error_on_fail is qrqp/conic-only;
     // ipopt failures are instead read off OptiSol the same way
     // solve_limited() already handles a qrqp non-convergence.
-    opti.solver(
-        solver_name, casadi::Dict{{"print_time", false}},
-        casadi::Dict{{"max_iter", 2000}, {"print_level", 0}, {"sb", "yes"}});
+    //
+    // recom.md item 2: expand=true converts the fixed MX graph to SX at
+    // solver-build time -- a real win here specifically because the SAME
+    // graph is re-solved every control step (SX ops are scalar-unrolled,
+    // no MX heap-allocated node overhead per re-evaluation), unlike a
+    // build-once/solve-once NLP where expansion cost wouldn't be amortized.
+    // warm_start_init_point=yes is what makes IPOPT actually USE the
+    // primal (X/U/Lambda, already set via set_initial below) and dual
+    // (lam_g_warm, this class's own member) initial guesses instead of
+    // reprojecting to its own default starting point. tol/acceptable_tol
+    // relaxed from IPOPT's own stricter defaults: this project's terminal
+    // residual check already accepts 1e-4 (qp_builder.cpp's
+    // kTerminalEqualityTolerance), so demanding tighter KKT convergence
+    // from the solver itself buys nothing this controller can use.
+    // max_iter deliberately left at 2000, NOT dropped to something small --
+    // recom.md's own caution: a successful solve doesn't usually approach
+    // 2000 anyway, so this isn't the lever that matters; shrinking it
+    // without first recording actual iteration counts risks turning a
+    // slow-but-recoverable solve into a spurious failure instead.
+    opti.solver(solver_name,
+                casadi::Dict{{"print_time", false}, {"expand", true}},
+                casadi::Dict{{"max_iter", 2000},
+                             {"print_level", 0},
+                             {"sb", "yes"},
+                             {"tol", 1e-6},
+                             {"acceptable_tol", 1e-4},
+                             {"acceptable_iter", 2},
+                             {"warm_start_init_point", "yes"}});
   } else {
     // Passed as the SECOND (plugin_options) argument, not the third
     // (solver_options): Opti::solver's third arg gets nested under a key
@@ -263,6 +288,14 @@ QpSolution QpBuilder::solve(const casadi::DM &x_k, const casadi::DM &u_prev,
     opti.set_initial(X, x_warm / scaling.x);
     opti.set_initial(U, u_warm / scaling.u);
     opti.set_initial(Lambda, lambda_warm);
+    // recom.md item 2: dual warm start, IPOPT-only (this class's own member
+    // comment has the scoping rationale). Skipped on a QpBuilder's first
+    // solve (has_dual_warm_start starts false) or right after this instance
+    // was rebuilt for a resized safe set -- lam_g_warm's dimension would no
+    // longer match this graph's constraint count.
+    if (solver_name == "ipopt" && has_dual_warm_start) {
+      opti.set_initial(opti.lam_g(), lam_g_warm);
+    }
     t_params_done = Clock::now();
 
     const casadi::OptiSol sol = opti.solve_limited();
@@ -363,6 +396,18 @@ QpSolution QpBuilder::solve(const casadi::DM &x_k, const casadi::DM &u_prev,
     result.u_traj = u_traj;
     result.lambda = lambda;
     result.success = true;
+
+    // recom.md item 2: captured only on a genuinely accepted solve (past
+    // every check above), same IPOPT-only scope as the read side.
+    if (solver_name == "ipopt") {
+      lam_g_warm = sol.value(opti.lam_g());
+      has_dual_warm_start = lam_g_warm.is_regular();
+      SPDLOG_LOGGER_DEBUG(log(), "ipopt iter_count={} (dual warm start {})",
+                          opti.stats().at("iter_count"),
+                          has_dual_warm_start
+                              ? "primed for next solve"
+                              : "unavailable (non-finite lam_g)");
+    }
   } catch (const std::exception &e) {
     result.x_traj = x_warm;
     result.u_traj = u_warm;
