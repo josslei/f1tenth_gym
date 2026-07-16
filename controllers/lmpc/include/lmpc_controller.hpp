@@ -119,7 +119,7 @@ public:
   // has been called at least once (default-constructed/all-zero otherwise).
   const ControllerTimings &last_timings() const { return timings; }
 
-  // Physical-unit signed terminal error from the last accepted solve, in
+  // Normalized signed terminal error from the last accepted solve, in
   // StateIndex order. Reset to zero with the controller.
   const casadi::DM &last_terminal_slack_value() const {
     return last_terminal_slack;
@@ -135,6 +135,8 @@ private:
   Linearizer linearizer;
   Track track;
   SafeSet safe_set;
+  // Captured from D^0 and retained even after older-lap eviction.
+  double cost_to_go_scale;
   std::unique_ptr<QpBuilder> qp_builder;
 
   casadi::DM x;

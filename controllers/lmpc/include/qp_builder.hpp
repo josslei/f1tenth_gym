@@ -32,7 +32,7 @@ struct QpBounds {
 // comment has the full rationale, including why a per-component weight
 // isn't needed once U is already normalized to O(1)).
 struct QpWeights {
-  // Multiplier on the local terminal cost-to-go J^T lambda
+  // Multiplier on the normalized terminal cost-to-go J^T lambda
   // (LmpcConfig::cost_to_go_weight's comment).
   double cost_to_go;
   double terminal_slack;
@@ -53,6 +53,7 @@ struct QpWeights {
 struct QpScaling {
   casadi::DM x; // kStateDim x 1
   casadi::DM u; // kControlDim x 1
+  double j;     // seed-lap cost-to-go scale
 };
 
 // One horizon stage's affine dynamics parameters (DESIGN.md SS4):

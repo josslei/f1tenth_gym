@@ -67,6 +67,8 @@ public:
   // Number of terminal vertices returned by query_local_segments().
   casadi_int terminal_point_count(casadi_int K) const;
 
+  double cost_scale() const;
+
   struct QueryResult {
     casadi::DM X_ss; // kStateDim x (K * num_laps())
     casadi::DM J_ss; // (K * num_laps()) x 1

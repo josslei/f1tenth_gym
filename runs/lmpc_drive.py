@@ -150,11 +150,11 @@ EY_MAX = 0.25
 
 # ---- Cost-term weights (controllers/lmpc/include/lmpc_config.hpp spells
 # out the full objective each one scales) ----
-# Multiplier on the raw local terminal cost-to-go J^T lambda -- the min-time
-# pull. The safe-set window already offsets J to [K-1, ..., 0].
+# Multiplier on the normalized terminal cost-to-go J^T lambda -- the min-
+# time pull. The old cost_to_go_weight=5.0 value (git history) was swept
+# against f110_gym_10 specifically and does not carry over to this track.
 COST_TO_GO_WEIGHT = 1.0
-# Reference Hessian weight for the physical six-state terminal error;
-# QpBuilder applies the corresponding 0.5 factor explicitly.
+# Quadratic penalty on the normalized six-state terminal relaxation.
 TERMINAL_SLACK_WEIGHT = 800.0
 # Control effort/rate weights, applied uniformly to the scaled control
 # vector (the paper's own c_u/c_d_u -- a plain L2 norm, not a

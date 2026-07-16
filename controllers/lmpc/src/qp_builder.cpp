@@ -139,10 +139,7 @@ QpBuilder::QpBuilder(casadi_int horizon_steps, casadi_int safe_set_size,
   // argmin, so it is omitted rather than adding dead cost terms to the
   // graph.
   MX cost = weights.cost_to_go * MX::mtimes(Jss_param.T(), Lambda);
-  const MX terminal_error_physical = this->scaling.x * ETerminal;
-  // terminal_slack is the reference Hessian diagonal q_s_terminal. The
-  // explicit 0.5 matches the corresponding 0.5*z^T*P*z objective.
-  cost += 0.5 * weights.terminal_slack * MX::sumsqr(terminal_error_physical);
+  cost += weights.terminal_slack * MX::sumsqr(ETerminal);
   for (casadi_int t = 0; t < N; ++t) {
     const MX u_t = U(Slice(), t);
     const MX u_prev_t =
@@ -280,7 +277,7 @@ QpSolution QpBuilder::solve(const casadi::DM &x_k, const casadi::DM &u_prev,
     opti.set_value(x0_param, x_k);
     opti.set_value(u_prev_param, u_prev);
     opti.set_value(Xss_param, X_ss);
-    opti.set_value(Jss_param, J_ss);
+    opti.set_value(Jss_param, J_ss / scaling.j);
     for (casadi_int t = 0; t < N; ++t) {
       opti.set_value(A_params[t], stages[t].A);
       opti.set_value(B_params[t], stages[t].B);
@@ -323,12 +320,12 @@ QpSolution QpBuilder::solve(const casadi::DM &x_k, const casadi::DM &u_prev,
 
     SPDLOG_LOGGER_DEBUG(
         log(),
-        "q={} X_ss={}x{} J_ss={}x{}\nx0={}\nX_ss={}\nJ_ss={}\n"
+        "q={} X_ss={}x{} J_ss={}x{}\nx0={}\nX_ss={}\nJ_ss={} scale.j={}\n"
         "lambda sum={} min={} max={}\nx_N={}\nX_ss*lambda={}\n"
         "normalized terminal slack={} norm_inf={}\n"
         "normalized terminal equality residual={}",
         q, X_ss.size1(), X_ss.size2(), J_ss.size1(), J_ss.size2(), x_k.T(),
-        X_ss, J_ss.T(), lambda_sum, casadi::DM::mmin(lambda),
+        X_ss, J_ss.T(), scaling.j, lambda_sum, casadi::DM::mmin(lambda),
         casadi::DM::mmax(lambda), x_traj(casadi::Slice(), N).T(),
         terminal_projection.T(), terminal_slack.T(),
         casadi::DM::mmax(fabs(terminal_slack)), terminal_residual.T());
