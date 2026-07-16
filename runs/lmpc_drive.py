@@ -53,11 +53,8 @@ MAP = "maps/custom/barc_oval/barc_oval_map"
 # the native controller's own s/ey/epsi are meaningless if the two disagree
 # about what s means). Converted from ref/Racing-LMPC-ROS2's own BARC oval
 # (the track their actual LMPC demo drives, not just their tracking-MPC
-# demos), then scaled up 1.5x (2026-07-15: geometry, widths, and the
-# rasterized map all scaled together; the vehicle itself does NOT scale) to
-# widen the too-thin margin between gym's low-speed instability band and
-# the track's grip ceiling -- still much smaller/tighter than f110_gym_10
-# (~25m lap vs ~164m, median turn radius ~2.36m vs ~41.7m).
+# demos) -- a much smaller, tighter track than f110_gym_10 (~17m lap vs
+# ~164m, median turn radius ~1.57m vs ~41.7m).
 # scripts/lmpc_collect_seed_lap.py has the full rationale for this track's
 # speed/lookahead tuning.
 CENTERLINE_CSV = "maps/custom/barc_oval/barc_oval_centerline.csv"
@@ -91,22 +88,16 @@ PERF_REPORT_INTERVAL_STEPS = 200
 # names blind. Values below match LmpcConfig's own defaults except where
 # a comment says otherwise for this track.
 #
-# This track's safe operating window is narrow (measured 2026-07-14,
-# barc_oval, PRE-1.5x-scaling numbers below -- re-verify after the
-# scale-up): below ~2.6-3.0 m/s gym's own dynamic single-track model
-# diverges (documented plant defect, see LOW_SPEED_STEER_ZERO_BELOW/
-# RESTORE_AT below), above ~3.16 m/s the tightest corner (min radius
-# ~0.97m, pre-scaling) exceeds available grip -- both ends fail fast
-# (~2s). The 1.5x scale-up (module docstring) widens this: the low-speed
-# band is a fixed plant property (doesn't move with track scale), but the
-# grip ceiling scales with turn radius -- now ~3.86 m/s at the scaled
-# ~1.45m minimum radius, so the safe window is roughly ~3.0-3.86 m/s
-# instead of ~3.0-3.16 m/s. Traced directly (pre-scaling): with every
-# weight below at its LmpcConfig default, the min-time pull accelerated
-# the car to 6.3 m/s -- 2x the seed lap's speed and 2x this track's grip
-# ceiling at the time -- and it crashed into the wall at 2.0s (confirmed a
-# real collision, not a solver failure: the QP solved successfully every
-# step). DESIGN.md's SS5/SS6
+# This track's safe operating window is unusually narrow (measured
+# 2026-07-14, barc_oval): below ~2.6-3.0 m/s gym's own dynamic
+# single-track model diverges (documented plant defect, see
+# LOW_SPEED_STEER_ZERO_BELOW/RESTORE_AT below), above ~3.16 m/s the
+# tightest corner (min radius ~0.97m) exceeds available grip -- both ends
+# fail fast (~2s). Traced directly: with every weight below at its
+# LmpcConfig default, the min-time pull accelerated the car to 6.3 m/s --
+# 2x the seed lap's 3.0 m/s and 2x this track's grip ceiling -- and it
+# crashed into the wall at 2.0s (confirmed a real collision, not a solver
+# failure: the QP solved successfully every step). DESIGN.md's SS5/SS6
 # discussion already diagnoses this exact pattern ("sprint now, brake at
 # horizon end") as CORRECT min-time behavior IF THE MODEL IS RIGHT -- the
 # actual defect is the uncorrected nominal model overestimating cornering
@@ -153,12 +144,9 @@ V_MAX = 20.0
 # ey corridor half-width (X = {x | -EY_MAX <= ey <= EY_MAX}). Overridden
 # down from LmpcConfig's default (1.0, sized for f110_gym_10's ~1.5m
 # centerline half-width): this track's centerline half-width is only
-# ~0.73m minimum (post-1.5x scale-up), and the vehicle itself is 0.31m
-# wide (f110_env DEFAULT_PARAMS, does NOT scale with the track) -- 0.375
-# (the old 0.25 scaled by the same 1.5x) leaves ~0.20m clearance at the
-# tightest point, more absolute margin than before since the fixed
-# vehicle width is now a smaller fraction of the wider corridor.
-EY_MAX = 0.375
+# ~0.49m minimum, and the vehicle itself is 0.31m wide (f110_env
+# DEFAULT_PARAMS) -- 0.25 leaves ~0.08m clearance at the tightest point.
+EY_MAX = 0.25
 
 # ---- Cost-term weights (controllers/lmpc/include/lmpc_config.hpp spells
 # out the full objective each one scales) ----

@@ -60,36 +60,36 @@ OUTPUT_CSV = "outputs/lmpc_seed_laps/barc_oval_seed_lap.csv"
 SIM_TIMESTEP = 0.025
 
 # NOT a conservative "low speed" pass here, unlike f110_gym_10's 3.5 m/s:
-# this track (converted from ref/Racing-LMPC-ROS2's BARC oval, then scaled
-# up 1.5x -- maps/custom/barc_oval/barc_oval_centerline.csv's own history)
-# has a median turn radius of ~2.36m and a minimum of ~1.45m (vs
-# f110_gym_10's ~41.7m median) -- essentially continuous tight cornering,
-# not occasional hairpins. gym's dynamic single-track model is known to
-# diverge (measured 2026-07-14, pre-scaling) at v~1.0 m/s on this track's
-# curvature REGARDLESS of steering magnitude or smoothness -- gym's own
-# low-speed dynamic-branch instability (see the guard below), not a
-# controller tuning problem. At the ORIGINAL (pre-1.5x) scale this left
-# only a ~3.0-3.16 m/s window between that instability band and the grip
-# limit at the tightest corner; the 1.5x scale-up widens that to
-# ~3.0-3.87 m/s (grip limit now mu*g*r ~= 3.86 m/s at r=1.45m, since the
-# vehicle itself doesn't scale but the track's turn radii do) -- 3.5 m/s
-# sits comfortably inside the new window instead of right at its edge.
-SEED_LAP_SPEED = 3.5
+# this track (converted from ref/Racing-LMPC-ROS2's BARC oval) has a median
+# turn radius of ~1.57m and a minimum of ~0.97m (vs f110_gym_10's ~41.7m
+# median) -- essentially continuous tight cornering, not occasional
+# hairpins. Measured directly (2026-07-14): gym's dynamic single-track
+# model diverges (raw sim omega -> 1e29+ within ~1s) at v~1.0 m/s on this
+# track's curvature REGARDLESS of steering magnitude or smoothness (tested
+# with both Pure Pursuit and open-loop curvature-derived steering) -- this
+# is gym's own low-speed dynamic-branch instability (see the guard below),
+# not a controller tuning problem, and this track's tightness keeps the
+# vehicle inside that band far more persistently than f110_gym_10 ever
+# does. 3.0 m/s sits just above the instability band and just below the
+# grip limit at the tightest corner (mu*g*r ~= 3.16 m/s at r=0.97m) --
+# verified to complete a full lap cleanly (omega stayed under ~3 rad/s
+# throughout) but with a much thinner safety margin than f110_gym_10's 3.5.
+SEED_LAP_SPEED = 3.0
 
 ZOOM = 1.0
 WINDOW_WIDTH = 1000
 WINDOW_HEIGHT = 800
 
 # Pure Pursuit lookahead policy, scaled down from f110_gym_10's (2.0/4.0/8.0)
-# to match this track's much smaller scale (~25m lap vs ~164m): a lookahead
-# comparable to or larger than the track's own turn radius made Pure
-# Pursuit's geometric curvature demand ill-conditioned at the original
-# (pre-1.5x) scale -- measured steering commands over 1.0 rad (>2x
-# delta_max) from a 0.3m lookahead on a ~1m-radius corner there. 0.9-1.35m
-# (roughly half the median turn radius, scaled up 1.5x alongside the track
-# itself) keeps commanded steering within the physical range naturally.
-MIN_LOOKAHEAD = 0.9
-MAX_LOOKAHEAD = 1.35
+# to match this track's much smaller scale (~17m lap vs ~164m): a lookahead
+# comparable to or larger than the track's own turn radius (~1-1.6m) made
+# Pure Pursuit's geometric curvature demand ill-conditioned -- measured
+# steering commands over 1.0 rad (>2x delta_max) from a 0.3m lookahead on a
+# ~1m-radius corner, which is what first triggered the divergence above,
+# not the low speed by itself. 0.6-0.9m (roughly half the median turn
+# radius) keeps commanded steering within the physical range naturally.
+MIN_LOOKAHEAD = 0.6
+MAX_LOOKAHEAD = 0.9
 LOOKAHEAD_RATIO = 8.0
 
 # F110 Gym's dynamic single-track model (gym/f110_gym/envs/dynamic_models.py,
@@ -118,13 +118,10 @@ class LaunchSteeringGuard:
     discrete kinematic/dynamic model switch at |v| < 0.5 m/s. SEED_LAP_SPEED
     is constant (the paper's own D^0 recipe), so once Pure Pursuit's P
     controller settles onto it after launch, speed never dips back into the
-    danger zone -- measured directly (2026-07-14, pre-1.5x-scaling): speed
-    reached SEED_LAP_SPEED within ~1.5s of launch and stayed there for the
-    rest of the lap, even through the tightest corner. The guard therefore
-    only needs to latch open once, not re-suppress every time speed dips
-    during cornering. Re-verify this holds after any SEED_LAP_SPEED or
-    track-scale change -- main()'s own printed crossing speeds are the
-    check.
+    danger zone -- measured directly (2026-07-14, this track): speed reaches
+    ~3.0 m/s within ~1.5s of launch and stays there for the rest of the lap,
+    even through the tightest corner. The guard therefore only needs to
+    latch open once, not re-suppress every time speed dips during cornering.
     """
 
     def __init__(self) -> None:
