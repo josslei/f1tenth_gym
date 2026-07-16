@@ -11,8 +11,7 @@ LMPCController::LMPCController(const LmpcConfig &config_in)
     : config(config_in), dynamics_model(config.vehicle_params), integrator(),
       linearizer(dynamics_model, integrator, config.dt),
       track(config.centerline_csv_path),
-      safe_set(config.seed_lap_csv_path, track.length()),
-      cost_to_go_scale(safe_set.cost_scale()), qp_builder(nullptr),
+      safe_set(config.seed_lap_csv_path, track.length()), qp_builder(nullptr),
       x(casadi::DM::zeros(kStateDim, 1)), t(0.0), has_state(false),
       u_prev(casadi::DM::zeros(kControlDim, 1)), actual_delta(0.0),
       x_warm(casadi::DM::zeros(kStateDim, config.horizon_steps + 1)),
@@ -44,7 +43,7 @@ void LMPCController::rebuild_qp_builder() {
       QpScaling{
           casadi::DM({config.v_max, config.scale_x_vy, config.scale_x_omega,
                       config.scale_x_epsi, track.length(), config.ey_max}),
-          casadi::DM({config.a_max, config.delta_max}), cost_to_go_scale},
+          casadi::DM({config.a_max, config.delta_max})},
       config.solver_name);
   reset_lambda_warm_start();
 }
@@ -257,7 +256,10 @@ casadi::DM LMPCController::control() {
 
   record_solve_success();
   x_pred = solution.x_traj;
-  last_terminal_slack = solution.terminal_slack;
+  const casadi::DM state_scale =
+      casadi::DM({config.v_max, config.scale_x_vy, config.scale_x_omega,
+                  config.scale_x_epsi, track.length(), config.ey_max});
+  last_terminal_slack = state_scale * solution.terminal_slack;
   shift_warm_start(solution);
 
   // DESIGN.md SS8 step 6: apply u_0*.
@@ -288,10 +290,6 @@ void LMPCController::add_lap(const casadi::DM &x_lap, const casadi::DM &u_lap,
                                     : casadi::DM::zeros(kControlDim, 1),
                                 static_cast<double>(J_lap(k)), has_control});
   }
-  // QpBuilder's J normalization (scaling.j) stays pinned to D^0's own cost
-  // scale from construction time: later laps are only ever FASTER (smaller
-  // J), so the fixed scale keeps J_ss/scaling.j in (0, 1] -- exactly the
-  // conditioning it was chosen for.
   safe_set.add_lap(std::move(lap));
   rebuild_qp_builder();
 }

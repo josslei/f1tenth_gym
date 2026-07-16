@@ -333,7 +333,7 @@ class LMPCController(Controller):
         }
 
     def last_terminal_slack(self) -> np.ndarray:
-        """Normalized terminal relaxation from the last successful solve."""
+        """Physical-unit terminal error from the last successful solve."""
         return self._native.last_terminal_slack()
 
     def predicted_horizon_xy(self) -> np.ndarray:

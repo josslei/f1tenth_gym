@@ -150,7 +150,7 @@ void test_normalized_terminal_slack() {
   const casadi::DM state_scale = casadi::DM({1, 1, 2, 1, 10, 1});
   QpBuilder qp(1, 1, QpBounds{-10, 10, -1, 1, 10, 1},
                QpWeights{0, 800, 0.01, 0.01, 10, 100},
-               QpScaling{state_scale, casadi::DM({10, 1}), 10}, "qrqp");
+               QpScaling{state_scale, casadi::DM({10, 1})}, "qrqp");
 
   casadi::DM x0 = casadi::DM::zeros(kStateDim, 1);
   x0(OMEGA) = 1.0;
@@ -173,6 +173,39 @@ void test_normalized_terminal_slack() {
   require(static_cast<double>(casadi::DM::mmax(fabs(residual))) < 1e-6,
           "slack-inclusive terminal residual is not zero");
   qp.clear_dual_warm_start();
+}
+
+void test_reference_terminal_objective() {
+  using namespace lmpc;
+  using namespace lmpc::dynamics;
+
+  const casadi::DM state_scale = casadi::DM({1, 1, 2, 1, 10, 1});
+  QpBuilder qp(1, 2, QpBounds{-10, 10, -1, 1, 10, 1},
+               QpWeights{1, 800, 0.01, 0.01, 10, 100},
+               QpScaling{state_scale, casadi::DM({10, 1})}, "qrqp");
+
+  const casadi::DM x0 = casadi::DM::zeros(kStateDim, 1);
+  const std::vector<QpStage> stages{QpStage{
+      casadi::DM::eye(kStateDim), casadi::DM::zeros(kStateDim, kControlDim),
+      casadi::DM::zeros(kStateDim, 1)}};
+  casadi::DM X_ss = casadi::DM::zeros(kStateDim, 2);
+  X_ss(OMEGA, 1) = 1.0;
+  const QpSolution solution =
+      qp.solve(x0, casadi::DM::zeros(kControlDim, 1), stages, X_ss,
+               casadi::DM({1, 0}), casadi::DM::repmat(x0, 1, 2),
+               casadi::DM::zeros(kControlDim, 1), casadi::DM({0.5, 0.5}));
+
+  require(solution.success,
+          "reference-objective QP did not solve: " + solution.message);
+  // min_l (1-l) + 0.5*800*l^2 has l=1/800. The physical error is l even
+  // though omega's normalized ETerminal value is l/2.
+  const double lambda_forward = static_cast<double>(solution.lambda(1));
+  require_close(lambda_forward, 1.0 / 800.0, 1e-6,
+                "terminal objective does not match the reference Hessian");
+  require_close(std::abs(static_cast<double>(
+                    (state_scale * solution.terminal_slack)(OMEGA))),
+                lambda_forward, 1e-6,
+                "terminal slack does not represent the physical error");
 }
 
 void test_consecutive_failure_recovery() {
@@ -219,6 +252,7 @@ int main() {
   test_contiguous_periodic_segment();
   test_closed_track_length_and_curvature_seam();
   test_normalized_terminal_slack();
+  test_reference_terminal_objective();
   test_consecutive_failure_recovery();
   return 0;
 }

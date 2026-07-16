@@ -77,12 +77,12 @@ struct LmpcConfig {
   double ey_max = 1.0;
 
   // ---- Cost-term weights ----------------------------------------------
-  // The FHOCP's objective is (all in scaled/normalized coordinates):
+  // The FHOCP's objective is:
   //
-  //   cost_to_go_weight * J^T lambda / scaling.j          (min-time pull)
+  //   cost_to_go_weight * J_local^T lambda                (min-time pull)
   // + sum_t c_u * ||u_t||^2                               (control effort)
   // + sum_t c_d_u * ||u_t - u_{t-1}||^2                   (control rate)
-  // + terminal_slack_weight * ||e_N||^2                   (terminal error)
+  // + 0.5 * terminal_slack_weight * ||e_N,physical||^2    (terminal error)
   // + ey_slack_l1 * sum sigma + ey_slack_l2 * sum sigma^2 (soft corridor)
   //
   // c_u/c_d_u are SCALAR (the paper's own formulation: a plain scaled L2
@@ -103,16 +103,18 @@ struct LmpcConfig {
   // speeds, so aggressive settings buy sprints that end in real slides,
   // not lap time.
 
-  // Multiplier on the normalized terminal cost-to-go J^T lambda -- the
-  // ONLY term that rewards finishing sooner (the per-stage min-time
-  // indicator is constant over the horizon and omitted). At 1.0 the
-  // normalized J gradient is small against the effort terms below,
-  // which reads as "not actually seeking the fastest path".
+  // Multiplier on the local terminal cost-to-go J^T lambda -- the ONLY term
+  // that rewards finishing sooner (the per-stage min-time indicator is
+  // constant over the horizon and omitted). The local safe-set window
+  // already offsets J to [K-1, ..., 0], so no whole-lap normalization is
+  // applied here.
   double cost_to_go_weight = 1.0;
 
-  // Quadratic penalty on the signed terminal error in normalized state
-  // coordinates. This keeps the terminal safe-set condition usable when the
-  // nominal reachable set does not intersect a finite sampled convex hull.
+  // Hessian weight q_s_terminal for the signed terminal error in physical
+  // state coordinates. QpBuilder applies the corresponding 0.5 factor
+  // explicitly, matching the reference objective's 0.5*z^T*P*z form. This
+  // keeps the terminal condition usable when the nominal reachable set does
+  // not intersect a finite sampled convex hull.
   double terminal_slack_weight = 800.0;
 
   // Control effort/rate weights, applied uniformly to the scaled control
@@ -127,10 +129,10 @@ struct LmpcConfig {
   // the corridor, killing the solve exactly when recovery matters
   // (measured 2026-07-13: iteration 2 outran its data to ~5.6 m/s and
   // qrqp failed with "Failed to calculate search direction" twice). The l1
-  // weight is sized so the marginal cost of the first meter of violation
-  // (~10) dwarfs anything the cost-to-go can offer (J spans [0, 1] after
-  // scaling.j normalization), which is what keeps the penalty exact: slack
-  // stays 0 whenever the hard corridor is achievable.
+  // weight is sized so the marginal cost of the first scaled unit of
+  // violation (~10) dominates the local cost-to-go span, which is what keeps
+  // the penalty exact: slack stays 0 whenever the hard corridor is
+  // achievable.
   double ey_slack_l1 = 10.0;
   double ey_slack_l2 = 100.0;
 

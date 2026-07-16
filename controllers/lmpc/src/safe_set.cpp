@@ -172,16 +172,6 @@ void SafeSet::add_lap(const std::string &lap_csv_path) {
   add_lap(load_lap(lap_csv_path));
 }
 
-double SafeSet::cost_scale() const {
-  double scale = 0.0;
-  for (const std::vector<SafeSetSample> &lap : laps) {
-    for (const SafeSetSample &sample : lap) {
-      scale = std::max(scale, sample.J);
-    }
-  }
-  return scale;
-}
-
 casadi_int SafeSet::terminal_point_count(casadi_int K) const {
   if (K <= 0) {
     throw std::invalid_argument(
