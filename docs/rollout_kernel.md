@@ -85,10 +85,13 @@ The first kernel slice mirrors the Python control preprocessing and vehicle inte
 - state layout: `[x, y, steer_angle, velocity, yaw_angle, yaw_rate, slip_angle]`
 - two-step steering delay buffer
 - PID conversion from desired steering/speed to steering velocity/acceleration
+- optional `direct_accel_control=True` single-step mode, which bypasses only
+  the velocity PID while preserving steering delay and physical constraints
 - acceleration and steering constraints
 - kinematic low-speed fallback
 - single-track dynamics
-- Euler and RK4 integration
+- Euler integration and RK4 integration with automatic physics substeps no
+  larger than `0.01 s`
 - yaw wrapping
 - batched stepping over flat arrays
 

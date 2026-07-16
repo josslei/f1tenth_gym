@@ -126,6 +126,11 @@ class F110Env(gym.Env):
         seed: RNG seed used for scan noise
         render_mode: optional Gymnasium render mode
         laps_to_complete: number of laps required before terminating an episode
+        direct_accel_control: when True, actions' second component is
+            applied as a commanded acceleration directly instead of a
+            target velocity (see base_classes.RaceCar.__init__'s
+            docstring). Default False keeps every existing caller on the
+            unmodified target-velocity action semantics.
     """
 
     metadata = {"render_modes": ["human", "human_fast"], "render_fps": 200}
@@ -148,6 +153,7 @@ class F110Env(gym.Env):
         seed=12345,
         render_mode=None,
         laps_to_complete=2,
+        direct_accel_control=False,
         **kwargs,
     ):
         super().__init__()
@@ -169,6 +175,7 @@ class F110Env(gym.Env):
         self.integrator = integrator
         self.lidar_dist = lidar_dist
         self.laps_to_complete = laps_to_complete
+        self.direct_accel_control = direct_accel_control
 
         # radius to consider done
         self.start_thresh = 0.5  # 10cm
@@ -209,22 +216,25 @@ class F110Env(gym.Env):
             ego_idx=self.ego_idx,
             integrator=self.integrator,
             lidar_dist=self.lidar_dist,
+            direct_accel_control=self.direct_accel_control,
         )
         self.sim.set_map(self.map_path, self.map_ext)
 
         self._scan_length = self.sim.agents[0].num_beams
         self._scan_max_range = self.sim.agents[0].scan_simulator.max_range
+        longitudinal_min = (
+            -self.params["a_max"] if self.direct_accel_control else self.params["v_min"]
+        )
+        longitudinal_max = (
+            self.params["a_max"] if self.direct_accel_control else self.params["v_max"]
+        )
         self.action_space = spaces.Box(
             low=np.tile(
-                np.array(
-                    [self.params["s_min"], self.params["v_min"]], dtype=np.float64
-                ),
+                np.array([self.params["s_min"], longitudinal_min], dtype=np.float64),
                 (self.num_agents, 1),
             ),
             high=np.tile(
-                np.array(
-                    [self.params["s_max"], self.params["v_max"]], dtype=np.float64
-                ),
+                np.array([self.params["s_max"], longitudinal_max], dtype=np.float64),
                 (self.num_agents, 1),
             ),
             dtype=np.float64,

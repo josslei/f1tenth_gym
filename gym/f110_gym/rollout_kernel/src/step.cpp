@@ -8,6 +8,7 @@ namespace f110_rollout_kernel {
 namespace {
 
 constexpr double kTwoPi = 6.28318530717958647692;
+constexpr double kMaxRk4Timestep = 0.01;
 
 StateVector to_vector(const F110State &state) {
   return StateVector{state.x,         state.y,         state.steer_angle,
@@ -34,9 +35,8 @@ StateVector add_scaled(const StateVector &lhs, const StateVector &rhs,
   return out;
 }
 
-StateVector rk4_step(const StateVector &state, const ControlVector &control,
-                     const F110Params &params) {
-  const double dt = params.timestep;
+StateVector rk4_substep(const StateVector &state, const ControlVector &control,
+                        const F110Params &params, double dt) {
   const StateVector k1 = vehicle_dynamics_st(state, control, params);
   const StateVector k2 =
       vehicle_dynamics_st(add_scaled(state, k1, dt / 2.0), control, params);
@@ -48,6 +48,18 @@ StateVector rk4_step(const StateVector &state, const ControlVector &control,
   StateVector out{};
   for (std::size_t i = 0; i < out.size(); ++i) {
     out[i] = state[i] + dt * (k1[i] + 2.0 * k2[i] + 2.0 * k3[i] + k4[i]) / 6.0;
+  }
+  return out;
+}
+
+StateVector rk4_step(const StateVector &state, const ControlVector &control,
+                     const F110Params &params) {
+  const int num_substeps =
+      static_cast<int>(std::ceil(params.timestep / kMaxRk4Timestep));
+  const double dt = params.timestep / num_substeps;
+  StateVector out = state;
+  for (int i = 0; i < num_substeps; ++i) {
+    out = rk4_substep(out, control, params, dt);
   }
   return out;
 }
@@ -86,12 +98,16 @@ void wrap_yaw(F110State &state) {
 } // namespace
 
 F110StepResult step(const F110State &state, const F110Action &action,
-                    const F110Params &params, Integrator integrator) {
+                    const F110Params &params, Integrator integrator,
+                    bool direct_accel_control) {
   F110State next = state;
+  const double delayed_steer = apply_steering_delay(next, action.steer);
   const ControlVector pid_out =
-      pid(action.velocity, action.steer, next.velocity, next.steer_angle,
-          params.sv_max, params.a_max, params.v_max, params.v_min);
-  const ControlVector control{pid_out[1], pid_out[0]};
+      pid(direct_accel_control ? next.velocity : action.velocity, delayed_steer,
+          next.velocity, next.steer_angle, params.sv_max, params.a_max,
+          params.v_max, params.v_min);
+  const ControlVector control{pid_out[1], direct_accel_control ? action.velocity
+                                                               : pid_out[0]};
   const StateVector state_vec = to_vector(next);
   const StateVector next_vec = integrator == Integrator::RK4
                                    ? rk4_step(state_vec, control, params)

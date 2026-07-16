@@ -14,9 +14,15 @@ F110StepResult = _native.F110StepResult
 Integrator = _native.Integrator
 
 
-def step(state, action, params=None, integrator=Integrator.RK4):
+def step(
+    state, action, params=None, integrator=Integrator.RK4, direct_accel_control=False
+):
     return _native.step(
-        state, action, DEFAULT_PARAMS if params is None else params, integrator
+        state,
+        action,
+        DEFAULT_PARAMS if params is None else params,
+        integrator,
+        direct_accel_control,
     )
 
 

@@ -1,6 +1,7 @@
 import f110_gym  # noqa: F401  # registers the environment
 import gymnasium as gym
 import numpy as np
+import pytest
 from typing import cast
 
 from f110_gym.envs.f110_env import F110Env
@@ -111,5 +112,36 @@ def test_make_viewer_uses_environment_map_without_opening_window():
         assert viewer.config.width == 320
         assert viewer.config.height == 240
         assert viewer.config.target_fps is None
+    finally:
+        env.close()
+
+
+def test_direct_acceleration_action_space_and_step():
+    env = gym.make("f110-v0", num_agents=1, timestep=0.01, direct_accel_control=True)
+    try:
+        f110_env = cast(F110Env, env.unwrapped)
+        assert f110_env.action_space.low[0, 1] == -f110_env.params["a_max"]
+        assert f110_env.action_space.high[0, 1] == f110_env.params["a_max"]
+
+        pose = _center_poses(f110_env)[:1]
+        f110_env.reset(options={"poses": pose})
+        f110_env.step(np.array([[0.0, 2.0]], dtype=np.float64))
+        assert f110_env.sim.agents[0].state[3] == pytest.approx(0.02)
+    finally:
+        env.close()
+
+
+def test_direct_acceleration_keeps_steering_delay():
+    env = gym.make("f110-v0", num_agents=1, timestep=0.01, direct_accel_control=True)
+    try:
+        f110_env = cast(F110Env, env.unwrapped)
+        f110_env.reset(options={"poses": _center_poses(f110_env)[:1]})
+        action = np.array([[0.1, 0.0]], dtype=np.float64)
+        f110_env.step(action)
+        assert f110_env.sim.agents[0].state[2] == pytest.approx(0.0)
+        f110_env.step(action)
+        assert f110_env.sim.agents[0].state[2] == pytest.approx(0.0)
+        f110_env.step(action)
+        assert f110_env.sim.agents[0].state[2] > 0.0
     finally:
         env.close()

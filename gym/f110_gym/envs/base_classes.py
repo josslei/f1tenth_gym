@@ -31,7 +31,7 @@ from enum import Enum
 
 import numpy as np
 from f110_gym.envs.collision_models import collision_multiple, get_vertices
-from f110_gym.envs.dynamic_models import pid, vehicle_dynamics_st
+from f110_gym.envs.dynamic_models import integrate_rk4, pid, vehicle_dynamics_st
 from f110_gym.envs.laser_models import ScanSimulator2D, check_ttc_jit, ray_cast
 
 
@@ -72,8 +72,9 @@ class RaceCar(object):
         time_step=0.01,
         num_beams=1080,
         fov=4.7,
-        integrator=Integrator.Euler,
+        integrator=Integrator.RK4,
         lidar_dist=0.0,
+        direct_accel_control=False,
     ):
         """
         Init function
@@ -85,6 +86,11 @@ class RaceCar(object):
             num_beams (int, default=1080): number of beams in the laser scan
             fov (float, default=4.7): field of view of the laser
             lidar_dist (float, default=0): vertical distance between LiDAR and backshaft
+            direct_accel_control (bool, default=False): when True, the
+                action's second component bypasses the velocity PID and is
+                passed to the dynamics as commanded acceleration. Physical
+                acceleration limits and the existing steering path remain
+                active. Default False preserves target-velocity semantics.
 
         Returns:
             None
@@ -99,6 +105,7 @@ class RaceCar(object):
         self.fov = fov
         self.integrator = integrator
         self.lidar_dist = lidar_dist
+        self.direct_accel_control = direct_accel_control
 
         # state is [x, y, steer_angle, vel, yaw_angle, yaw_rate, slip_angle]
         self.state = np.zeros((7,))
@@ -285,8 +292,9 @@ class RaceCar(object):
         Steps the vehicle's physical simulation
 
         Args:
-            steer (float): desired steering angle
-            vel (float): desired longitudinal velocity
+            raw_steer (float): desired steering angle
+            vel (float): desired longitudinal velocity, or commanded
+                acceleration when direct_accel_control is enabled
 
         Returns:
             current_scan
@@ -294,33 +302,48 @@ class RaceCar(object):
 
         # state is [x, y, steer_angle, vel, yaw_angle, yaw_rate, slip_angle]
 
-        # steering delay
+        # Steering preprocessing is independent of the longitudinal mode.
         steer = 0.0
         if self.steer_buffer.shape[0] < self.steer_buffer_size:
-            steer = 0.0
             self.steer_buffer = np.append(raw_steer, self.steer_buffer)
         else:
             steer = self.steer_buffer[-1]
             self.steer_buffer = self.steer_buffer[:-1]
             self.steer_buffer = np.append(raw_steer, self.steer_buffer)
 
-        # steering angle velocity input to steering velocity acceleration input
-        accl, sv = pid(
-            vel,
-            steer,
-            self.state[3],
-            self.state[2],
-            self.params["sv_max"],
-            self.params["a_max"],
-            self.params["v_max"],
-            self.params["v_min"],
-        )
+        if self.direct_accel_control:
+            # pid() still computes the steering-rate command; matching the
+            # desired velocity to the current state makes its unused
+            # longitudinal output zero.
+            _, sv = pid(
+                self.state[3],
+                steer,
+                self.state[3],
+                self.state[2],
+                self.params["sv_max"],
+                self.params["a_max"],
+                self.params["v_max"],
+                self.params["v_min"],
+            )
+            accl = vel
+        else:
+            # steering angle velocity input to steering velocity acceleration input
+            accl, sv = pid(
+                vel,
+                steer,
+                self.state[3],
+                self.state[2],
+                self.params["sv_max"],
+                self.params["a_max"],
+                self.params["v_max"],
+                self.params["v_min"],
+            )
 
         if self.integrator is Integrator.RK4:
-            # RK4 integration
-            k1 = vehicle_dynamics_st(
+            self.state = integrate_rk4(
                 self.state,
                 np.array([sv, accl]),
+                self.time_step,
                 self.params["mu"],
                 self.params["C_Sf"],
                 self.params["C_Sr"],
@@ -337,80 +360,6 @@ class RaceCar(object):
                 self.params["a_max"],
                 self.params["v_min"],
                 self.params["v_max"],
-            )
-
-            k2_state = self.state + self.time_step * (k1 / 2)
-
-            k2 = vehicle_dynamics_st(
-                k2_state,
-                np.array([sv, accl]),
-                self.params["mu"],
-                self.params["C_Sf"],
-                self.params["C_Sr"],
-                self.params["lf"],
-                self.params["lr"],
-                self.params["h"],
-                self.params["m"],
-                self.params["I"],
-                self.params["s_min"],
-                self.params["s_max"],
-                self.params["sv_min"],
-                self.params["sv_max"],
-                self.params["v_switch"],
-                self.params["a_max"],
-                self.params["v_min"],
-                self.params["v_max"],
-            )
-
-            k3_state = self.state + self.time_step * (k2 / 2)
-
-            k3 = vehicle_dynamics_st(
-                k3_state,
-                np.array([sv, accl]),
-                self.params["mu"],
-                self.params["C_Sf"],
-                self.params["C_Sr"],
-                self.params["lf"],
-                self.params["lr"],
-                self.params["h"],
-                self.params["m"],
-                self.params["I"],
-                self.params["s_min"],
-                self.params["s_max"],
-                self.params["sv_min"],
-                self.params["sv_max"],
-                self.params["v_switch"],
-                self.params["a_max"],
-                self.params["v_min"],
-                self.params["v_max"],
-            )
-
-            k4_state = self.state + self.time_step * k3
-
-            k4 = vehicle_dynamics_st(
-                k4_state,
-                np.array([sv, accl]),
-                self.params["mu"],
-                self.params["C_Sf"],
-                self.params["C_Sr"],
-                self.params["lf"],
-                self.params["lr"],
-                self.params["h"],
-                self.params["m"],
-                self.params["I"],
-                self.params["s_min"],
-                self.params["s_max"],
-                self.params["sv_min"],
-                self.params["sv_max"],
-                self.params["v_switch"],
-                self.params["a_max"],
-                self.params["v_min"],
-                self.params["v_max"],
-            )
-
-            # dynamics integration
-            self.state = self.state + self.time_step * (1 / 6) * (
-                k1 + 2 * k2 + 2 * k3 + k4
             )
 
         elif self.integrator is Integrator.Euler:
@@ -518,6 +467,7 @@ class Simulator(object):
         ego_idx=0,
         integrator=Integrator.RK4,
         lidar_dist=0.0,
+        direct_accel_control=False,
     ):
         """
         Init function
@@ -529,6 +479,8 @@ class Simulator(object):
             time_step (float, default=0.01): physics time step
             ego_idx (int, default=0): ego vehicle's index in list of agents
             lidar_dist (float, default=0): vertical distance between LiDAR and backshaft
+            direct_accel_control (bool, default=False): forwarded to every
+                RaceCar -- see RaceCar.__init__'s docstring.
 
         Returns:
             None
@@ -553,6 +505,7 @@ class Simulator(object):
                     time_step=self.time_step,
                     integrator=integrator,
                     lidar_dist=lidar_dist,
+                    direct_accel_control=direct_accel_control,
                 )
                 self.agents.append(ego_car)
             else:
@@ -563,6 +516,7 @@ class Simulator(object):
                     time_step=self.time_step,
                     integrator=integrator,
                     lidar_dist=lidar_dist,
+                    direct_accel_control=direct_accel_control,
                 )
                 self.agents.append(agent)
 

@@ -272,5 +272,6 @@ PYBIND11_MODULE(_f110_rollout_kernel, m) {
   m.attr("DEFAULT_PARAMS") = rk::F110Params{};
   m.def("step", &rk::step, py::arg("state"), py::arg("action"),
         py::arg("params") = rk::F110Params{},
-        py::arg("integrator") = rk::Integrator::RK4);
+        py::arg("integrator") = rk::Integrator::RK4,
+        py::arg("direct_accel_control") = false);
 }

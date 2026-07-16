@@ -21,6 +21,8 @@ Implemented:
 - Python-compatible default F110 parameters
 - PID control preprocessing
 - steering delay buffer
+- optional direct-acceleration preprocessing for `step()`; velocity control
+  remains the default
 - acceleration and steering constraints
 - kinematic low-speed fallback
 - single-track dynamics

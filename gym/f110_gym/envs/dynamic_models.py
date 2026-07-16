@@ -26,6 +26,7 @@ import numpy as np
 from numba import njit
 
 GRAVITY = 9.81
+MAX_RK4_TIMESTEP = 0.01
 
 
 @njit(cache=True)
@@ -296,6 +297,119 @@ def vehicle_dynamics_st(
         )
 
     return f
+
+
+@njit(cache=True)
+def integrate_rk4(
+    x,
+    u,
+    timestep,
+    mu,
+    C_Sf,
+    C_Sr,
+    lf,
+    lr,
+    h,
+    m,
+    inertia,
+    s_min,
+    s_max,
+    sv_min,
+    sv_max,
+    v_switch,
+    a_max,
+    v_min,
+    v_max,
+):
+    """Integrate the single-track model with numerically stable RK4 substeps."""
+    num_substeps = int(np.ceil(timestep / MAX_RK4_TIMESTEP))
+    dt = timestep / num_substeps
+    state = x.copy()
+
+    for _ in range(num_substeps):
+        k1 = vehicle_dynamics_st(
+            state,
+            u,
+            mu,
+            C_Sf,
+            C_Sr,
+            lf,
+            lr,
+            h,
+            m,
+            inertia,
+            s_min,
+            s_max,
+            sv_min,
+            sv_max,
+            v_switch,
+            a_max,
+            v_min,
+            v_max,
+        )
+        k2 = vehicle_dynamics_st(
+            state + dt * (k1 / 2.0),
+            u,
+            mu,
+            C_Sf,
+            C_Sr,
+            lf,
+            lr,
+            h,
+            m,
+            inertia,
+            s_min,
+            s_max,
+            sv_min,
+            sv_max,
+            v_switch,
+            a_max,
+            v_min,
+            v_max,
+        )
+        k3 = vehicle_dynamics_st(
+            state + dt * (k2 / 2.0),
+            u,
+            mu,
+            C_Sf,
+            C_Sr,
+            lf,
+            lr,
+            h,
+            m,
+            inertia,
+            s_min,
+            s_max,
+            sv_min,
+            sv_max,
+            v_switch,
+            a_max,
+            v_min,
+            v_max,
+        )
+        k4 = vehicle_dynamics_st(
+            state + dt * k3,
+            u,
+            mu,
+            C_Sf,
+            C_Sr,
+            lf,
+            lr,
+            h,
+            m,
+            inertia,
+            s_min,
+            s_max,
+            sv_min,
+            sv_max,
+            v_switch,
+            a_max,
+            v_min,
+            v_max,
+        )
+        state = state + dt * (k1 + 2.0 * k2 + 2.0 * k3 + k4) / 6.0
+
+    return state
 
 
 @njit(cache=True)

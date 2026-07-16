@@ -87,7 +87,7 @@ class TestDynamicsParity:
                 s.slip_angle,
             ]
         )
-        steer = action.steer
+        steer = 0.0 if s.steer_buffer_len < 2 else s.steer_buffer_1
         vel = action.velocity
 
         from gym.f110_gym.envs.dynamic_models import pid, vehicle_dynamics_st

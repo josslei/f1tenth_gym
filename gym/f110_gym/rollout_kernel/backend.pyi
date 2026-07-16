@@ -116,6 +116,7 @@ def step(
     action: F110Action,
     params: F110Params | None = None,
     integrator: Integrator = Integrator.RK4,
+    direct_accel_control: bool = False,
 ) -> F110StepResult: ...
 def step_batch(
     states: NDArray[np.float64],

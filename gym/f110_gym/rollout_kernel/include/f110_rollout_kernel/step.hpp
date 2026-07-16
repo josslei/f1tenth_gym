@@ -7,7 +7,8 @@ namespace f110_rollout_kernel {
 
 F110StepResult step(const F110State &state, const F110Action &action,
                     const F110Params &params = F110Params{},
-                    Integrator integrator = Integrator::RK4);
+                    Integrator integrator = Integrator::RK4,
+                    bool direct_accel_control = false);
 
 } // namespace f110_rollout_kernel
 
