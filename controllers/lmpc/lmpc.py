@@ -62,7 +62,14 @@ def _write_initial_safe_set(
         dtype=np.float64,
         filling_values=np.nan,
     )
-    vx, vy, epsi, s, ey = data[:, 0], data[:, 1], data[:, 3], data[:, 4], data[:, 5]
+    vx, vy, omega, epsi, s, ey = (
+        data[:, 0],
+        data[:, 1],
+        data[:, 2],
+        data[:, 3],
+        data[:, 4],
+        data[:, 5],
+    )
     sample_time, acceleration, steering = data[:, 6], data[:, 7], data[:, 8]
 
     path_s = cumulative_arc_lengths(waypoints)
@@ -87,12 +94,15 @@ def _write_initial_safe_set(
     y = path_y + ey * np.cos(path_yaw)
     yaw = path_yaw + epsi
     speed = np.hypot(vx, vy)
+    slip = np.arctan2(vy, vx)
 
     acceleration = acceleration.copy()
     steering = steering.copy()
     acceleration[-1] = acceleration[-2]
     steering[-1] = steering[-2]
-    rows = np.column_stack([sample_time, x, y, yaw, speed, acceleration, steering, s])
+    rows = np.column_stack(
+        [sample_time, x, y, yaw, speed, omega, slip, acceleration, steering, s]
+    )
 
     # The copied controller starts at iteration two and therefore expects two
     # initial trajectories. Repeating D0 provides the same feasible trajectory

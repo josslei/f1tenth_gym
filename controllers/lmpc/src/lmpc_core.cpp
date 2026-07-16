@@ -295,7 +295,7 @@ private:
         car.mass = p.at("mass");
     }
 
-    // verbatim from LMPC.cpp
+    // NOT verbatim: reads real yaw rate/slip columns instead of zeroing them
     void init_SS_from_data(const string data_file) {
         CSVReader reader(data_file);
         // Get the data from CSV File
@@ -319,11 +319,11 @@ private:
             sample.x(1) = std::stof(vec.at(2));
             sample.x(2) = std::stof(vec.at(3));
             sample.x(3) = std::stof(vec.at(4));
-            sample.x(4) = 0;
-            sample.x(5) = 0;
-            sample.u(0) = std::stof(vec.at(5));
-            sample.u(1) = std::stof(vec.at(6));
-            sample.s = std::stof(vec.at(7));
+            sample.x(4) = std::stof(vec.at(5));
+            sample.x(5) = std::stof(vec.at(6));
+            sample.u(0) = std::stof(vec.at(7));
+            sample.u(1) = std::stof(vec.at(8));
+            sample.s = std::stof(vec.at(9));
             sample.iter = it;
             traj.push_back(sample);
             time_prev = sample.time;
