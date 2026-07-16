@@ -75,6 +75,7 @@ class RaceCar(object):
         integrator=Integrator.RK4,
         lidar_dist=0.0,
         direct_accel_control=False,
+        steer_delay_steps=2,
     ):
         """
         Init function
@@ -91,6 +92,11 @@ class RaceCar(object):
                 passed to the dynamics as commanded acceleration. Physical
                 acceleration limits and the existing steering path remain
                 active. Default False preserves target-velocity semantics.
+            steer_delay_steps (int, default=2): number of physics steps a
+                commanded steering angle is held back before being applied
+                (FIFO). 0 disables the delay entirely (steer applied the
+                same step it's commanded). Default 2 preserves prior
+                behavior.
 
         Returns:
             None
@@ -119,7 +125,7 @@ class RaceCar(object):
 
         # steering delay buffer
         self.steer_buffer = np.empty((0,))
-        self.steer_buffer_size = 2
+        self.steer_buffer_size = steer_delay_steps
 
         # collision identifier
         self.in_collision = False
@@ -303,13 +309,16 @@ class RaceCar(object):
         # state is [x, y, steer_angle, vel, yaw_angle, yaw_rate, slip_angle]
 
         # Steering preprocessing is independent of the longitudinal mode.
-        steer = 0.0
-        if self.steer_buffer.shape[0] < self.steer_buffer_size:
-            self.steer_buffer = np.append(raw_steer, self.steer_buffer)
+        if self.steer_buffer_size == 0:
+            steer = raw_steer
         else:
-            steer = self.steer_buffer[-1]
-            self.steer_buffer = self.steer_buffer[:-1]
-            self.steer_buffer = np.append(raw_steer, self.steer_buffer)
+            steer = 0.0
+            if self.steer_buffer.shape[0] < self.steer_buffer_size:
+                self.steer_buffer = np.append(raw_steer, self.steer_buffer)
+            else:
+                steer = self.steer_buffer[-1]
+                self.steer_buffer = self.steer_buffer[:-1]
+                self.steer_buffer = np.append(raw_steer, self.steer_buffer)
 
         if self.direct_accel_control:
             # pid() still computes the steering-rate command; matching the
@@ -468,6 +477,7 @@ class Simulator(object):
         integrator=Integrator.RK4,
         lidar_dist=0.0,
         direct_accel_control=False,
+        steer_delay_steps=2,
     ):
         """
         Init function
@@ -481,6 +491,8 @@ class Simulator(object):
             lidar_dist (float, default=0): vertical distance between LiDAR and backshaft
             direct_accel_control (bool, default=False): forwarded to every
                 RaceCar -- see RaceCar.__init__'s docstring.
+            steer_delay_steps (int, default=2): forwarded to every RaceCar
+                -- see RaceCar.__init__'s docstring.
 
         Returns:
             None
@@ -506,6 +518,7 @@ class Simulator(object):
                     integrator=integrator,
                     lidar_dist=lidar_dist,
                     direct_accel_control=direct_accel_control,
+                    steer_delay_steps=steer_delay_steps,
                 )
                 self.agents.append(ego_car)
             else:
@@ -517,6 +530,7 @@ class Simulator(object):
                     integrator=integrator,
                     lidar_dist=lidar_dist,
                     direct_accel_control=direct_accel_control,
+                    steer_delay_steps=steer_delay_steps,
                 )
                 self.agents.append(agent)
 

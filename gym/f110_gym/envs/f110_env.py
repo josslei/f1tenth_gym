@@ -131,6 +131,10 @@ class F110Env(gym.Env):
             target velocity (see base_classes.RaceCar.__init__'s
             docstring). Default False keeps every existing caller on the
             unmodified target-velocity action semantics.
+        steer_delay_steps: number of physics steps a commanded steering
+            angle is held back before being applied (see
+            base_classes.RaceCar.__init__'s docstring). Default 2 keeps
+            every existing caller on the unmodified delay.
     """
 
     metadata = {"render_modes": ["human", "human_fast"], "render_fps": 200}
@@ -154,6 +158,7 @@ class F110Env(gym.Env):
         render_mode=None,
         laps_to_complete=2,
         direct_accel_control=False,
+        steer_delay_steps=2,
         **kwargs,
     ):
         super().__init__()
@@ -176,6 +181,7 @@ class F110Env(gym.Env):
         self.lidar_dist = lidar_dist
         self.laps_to_complete = laps_to_complete
         self.direct_accel_control = direct_accel_control
+        self.steer_delay_steps = steer_delay_steps
 
         # radius to consider done
         self.start_thresh = 0.5  # 10cm
@@ -217,6 +223,7 @@ class F110Env(gym.Env):
             integrator=self.integrator,
             lidar_dist=self.lidar_dist,
             direct_accel_control=self.direct_accel_control,
+            steer_delay_steps=self.steer_delay_steps,
         )
         self.sim.set_map(self.map_path, self.map_ext)
 
