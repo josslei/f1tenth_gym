@@ -33,6 +33,7 @@ import f110_gym  # noqa: F401 - registers f110-v0
 from controllers.controller_base import VehicleState
 from controllers.lmpc.lap_data import LapSample, build_lap_arrays
 from controllers.pure_pursuit import DynamicLookaheadDistance, PurePursuit
+from f110_gym.envs.base_classes import Integrator
 from utils.waypoint_utils import (
     closed_path_length,
     cumulative_arc_lengths,
@@ -59,22 +60,31 @@ OUTPUT_CSV = "outputs/lmpc_seed_laps/barc_oval_seed_lap.csv"
 # at.
 SIM_TIMESTEP = 0.025
 
-# NOT a conservative "low speed" pass here, unlike f110_gym_10's 3.5 m/s:
-# this track (converted from ref/Racing-LMPC-ROS2's BARC oval) has a median
+# This track (converted from ref/Racing-LMPC-ROS2's BARC oval) has a median
 # turn radius of ~1.57m and a minimum of ~0.97m (vs f110_gym_10's ~41.7m
 # median) -- essentially continuous tight cornering, not occasional
 # hairpins. Measured directly (2026-07-14): gym's dynamic single-track
 # model diverges (raw sim omega -> 1e29+ within ~1s) at v~1.0 m/s on this
-# track's curvature REGARDLESS of steering magnitude or smoothness (tested
-# with both Pure Pursuit and open-loop curvature-derived steering) -- this
+# track's curvature REGARDLESS of steering magnitude or smoothness -- this
 # is gym's own low-speed dynamic-branch instability (see the guard below),
-# not a controller tuning problem, and this track's tightness keeps the
-# vehicle inside that band far more persistently than f110_gym_10 ever
-# does. 3.0 m/s sits just above the instability band and just below the
-# grip limit at the tightest corner (mu*g*r ~= 3.16 m/s at r=0.97m) --
-# verified to complete a full lap cleanly (omega stayed under ~3 rad/s
-# throughout) but with a much thinner safety margin than f110_gym_10's 3.5.
-SEED_LAP_SPEED = 3.0
+# not a controller tuning problem.
+#
+# 1.5, not 3.0 (2026-07-16): D^0 previously used 3.0 m/s, deliberately
+# chosen to sit above the ~1.0 m/s instability band with margin. The safe
+# set is wanted SLOW now (to keep the LMPC's terminal cost-to-go pulling
+# toward a low-speed operating point, not the fastest demonstrated one) --
+# re-swept the actual danger band on THIS track before picking a number
+# (the guard below must be scaled to whatever SEED_LAP_SPEED is, or it
+# never latches open for any target below its own fixed 2.0/3.0 thresholds
+# and the lap silently drives with zero steering the whole way -- this bit
+# a first attempt at this exact change): v=1.0 diverges immediately (raw
+# omega to 38 rad/s within 0.35s, confirming the finding above still
+# holds), but v=1.25 already completes a full clean lap (max raw omega
+# 1.44 rad/s). 1.5 keeps real margin above that measured floor (0.5 m/s,
+# not 0.25) rather than sitting right at the edge, where run-to-run
+# floating-point non-associativity (documented elsewhere in this project)
+# could tip a marginal speed into the danger band on a different run.
+SEED_LAP_SPEED = 1.5
 
 ZOOM = 1.0
 WINDOW_WIDTH = 1000
@@ -92,15 +102,6 @@ MIN_LOOKAHEAD = 0.6
 MAX_LOOKAHEAD = 0.9
 LOOKAHEAD_RATIO = 8.0
 
-# F110 Gym's dynamic single-track model (gym/f110_gym/envs/dynamic_models.py,
-# vehicle_dynamics_st) switches to a kinematic model below |v| < 0.5 m/s, and
-# diverges if handed nonzero steering while crossing that switch. A soft taper
-# from rest was measured insufficient in earlier work on this controller; steer
-# must be held at exactly zero through the whole danger zone. Every lap starts
-# from rest, so this is unconditionally needed, not situational.
-LOW_SPEED_STEER_ZERO_BELOW = 2.0
-LOW_SPEED_STEER_RESTORE_AT = 3.0
-
 
 def obs_to_vehicle_state(obs: dict[str, Any], ego_idx: int) -> VehicleState:
     return VehicleState(
@@ -109,36 +110,6 @@ def obs_to_vehicle_state(obs: dict[str, Any], ego_idx: int) -> VehicleState:
         yaw=float(obs["poses_theta"][ego_idx]),
         speed=float(obs["linear_vels_x"][ego_idx]),
     )
-
-
-class LaunchSteeringGuard:
-    """Suppress steering only through the one-time launch-from-rest crossing.
-
-    The gym's divergence risk (see module docstring) is specific to the
-    discrete kinematic/dynamic model switch at |v| < 0.5 m/s. SEED_LAP_SPEED
-    is constant (the paper's own D^0 recipe), so once Pure Pursuit's P
-    controller settles onto it after launch, speed never dips back into the
-    danger zone -- measured directly (2026-07-14, this track): speed reaches
-    ~3.0 m/s within ~1.5s of launch and stays there for the rest of the lap,
-    even through the tightest corner. The guard therefore only needs to
-    latch open once, not re-suppress every time speed dips during cornering.
-    """
-
-    def __init__(self) -> None:
-        self._launched = False
-
-    def apply(self, steer: float, speed: float) -> float:
-        if self._launched:
-            return steer
-        if speed >= LOW_SPEED_STEER_RESTORE_AT:
-            self._launched = True
-            return steer
-        if speed <= LOW_SPEED_STEER_ZERO_BELOW:
-            return 0.0
-        ramp = (speed - LOW_SPEED_STEER_ZERO_BELOW) / (
-            LOW_SPEED_STEER_RESTORE_AT - LOW_SPEED_STEER_ZERO_BELOW
-        )
-        return steer * ramp
 
 
 def load_centerline_waypoints(
@@ -235,7 +206,13 @@ def capture_lap_sample(
 
 
 def main(visualize: bool = False) -> None:
-    env = gym.make("f110-v0", map=MAP, num_agents=1, timestep=SIM_TIMESTEP)
+    env = gym.make(
+        "f110-v0",
+        map=MAP,
+        num_agents=1,
+        timestep=SIM_TIMESTEP,
+        integrator=Integrator.RK4,
+    )
     f110_env: Any = env.unwrapped
     ego_idx = 0
     dt = float(f110_env.timestep)
@@ -289,15 +266,11 @@ def main(visualize: bool = False) -> None:
     )
     samples = [initial_sample]
     last_s_mod = float(initial_sample.x[4])
-    steering_guard = LaunchSteeringGuard()
-
     while True:
         state = obs_to_vehicle_state(obs, ego_idx)
         controller.update(state)
         cmd = controller.control()
-        steer = steering_guard.apply(cmd.steering, state.speed)
-
-        action = np.array([[steer, cmd.velocity]], dtype=np.float64)
+        action = np.array([[cmd.steering, cmd.velocity]], dtype=np.float64)
         obs, _reward, terminated, truncated, _info = env.step(action)
         t += dt
 

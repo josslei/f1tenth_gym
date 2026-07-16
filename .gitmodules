@@ -31,9 +31,9 @@
 [submodule "thirdparty/spdlog"]
 	path = thirdparty/spdlog
 	url = git@github.com:gabime/spdlog
-[submodule "controllers/lmpc/cmake/osqp"]
-	path = controllers/lmpc/cmake/osqp
+[submodule "thirdparty/osqp"]
+	path = thirdparty/osqp
 	url = https://github.com/osqp/osqp.git
-[submodule "controllers/lmpc/cmake/osqp-eigen"]
-	path = controllers/lmpc/cmake/osqp-eigen
+[submodule "thirdparty/osqp-eigen"]
+	path = thirdparty/osqp-eigen
 	url = https://github.com/robotology/osqp-eigen.git

@@ -1,169 +1,63 @@
 #ifndef LMPC__LMPC_CONFIG_HPP_
 #define LMPC__LMPC_CONFIG_HPP_
 
-#include <casadi/casadi.hpp>
+#include <cstdint>
 #include <string>
 #include <vector>
 
-#include "dynamics/common.hpp"
-
 namespace lmpc {
 
-// Tunables settable from Python at construction time (LMPCController's //
-// pybind11 binding). Every symbol here is traceable to a section of
-// controllers/lmpc/DESIGN.md -- see the per-field comments.
+struct VehicleParams {
+  double mu = 1.0489;
+  double C_Sf = 4.718;
+  double C_Sr = 5.4562;
+  double lf = 0.15875;
+  double lr = 0.17145;
+  double h = 0.074;
+  double m = 3.74;
+  double I = 0.04712;
+};
+
 struct LmpcConfig {
-  // Must match the simulator's own control period -- the ATV/discretized
-  // dynamics are linearized at this dt, so a mismatch against what the sim
-  // actually steps at corrupts the linearization from the first solve.
   double dt = 0.025;
-
-  // Receding-horizon length N (DESIGN.md SS3/SS4).
-  casadi_int horizon_steps = 75;
-
-  // Raw centerline CSV (x_m, y_m, w_tr_right_m, w_tr_left_m) this track's s
-  // coordinate is defined against -- must be the SAME file
-  // scripts/lmpc_collect_seed_lap.py projected onto to produce
-  // seed_lap_csv_path below, or curvature(s) and the state's own s
-  // disagree about what s means. No default: path is repo-relative and
-  // working-directory dependent, so the caller (Python) supplies it rather
-  // than this layer guessing a repo root.
+  long long horizon_steps = 75;
   std::string centerline_csv_path;
-
-  // D^0 (or later D^{j-1}) seed-lap CSV in
-  // scripts/lmpc_collect_seed_lap.py's format -- DESIGN.md SS2/SS8. Same
-  // no-default reasoning as centerline_csv_path.
   std::string seed_lap_csv_path;
+  VehicleParams vehicle_params{};
 
-  // Vehicle physical parameters -- defaults mirror
-  // gym/f110_gym/envs/f110_env.py's DEFAULT_PARAMS (dynamics/common.hpp).
-  dynamics::VehicleParams vehicle_params{};
-
-  // Safe-set neighbor count K (DESIGN.md SS2, pinned from upstream's
-  // barc_lmpc.param.yaml num_ss_pts_per_lap): neighbors taken PER LAP. P
-  // (laps kept in the safe set) is not a separate field here: SafeSet starts
-  // with D^0, add_lap() grows it, and SafeSet::kMaxLaps caps it.
-  casadi_int K = 32;
-
-  // U = {u | u_l <= u <= u_u} (DESIGN.md SS3).
+  long long K = 16;
   double a_min = -9.51;
   double a_max = 9.51;
-  double delta_min = -0.4189;
-  double delta_max = 0.4189;
-
-  // Gym's steering actuator is RATE-limited (dynamic_models.py's
-  // steering_constraint, sv in [sv_min, sv_max]): a commanded angle is
-  // approached at at most sv_max rad/s, so the realized delta can move at
-  // most sv_max*dt per control step. Without the matching per-stage rate
-  // constraint in the FHOCP (QpBuilder), the plan treats delta as
-  // instantaneous and happily flips full lock (+/-0.4189, ~0.84 rad) in a
-  // single 0.025s step -- ~10x beyond what the plant can execute -- which
-  // was measured (2026-07-13) to chatter the real simulator into its own
-  // documented low-speed steering divergence (omega hit -420 rad/s in the
-  // RAW sim state) during launch. Default mirrors gym DEFAULT_PARAMS.
-  double sv_max = 3.2;
-
-  // Gym velocity limits used when converting solved acceleration to the
-  // public velocity-setpoint action and when scaling vx.
-  double v_min = -5.0;
-  double v_max = 20.0;
-
-  // The ey half of X = {x | -W/2 <= ey <= W/2} (DESIGN.md SS3). Default is
-  // conservative for this track: f110_gym_10's centerline half-width is
-  // ~1.44-1.52 m (min over the loaded centerline), the vehicle itself is
-  // 0.31 m wide (f110_env DEFAULT_PARAMS), so 1.0 m leaves a comfortable
-  // margin without needing this controller to know the local half-width at
-  // every s.
-  double ey_max = 1.0;
-
-  // ---- Cost-term weights ----------------------------------------------
-  // The FHOCP's objective is (all in scaled/normalized coordinates):
-  //
-  //   cost_to_go_weight * J^T lambda / scaling.j          (min-time pull)
-  // + sum_t c_u * ||u_t||^2                               (control effort)
-  // + sum_t c_d_u * ||u_t - u_{t-1}||^2                   (control rate)
-  // + terminal_slack_weight * ||e_N||^2                   (terminal error)
-  // + ey_slack_l1 * sum sigma + ey_slack_l2 * sum sigma^2 (soft corridor)
-  //
-  // c_u/c_d_u are SCALAR (the paper's own formulation: a plain scaled L2
-  // norm on the control vector, not a per-component-weighted Q-norm/R
-  // matrix). An earlier version of this code gave acceleration and
-  // steering separate weights (c_a/c_delta, c_d_a/c_d_delta), reasoning
-  // that they needed independent weighting to stay comparable despite
-  // different physical units -- but that's already handled by
-  // QpScaling::u (the control vector is normalized to O(1) BEFORE this
-  // cost is applied), so the extra per-component weights were a redundant,
-  // paper-incorrect second layer of weighting, not a real requirement.
-  //
-  // The RATIOS between these decide how aggressively the controller seeks
-  // time over control effort: raising cost_to_go_weight (or lowering the
-  // rate weights) trades conservatism for speed. Caveat while SS5/SS6's
-  // error regression is unimplemented:
-  // the nominal model overestimates cornering grip above the demonstrated
-  // speeds, so aggressive settings buy sprints that end in real slides,
-  // not lap time.
-
-  // Multiplier on the normalized terminal cost-to-go J^T lambda -- the
-  // ONLY term that rewards finishing sooner (the per-stage min-time
-  // indicator is constant over the horizon and omitted). At 1.0 the
-  // normalized J gradient is small against the effort terms below,
-  // which reads as "not actually seeking the fastest path".
-  double cost_to_go_weight = 1.0;
-
-  // Quadratic penalty on the signed terminal error in normalized state
-  // coordinates. This keeps the terminal safe-set condition usable when the
-  // nominal reachable set does not intersect a finite sampled convex hull.
+  double delta_min = -0.41;
+  double delta_max = 0.41;
+  double v_max = 10.0;
+  double velocity_threshold = 0.8;
+  double map_margin = 0.1;
+  double waypoint_space = 0.2;
+  double r_accel = 1.5;
+  double r_steer = 18.0;
+  double r_d_accel = 0.1;
+  double r_d_steer = 0.1;
+  double ey_slack_l2 = 3000.0;
   double terminal_slack_weight = 800.0;
+  long long osqp_max_iter = 20000;
+  long long osqp_scaling = -1;
+  double osqp_eps_prim_inf = 0.0;
+  double osqp_eps_abs = 0.0;
+  double osqp_eps_rel = 0.0;
 
-  // Control effort/rate weights, applied uniformly to the scaled control
-  // vector (see the block comment above -- NOT per-component).
-  double c_u = 0.01;
-  double c_d_u = 0.1;
-
-  // Exact-plus-quadratic penalty on the per-stage ey corridor slack
-  // (QpBuilder softens the ey box with a >= 0 slack per stage). A HARD ey
-  // box makes the QP instantly infeasible whenever the measured x_0 -- or
-  // any linearized stage under the steering-rate limit -- can't sit inside
-  // the corridor, killing the solve exactly when recovery matters
-  // (measured 2026-07-13: iteration 2 outran its data to ~5.6 m/s and
-  // qrqp failed with "Failed to calculate search direction" twice). The l1
-  // weight is sized so the marginal cost of the first meter of violation
-  // (~10) dwarfs anything the cost-to-go can offer (J spans [0, 1] after
-  // scaling.j normalization), which is what keeps the penalty exact: slack
-  // stays 0 whenever the hard corridor is achievable.
-  double ey_slack_l1 = 10.0;
-  double ey_slack_l2 = 100.0;
-
-  // DESIGN.md's open item: variable scaling. The QP's decision vector mixes
-  // wildly different physical magnitudes (s up to ~164m, vx O(1-20), ey
-  // O(1), a O(1-9.5), delta O(0.1)) in one KKT system -- qrqp solves this
-  // reliably only once every variable is normalized to O(1). scale_x/scale_u
-  // are derived from THIS vehicle/track's own limits (v_max above, ey_max,
-  // a_max, delta_max, and the loaded Track's own length -- computed in
-  // LMPCController's constructor, not stored here since Track isn't built
-  // yet at LmpcConfig construction time), NOT copied from the prior port's
-  // BARC-specific constants (that mismatch was flagged there as a real
-  // bug). scale_x's vy/omega/epsi entries (2.0/2.0/0.5, StateIndex order)
-  // are the one exception: reused as-is from that prior, empirically-
-  // validated port, since they were reasonable order-of-magnitude defaults
-  // rather than vehicle-specific derivations in the first place, and
-  // deriving fresh values for them would be guessing, not improving.
-  double scale_x_vy = 2.0;
-  double scale_x_omega = 2.0;
-  double scale_x_epsi = 0.5;
-
-  // DESIGN.md SS7 originally pinned qrqp for correctness-first bring-up;
-  // switched to ipopt (2026-07-14) once the native build could actually
-  // provide it -- CasADi's own superbuild git-clones and compiles IPOPT
-  // (jgillis/Ipopt-1, upstream's easier-to-build fork) plus its MUMPS
-  // linear-solver dependency from source (controllers/lmpc/CMakeLists.txt:
-  // WITH_IPOPT/WITH_BUILD_IPOPT/WITH_BUILD_REQUIRED, LMPC_PLUGIN_TARGETS).
-  // qrqp remains fully supported (QpBuilder branches on solver_name) and
-  // is a valid config_overrides={"solver_name": "qrqp"} override; measured
-  // (2026-07-14, this vehicle/horizon) steady-state per-solve time is
-  // comparable between the two (~19ms ipopt vs ~22ms qrqp against a 25ms
-  // dt budget), so this is not a performance-motivated default.
-  std::string solver_name = "ipopt";
+  // Filled by the Python adaptation layer from the map and converted CSVs.
+  std::vector<std::int8_t> occupancy_grid;
+  std::uint32_t map_width = 0;
+  std::uint32_t map_height = 0;
+  double map_resolution = 0.0;
+  double map_origin_x = 0.0;
+  double map_origin_y = 0.0;
+  std::string reference_waypoint_csv_path;
+  std::string reference_seed_lap_csv_path;
+  double initial_x = 0.0;
+  double initial_y = 0.0;
+  double initial_yaw = 0.0;
 };
 
 } // namespace lmpc

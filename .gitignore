@@ -18,6 +18,7 @@ __pycache__/
 
 # CMake build directories
 build-debug/
+controllers/lmpc/deps/
 
 # Distribution / packaging
 .Python

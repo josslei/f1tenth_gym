@@ -1,299 +1,148 @@
 #include "lmpc_controller.hpp"
 
 #include <chrono>
-#include <stdexcept>
+#include <cmath>
+#include <map>
+#include <utility>
 
-#include "log.hpp"
+// The copied file is deliberately included, rather than modified, so this
+// translation unit can adapt its LMPCCore class to lmpc_controller.hpp.
+#include "lmpc_core.cpp"
 
 namespace lmpc {
 
-LMPCController::LMPCController(const LmpcConfig &config_in)
-    : config(config_in), dynamics_model(config.vehicle_params), integrator(),
-      linearizer(dynamics_model, integrator, config.dt),
-      track(config.centerline_csv_path),
-      safe_set(config.seed_lap_csv_path, track.length()),
-      cost_to_go_scale(safe_set.cost_scale()), qp_builder(nullptr),
-      x(casadi::DM::zeros(kStateDim, 1)), t(0.0), has_state(false),
-      u_prev(casadi::DM::zeros(kControlDim, 1)), actual_delta(0.0),
-      x_warm(casadi::DM::zeros(kStateDim, config.horizon_steps + 1)),
-      u_warm(casadi::DM::zeros(kControlDim, config.horizon_steps)),
-      lambda_warm(casadi::DM::zeros(0, 1)), has_warm_start(false),
-      consecutive_solve_failures(0),
-      x_pred(casadi::DM::zeros(kStateDim, config.horizon_steps + 1)),
-      last_terminal_slack(casadi::DM::zeros(kStateDim, 1)) {
-  rebuild_qp_builder();
+namespace {
+
+std::map<std::string, double> make_params(const LmpcConfig &config) {
+  return {{"N", static_cast<double>(config.horizon_steps)},
+          {"Ts", config.dt},
+          {"K_NEAR", static_cast<double>(config.K)},
+          {"ACCELERATION_MAX", config.a_max},
+          {"DECELERATION_MAX", -config.a_min},
+          {"SPEED_MAX", config.v_max},
+          {"STEER_MAX", config.delta_max},
+          {"VEL_THRESHOLD", config.velocity_threshold},
+          {"WAYPOINT_SPACE", config.waypoint_space},
+          {"r_accel", config.r_accel},
+          {"r_steer", config.r_steer},
+          {"r_d_accel", config.r_d_accel},
+          {"r_d_steer", config.r_d_steer},
+          {"q_s", config.ey_slack_l2},
+          {"q_s_terminal", config.terminal_slack_weight},
+          {"MAP_MARGIN", config.map_margin},
+          {"osqp_max_iter", static_cast<double>(config.osqp_max_iter)},
+          {"osqp_scaling", static_cast<double>(config.osqp_scaling)},
+          {"osqp_eps_prim_inf", config.osqp_eps_prim_inf},
+          {"osqp_eps_abs", config.osqp_eps_abs},
+          {"osqp_eps_rel", config.osqp_eps_rel},
+          {"wheelbase", config.vehicle_params.lf + config.vehicle_params.lr},
+          {"friction_coeff", config.vehicle_params.mu},
+          {"height_cg", config.vehicle_params.h},
+          {"l_cg2rear", config.vehicle_params.lr},
+          {"l_cg2front", config.vehicle_params.lf},
+          {"C_S_front", config.vehicle_params.C_Sf},
+          {"C_S_rear", config.vehicle_params.C_Sr},
+          {"mass", config.vehicle_params.m},
+          {"moment_inertia", config.vehicle_params.I}};
 }
 
-casadi_int LMPCController::terminal_set_size() const {
-  return safe_set.terminal_point_count(config.K);
-}
+} // namespace
 
-void LMPCController::reset_lambda_warm_start() {
-  const casadi_int q = terminal_set_size();
-  lambda_warm = casadi::DM::ones(q, 1) / q;
-}
-
-void LMPCController::rebuild_qp_builder() {
-  qp_builder = std::make_unique<QpBuilder>(
-      config.horizon_steps, terminal_set_size(),
-      QpBounds{config.a_min, config.a_max, config.delta_min, config.delta_max,
-               config.ey_max, config.sv_max * config.dt},
-      QpWeights{config.cost_to_go_weight, config.terminal_slack_weight,
-                config.c_u, config.c_d_u, config.ey_slack_l1,
-                config.ey_slack_l2},
-      QpScaling{
-          casadi::DM({config.v_max, config.scale_x_vy, config.scale_x_omega,
-                      config.scale_x_epsi, track.length(), config.ey_max}),
-          casadi::DM({config.a_max, config.delta_max}), cost_to_go_scale},
-      config.solver_name);
-  reset_lambda_warm_start();
-}
-
-void LMPCController::reset() {
-  x = casadi::DM::zeros(kStateDim, 1);
-  t = 0.0;
-  has_state = false;
-  u_prev = casadi::DM::zeros(kControlDim, 1);
-  actual_delta = 0.0;
-  x_warm = casadi::DM::zeros(kStateDim, config.horizon_steps + 1);
-  u_warm = casadi::DM::zeros(kControlDim, config.horizon_steps);
-  reset_lambda_warm_start();
-  has_warm_start = false;
-  consecutive_solve_failures = 0;
-  x_pred = casadi::DM::zeros(kStateDim, config.horizon_steps + 1);
-  last_terminal_slack = casadi::DM::zeros(kStateDim, 1);
-}
-
-void LMPCController::update(const casadi::DM &x_in, double t_in,
-                            double actual_delta_in) {
-  if (x_in.size1() != kStateDim || x_in.size2() != 1) {
-    throw std::invalid_argument("LMPCController::update: x must be a 6x1 "
-                                "vector [vx, vy, omega, epsi, s, ey]");
-  }
-  x = x_in;
-  t = t_in;
-  actual_delta = actual_delta_in;
-  has_state = true;
-}
-
-casadi::DM LMPCController::safe_set_query_scale() const {
-  // The metric for locating safe-set data near a state is NOT the QP's
-  // variable-conditioning scale, even though both are per-state vectors.
-  // The QP scale normalizes s by the whole track's length so the decision
-  // variable stays O(1) -- correct for solver conditioning, but as a
-  // LOCALITY metric it makes track position nearly free: 2.0m of s counts
-  // as 0.012, so "nearest" ends up decided by noise in the other
-  // coordinates. Measured directly (2026-07-13): the terminal query
-  // returned samples 2m BEHIND the terminal reference (J higher than the
-  // data available right at it), the cost-to-go stopped pulling forward,
-  // and the car decelerated from 3.8 to 1.5 m/s until the QP failed.
-  // DESIGN.md SS2's pinned metric is D = diag(0,0,0,0,1,1) -- s and ey in
-  // raw METERS, position-dominated -- so s's entry here is 1.0 (meters),
-  // not track.length(). The remaining entries keep the conditioning-style
-  // normalization: at these scales (vx/20 etc.) they act as mild
-  // tie-breakers rather than competing with position, which is as close
-  // to the pinned metric as the shared normalized_distance_sq interface
-  // allows.
-  return casadi::DM({config.v_max, config.scale_x_vy, config.scale_x_omega,
-                     config.scale_x_epsi, 1.0, config.ey_max});
-}
-
-void LMPCController::seed_warm_start_from_safe_set() {
-  // First-solve warm start: the recorded D^0 controls nearest the current
-  // state (header comment has the full rationale for why NOT a
-  // zero-control naive rollout). Only u_warm is taken from the recording;
-  // x_warm is derived from the measured state by solve_once()'s own
-  // rollout+linearize loop so the linearization sequence stays dynamically
-  // consistent with the nominal model regardless of how the recorded lap's
-  // own dynamics differed.
-  const SafeSet::TrajectorySegment segment = safe_set.trajectory_segment(
-      x, config.horizon_steps, safe_set_query_scale());
-  u_warm = segment.u_traj;
-  has_warm_start = true;
-}
-
-void LMPCController::shift_warm_start(const QpSolution &solution) {
-  // Only the CONTROL trajectory shifts (receding horizon); the freed final
-  // slot holds the last control constant. x_warm is deliberately NOT
-  // shifted from solution.x_traj -- solve_once()'s own rollout+linearize
-  // loop rebuilds it from the next measured state instead (its header
-  // comment has the rationale).
-  using casadi::Slice;
-
-  const casadi_int N = config.horizon_steps;
-  if (N > 1) {
-    u_warm(Slice(), Slice(0, N - 1)) = solution.u_traj(Slice(), Slice(1, N));
-  }
-  u_warm(Slice(), N - 1) = solution.u_traj(Slice(), N - 1);
-  has_warm_start = true;
-}
-
-void LMPCController::record_solve_failure() {
-  qp_builder->clear_dual_warm_start();
-  ++consecutive_solve_failures;
-  constexpr int kPrimalWarmStartResetFailures = 3;
-  if (consecutive_solve_failures >= kPrimalWarmStartResetFailures) {
-    has_warm_start = false;
-  }
-}
-
-void LMPCController::record_solve_success() { consecutive_solve_failures = 0; }
-
-QpSolution LMPCController::solve_once() {
-  // recom.md's t_rollout+lin/t_knn checkpoints -- ControllerTimings'
-  // comment (lmpc_controller.hpp) has the full rationale for what each
-  // bucket covers.
-  using Clock = std::chrono::steady_clock;
-  const auto elapsed_ms = [](Clock::time_point from, Clock::time_point to) {
-    return std::chrono::duration<double, std::milli>(to - from).count();
-  };
-  const Clock::time_point t_start = Clock::now();
-
-  // x_warm is rebuilt as a nominal-model rollout from the MEASURED current
-  // state under u_warm on EVERY call, not just the first (solve_once()'s
-  // header comment has the full rationale) -- fused with the per-stage
-  // linearization below into a single pass (recom.md item 1):
-  // Linearizer::operator() already evaluates x_next alongside (A_t, B_t,
-  // C_t) at the same call, so stage stg+1's x_ref is exactly stage stg's
-  // x_next, and no state is ever linearized twice.
-  using casadi::Slice;
-  x_warm(Slice(), 0) = x;
-
-  // DESIGN.md SS8 step 3 (dummy-A/B/C pass: steps 3a/3b skipped, so
-  // A_t = A^f_t, B_t = B^f_t, C_t = C^f_t -- no learned error correction).
-  const casadi_int N = config.horizon_steps;
-  std::vector<QpStage> stages;
-  stages.reserve(static_cast<std::size_t>(N));
-  for (casadi_int stg = 0; stg < N; ++stg) {
-    const casadi::DM x_ref = x_warm(Slice(), stg);
-    const casadi::DM u_ref = u_warm(Slice(), stg);
-    const casadi::DM u_prev_ref =
-        (stg == 0) ? u_prev : casadi::DM(u_warm(Slice(), stg - 1));
-    const double kappa_ref =
-        track.curvature(static_cast<double>(x_ref(dynamics::S)));
-
-    const LinearizedDynamics lin =
-        linearizer(x_ref, u_ref, u_prev_ref, kappa_ref);
-    x_warm(Slice(), stg + 1) = lin.x_next;
-    stages.push_back(QpStage{lin.A, lin.B, lin.C});
-
-    SPDLOG_LOGGER_TRACE(log(),
-                        "stage {}: x_ref={} u_ref={} |A|max={} |B|max={}", stg,
-                        x_ref.T(), u_ref.T(), casadi::DM::mmax(fabs(lin.A)),
-                        casadi::DM::mmax(fabs(lin.B)));
+struct LMPCController::Impl {
+  explicit Impl(LmpcConfig config_in)
+      : config(std::move(config_in)),
+        prediction(casadi::DM::zeros(6, config.horizon_steps + 1)),
+        terminal_slack(casadi::DM::zeros(6, 1)) {
+    rebuild();
   }
 
-  const Clock::time_point t_rollout_lin_done = Clock::now();
-
-  // Select a contiguous local trajectory segment from each lap using only
-  // periodic track progress. Terminal slack handles dynamic-state mismatch.
-  const casadi::DM x_terminal_ref = x_warm(casadi::Slice(), N);
-  SafeSet::QueryResult safe_set_result = safe_set.query_local_segments(
-      static_cast<double>(x_terminal_ref(dynamics::S)), config.K);
-  const Clock::time_point t_knn_done = Clock::now();
-  const casadi_int expected_q = terminal_set_size();
-  if (safe_set_result.X_ss.size1() != kStateDim ||
-      safe_set_result.X_ss.size2() != expected_q ||
-      safe_set_result.J_ss.size1() != expected_q ||
-      safe_set_result.J_ss.size2() != 1) {
-    throw std::runtime_error("LMPCController::solve_once: safe-set query "
-                             "returned invalid dimensions");
+  void rebuild() {
+    py::array_t<std::int8_t> grid(config.occupancy_grid.size(),
+                                  config.occupancy_grid.data());
+    core = std::make_unique<LMPCCore>(
+        make_params(config), grid, config.map_width, config.map_height,
+        config.map_resolution, config.map_origin_x, config.map_origin_y,
+        config.reference_waypoint_csv_path, config.reference_seed_lap_csv_path,
+        config.initial_x, config.initial_y, config.initial_yaw);
+    prediction = casadi::DM::zeros(6, config.horizon_steps + 1);
+    terminal_slack = casadi::DM::zeros(6, 1);
+    solved = true;
+    timings = {};
   }
-  // Safe-set vertices are reselected every control step, so the previous
-  // lambda entries no longer refer to the same columns. Seed the new simplex
-  // at its feasible centroid instead of carrying incompatible coordinates.
-  lambda_warm = casadi::DM::ones(expected_q, 1) / expected_q;
 
-  // Anchor the QP's stage-0 steering-rate cost/constraint (QpBounds::
-  // ddelta_max) against the PLANT's actual current steering angle, not this
-  // controller's own last command -- see actual_delta's declaration
-  // comment. Acceleration has no equivalent hard rate constraint and no
-  // comparably direct raw measurement, so u_prev(A) is left as the last
-  // commanded value.
-  casadi::DM u_prev_anchor = u_prev;
-  u_prev_anchor(dynamics::DELTA) = actual_delta;
+  LmpcConfig config;
+  std::unique_ptr<LMPCCore> core;
+  casadi::DM prediction;
+  casadi::DM terminal_slack;
+  ControllerTimings timings;
+  bool solved = true;
+};
 
-  // DESIGN.md SS8 step 5.
-  QpSolution solution =
-      qp_builder->solve(x, u_prev_anchor, stages, safe_set_result.X_ss,
-                        safe_set_result.J_ss, x_warm, u_warm, lambda_warm);
+LMPCController::LMPCController(const LmpcConfig &config)
+    : impl(std::make_unique<Impl>(config)) {}
 
-  // Populated regardless of solution.success -- see this function's own
-  // return path in control(): the failure throw happens AFTER solve_once()
-  // returns, so these are already valid by then.
-  timings.rollout_lin_ms = elapsed_ms(t_start, t_rollout_lin_done);
-  timings.knn_ms = elapsed_ms(t_rollout_lin_done, t_knn_done);
-  timings.set_params_ms = solution.timings.set_params_ms;
-  timings.solver_ms = solution.timings.solver_ms;
-  timings.postcheck_ms = solution.timings.postcheck_ms;
+LMPCController::~LMPCController() = default;
+LMPCController::LMPCController(LMPCController &&) noexcept = default;
+LMPCController &LMPCController::operator=(LMPCController &&) noexcept = default;
 
-  return solution;
+void LMPCController::reset() { impl->rebuild(); }
+
+void LMPCController::update(const casadi::DM &x, double t,
+                            double actual_delta) {
+  (void)t;
+  (void)actual_delta;
+  const double speed = static_cast<double>(x(3));
+  const double slip = static_cast<double>(x(5));
+  impl->core->set_state(static_cast<double>(x(0)), static_cast<double>(x(1)),
+                        static_cast<double>(x(2)), speed * std::cos(slip),
+                        speed * std::sin(slip), static_cast<double>(x(4)));
 }
 
 casadi::DM LMPCController::control() {
-  if (!has_state) {
-    throw std::logic_error(
-        "LMPCController::control: update() must be called before control()");
-  }
-  if (!has_warm_start) {
-    seed_warm_start_from_safe_set();
-  }
+  const auto started = std::chrono::steady_clock::now();
+  const py::tuple result = impl->core->step();
+  impl->timings.solver_ms = std::chrono::duration<double, std::milli>(
+                                std::chrono::steady_clock::now() - started)
+                                .count();
+  impl->solved = result[2].cast<bool>();
 
-  // No retry: exactly one solve per control() call, bounded by the
-  // solver's own max_iter, so per-step solve time stays bounded instead of
-  // silently doubling on every failure (measured 2026-07-14: a retry here
-  // was why solve time -- and therefore viewer FPS -- degraded so sharply
-  // once the QP started failing, since every failing step paid for TWO
-  // full solves before giving up). Every infeasibility is surfaced via
-  // this exception, not masked by a second attempt; the caller's fallback
-  // brake (runs/lmpc_drive.py) is what actually handles a real failure
-  // (including gym's own low-speed plant divergence), not this layer.
-  const QpSolution solution = solve_once();
-  if (!solution.success) {
-    record_solve_failure();
-    throw std::runtime_error("LMPCController::control: QP solve failed: " +
-                             solution.message);
+  const py::array_t<double> predicted = impl->core->predicted_states();
+  const auto view = predicted.unchecked<2>();
+  for (casadi_int stage = 0; stage < impl->prediction.size2(); ++stage) {
+    for (casadi_int state = 0; state < impl->prediction.size1(); ++state) {
+      impl->prediction(state, stage) = view(stage, state);
+    }
   }
-
-  record_solve_success();
-  x_pred = solution.x_traj;
-  last_terminal_slack = solution.terminal_slack;
-  shift_warm_start(solution);
-
-  // DESIGN.md SS8 step 6: apply u_0*.
-  u_prev = solution.u_traj(casadi::Slice(), 0);
-  return u_prev;
+  return casadi::DM({result[0].cast<double>(), result[1].cast<double>()});
 }
 
 void LMPCController::add_lap(const casadi::DM &x_lap, const casadi::DM &u_lap,
                              const casadi::DM &J_lap) {
-  const casadi_int num_states = x_lap.size2();
-  if (x_lap.size1() != kStateDim || num_states < 2 ||
-      u_lap.size1() != kControlDim || u_lap.size2() != num_states - 1 ||
-      J_lap.size1() != num_states || J_lap.size2() != 1) {
-    throw std::invalid_argument(
-        "LMPCController::add_lap: expected x_lap kStateDim x (T+1), "
-        "u_lap kControlDim x T, J_lap (T+1) x 1 with T >= 1");
-  }
+  (void)x_lap;
+  (void)u_lap;
+  (void)J_lap;
+}
 
-  std::vector<SafeSetSample> lap;
-  lap.reserve(static_cast<std::size_t>(num_states));
-  for (casadi_int k = 0; k < num_states; ++k) {
-    // The final state has no successor, hence no realized control -- same
-    // has_control convention the seed-lap CSV loader produces.
-    const bool has_control = k < num_states - 1;
-    lap.push_back(SafeSetSample{x_lap(casadi::Slice(), k),
-                                has_control
-                                    ? casadi::DM(u_lap(casadi::Slice(), k))
-                                    : casadi::DM::zeros(kControlDim, 1),
-                                static_cast<double>(J_lap(k)), has_control});
-  }
-  // QpBuilder's J normalization (scaling.j) stays pinned to D^0's own cost
-  // scale from construction time: later laps are only ever FASTER (smaller
-  // J), so the fixed scale keeps J_ss/scaling.j in (0, 1] -- exactly the
-  // conditioning it was chosen for.
-  safe_set.add_lap(std::move(lap));
-  rebuild_qp_builder();
+casadi::DM LMPCController::predicted_next_state() const {
+  return impl->prediction(casadi::Slice(), 1);
+}
+
+casadi::DM LMPCController::predicted_trajectory() const {
+  return impl->prediction;
+}
+
+const ControllerTimings &LMPCController::last_timings() const {
+  return impl->timings;
+}
+
+const casadi::DM &LMPCController::last_terminal_slack_value() const {
+  return impl->terminal_slack;
+}
+
+bool LMPCController::last_solve_ok() const { return impl->solved; }
+
+bool LMPCController::using_dynamic_model() const {
+  return impl->core->use_dyn();
 }
 
 } // namespace lmpc
