@@ -1,10 +1,8 @@
 """Controller interfaces and reference implementations."""
 
+from typing import Any
+
 from .controller_base import ControlCommand, Controller, VehicleState
-from .lmpc import LMPCController
-from .ppo import PPOController
-from .pure_pursuit import PurePursuit
-from .stanley import Stanley
 
 __all__ = [
     "ControlCommand",
@@ -15,3 +13,23 @@ __all__ = [
     "Stanley",
     "VehicleState",
 ]
+
+
+def __getattr__(name: str) -> Any:
+    if name == "LMPCController":
+        from .lmpc import LMPCController
+
+        return LMPCController
+    if name == "PPOController":
+        from .ppo import PPOController
+
+        return PPOController
+    if name == "PurePursuit":
+        from .pure_pursuit import PurePursuit
+
+        return PurePursuit
+    if name == "Stanley":
+        from .stanley import Stanley
+
+        return Stanley
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

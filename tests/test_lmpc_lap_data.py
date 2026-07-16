@@ -1,7 +1,27 @@
 import numpy as np
+import subprocess
+import sys
 import pytest
 
 from controllers.lmpc.lap_data import LapSample, build_lap_arrays
+
+
+def test_lap_data_import_does_not_require_native_extension() -> None:
+    code = """
+import importlib.abc
+import sys
+
+class BlockNative(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path, target=None):
+        if fullname == "lmpc_native":
+            raise ModuleNotFoundError("lmpc_native blocked by test")
+        return None
+
+sys.meta_path.insert(0, BlockNative())
+from controllers.controller_base import VehicleState
+from controllers.lmpc.lap_data import LapSample
+"""
+    subprocess.run([sys.executable, "-c", code], check=True)
 
 
 def make_samples() -> list[LapSample]:
