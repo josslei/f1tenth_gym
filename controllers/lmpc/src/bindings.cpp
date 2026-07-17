@@ -103,11 +103,21 @@ PYBIND11_MODULE(lmpc_native, module) {
                      &lmpc::LmpcConfig::reference_seed_lap_csv_path)
       .def_readwrite("initial_x", &lmpc::LmpcConfig::initial_x)
       .def_readwrite("initial_y", &lmpc::LmpcConfig::initial_y)
-      .def_readwrite("initial_yaw", &lmpc::LmpcConfig::initial_yaw);
+      .def_readwrite("initial_yaw", &lmpc::LmpcConfig::initial_yaw)
+      .def_readwrite("regression_enabled",
+                     &lmpc::LmpcConfig::regression_enabled)
+      .def_readwrite("regression_num_neighbors",
+                     &lmpc::LmpcConfig::regression_num_neighbors)
+      .def_readwrite("regression_bandwidth",
+                     &lmpc::LmpcConfig::regression_bandwidth)
+      .def_readwrite("regression_regularization",
+                     &lmpc::LmpcConfig::regression_regularization)
+      .def_readwrite("regression_Q", &lmpc::LmpcConfig::regression_Q);
 
   py::class_<lmpc::ControllerTimings>(module, "ControllerTimings")
       .def_readonly("rollout_lin_ms", &lmpc::ControllerTimings::rollout_lin_ms)
       .def_readonly("knn_ms", &lmpc::ControllerTimings::knn_ms)
+      .def_readonly("regression_ms", &lmpc::ControllerTimings::regression_ms)
       .def_readonly("set_params_ms", &lmpc::ControllerTimings::set_params_ms)
       .def_readonly("solver_ms", &lmpc::ControllerTimings::solver_ms)
       .def_readonly("postcheck_ms", &lmpc::ControllerTimings::postcheck_ms);
@@ -143,5 +153,8 @@ PYBIND11_MODULE(lmpc_native, module) {
              return array_from_dm(controller.last_terminal_slack_value());
            })
       .def("last_solve_ok", &lmpc::LMPCController::last_solve_ok)
-      .def("using_dynamic_model", &lmpc::LMPCController::using_dynamic_model);
+      .def("using_dynamic_model", &lmpc::LMPCController::using_dynamic_model)
+      .def("regression_pool_size", &lmpc::LMPCController::regression_pool_size)
+      .def("last_regression_correction_norm",
+           &lmpc::LMPCController::last_regression_correction_norm);
 }

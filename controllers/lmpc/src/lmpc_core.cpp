@@ -29,9 +29,13 @@
 #include <cmath>
 #include <map>
 #include <algorithm>
+#include <chrono>
+#include <stdexcept>
+#include <utility>
 
 #include <LearningMPC/track.h>
 #include <Eigen/Sparse>
+#include <Eigen/Eigenvalues>
 #include "OsqpEigen/OsqpEigen.h"
 #include <unsupported/Eigen/MatrixFunctions>
 #include <LearningMPC/car_params.h>
@@ -55,6 +59,14 @@ struct Sample{
     int time;
     int iter;
     int cost;
+};
+
+// NOT from LMPC.cpp: one dynamics-error training transition (x_j, u_j) -> the
+// nominal model's residual in (v, omega, beta) only -- see plan.md/ref/lmpc.tex.
+struct RegressionSample{
+    Matrix<double,nx,1> x;
+    Matrix<double,nu,1> u;
+    Matrix<double,3,1> y_bar;
 };
 
 // verbatim from LMPC.cpp
@@ -104,6 +116,12 @@ public:
         time_ = 0;           // uninitialized in original (UB); intended value
         last_solve_ok_ = true;
         init_SS_from_data(init_data_file);
+        // Only lap 0: SS_[1] is init_SS_from_data's duplicate of D0, needed
+        // for LMPCCore's own iter_=2 startup requirement but not a second,
+        // independent training trajectory.
+        if (regression_enabled_ && !SS_.empty()) {
+            add_lap_to_regression_pool(SS_[0]);
+        }
     }
 
     ~LMPCCore(){ delete track_; }
@@ -148,6 +166,9 @@ public:
             update_cost_to_go(curr_trajectory_);
             //sort(curr_trajectory_.begin(), curr_trajectory_.end(), compare_s);
             SS_.push_back(curr_trajectory_);
+            if (regression_enabled_) {
+                add_lap_to_regression_pool(curr_trajectory_);
+            }
             curr_trajectory_.clear();
          //   reset_QPSolution(iter_-1);
             time_ = 0;
@@ -182,6 +203,26 @@ public:
     bool use_dyn() const { return use_dyn_; }
     double track_length() const { return track_->length; }
     double vel() const { return vel_; }
+    // NOT from LMPC.cpp: dynamics-error regression diagnostics.
+    int regression_pool_size() const { return (int)regression_pool_.size(); }
+    double last_regression_correction_norm() const { return last_regression_correction_norm_; }
+
+    // NOT from LMPC.cpp: the terminal-safe-set slack (s_t1..s_t6) is a real
+    // QP decision variable (see solve_MPC's HessianMatrix sizing/q_s_terminal
+    // cost) but was never extracted from QPSolution_ before -- this is the
+    // last nx entries of the solved variable vector.
+    Matrix<double,nx,1> last_terminal_slack() const {
+        return QPSolution_.segment<nx>((N+1)*nx + N*nu + (N+1) + 2*K_NEAR);
+    }
+
+    // NOT from LMPC.cpp: per-phase solve_MPC() timing (real measurements,
+    // not the previous dead placeholders -- see recom.md's profiling ask).
+    double last_knn_ms() const { return last_knn_ms_; }
+    double last_rollout_lin_ms() const { return last_rollout_lin_ms_; }
+    double last_regression_ms() const { return last_regression_ms_; }
+    double last_set_params_ms() const { return last_set_params_ms_; }
+    double last_solver_ms() const { return last_solver_ms_; }
+    double last_postcheck_ms() const { return last_postcheck_ms_; }
     py::array_t<double> predicted_states(){
         py::array_t<double> out({N+1, (int)nx});
         auto r = out.mutable_unchecked<2>();
@@ -252,6 +293,23 @@ private:
     vector<geometry_msgs::Point> border_lines_;
     bool last_solve_ok_;
 
+    // NOT from LMPC.cpp: dynamics-error regression (plan.md / ref/lmpc.tex).
+    bool regression_enabled_;
+    int regression_M_;
+    double regression_h_;
+    double regression_lambda_;
+    Matrix<double,8,8> regression_Q_;
+    vector<RegressionSample> regression_pool_;
+    double last_regression_correction_norm_ = 0.0;
+
+    // NOT from LMPC.cpp: per-phase timing accumulators, set in solve_MPC().
+    double last_knn_ms_ = 0.0;
+    double last_rollout_lin_ms_ = 0.0;
+    double last_regression_ms_ = 0.0;
+    double last_set_params_ms_ = 0.0;
+    double last_solver_ms_ = 0.0;
+    double last_postcheck_ms_ = 0.0;
+
     /* getParameters, verbatim reads from the same-named yaml keys */
     void getParameters(const std::map<std::string,double>& p){
         N = (int)p.at("N");
@@ -293,6 +351,34 @@ private:
         car.cs_r = p.at("C_S_rear");
         car.I_z = p.at("moment_inertia");
         car.mass = p.at("mass");
+
+        // NOT verbatim: dynamics-error regression config (plan.md section 9).
+        regression_enabled_ = p.count("regression_enabled") && p.at("regression_enabled") != 0.0;
+        regression_M_ = p.count("regression_num_neighbors") ? (int)p.at("regression_num_neighbors") : 0;
+        regression_h_ = p.count("regression_bandwidth") ? p.at("regression_bandwidth") : 0.0;
+        regression_lambda_ = p.count("regression_regularization") ? p.at("regression_regularization") : 0.0;
+        regression_Q_.setIdentity();
+        for (int row = 0; row < 8; ++row) {
+            for (int col = 0; col < 8; ++col) {
+                std::string key = "regression_Q_" + std::to_string(row * 8 + col);
+                if (p.count(key)) regression_Q_(row, col) = p.at(key);
+            }
+        }
+        if (regression_enabled_) {
+            if (regression_M_ <= 0 || regression_h_ <= 0.0 || regression_lambda_ <= 0.0) {
+                throw std::invalid_argument(
+                    "regression_num_neighbors, regression_bandwidth, and "
+                    "regression_regularization must all be positive when "
+                    "regression_enabled is set");
+            }
+            if ((regression_Q_ - regression_Q_.transpose()).cwiseAbs().maxCoeff() > 1e-9) {
+                throw std::invalid_argument("regression_Q must be symmetric");
+            }
+            SelfAdjointEigenSolver<Matrix<double,8,8>> es(regression_Q_, Eigen::EigenvaluesOnly);
+            if (es.eigenvalues().minCoeff() < -1e-9) {
+                throw std::invalid_argument("regression_Q must be positive semidefinite");
+            }
+        }
     }
 
     // NOT verbatim: reads real yaw rate/slip columns instead of zeroing them
@@ -582,12 +668,116 @@ private:
 
     }
 
+    // NOT from LMPC.cpp: cache one completed lap's consecutive same-lap
+    // transitions as dynamics-error training data (plan.md section 1/7).
+    // Skips the lap's terminal sample (no next state within this array), so
+    // this never constructs a transition across the finish line.
+    void add_lap_to_regression_pool(const vector<Sample>& lap){
+        for (size_t i = 0; i + 1 < lap.size(); ++i){
+            const Sample& s0 = lap[i];
+            const Sample& s1 = lap[i+1];
+            Matrix<double,nx,1> x_op = s0.x;
+            Matrix<double,nu,1> u_op = s0.u;
+            bool dyn = x_op(3) > VEL_THRESHOLD;
+
+            Matrix<double,nx,nx> Adj;
+            Matrix<double,nx,nu> Bdj;
+            Matrix<double,nx,1> hdj;
+            get_linearized_dynamics(Adj, Bdj, hdj, x_op, u_op, dyn);
+            Matrix<double,nx,1> f_pred = Adj*x_op + Bdj*u_op + hdj;
+
+            RegressionSample rs;
+            rs.x = s0.x;
+            rs.u = s0.u;
+            rs.y_bar(0) = s1.x(3) - f_pred(3);   // v
+            rs.y_bar(1) = s1.x(4) - f_pred(4);   // omega
+            double dbeta = s1.x(5) - f_pred(5);
+            wrap_angle(dbeta, 0.0);
+            rs.y_bar(2) = dbeta;                 // beta
+
+            regression_pool_.push_back(rs);
+        }
+    }
+
+    // NOT from LMPC.cpp: local weighted ridge regression for the additive
+    // dynamics-error model (plan.md / ref/lmpc.tex). Only the (v, omega,
+    // beta) rows of Ae/Be/Ce are ever nonzero -- the regression therefore
+    // solves a 6x6 normal-equation system for 3 outputs, not a 9x9 system
+    // for 6, which is the actual point of the paper's sparse structure:
+    // this stays cheap enough to call once per horizon stage, every solve.
+    void regress_error_dynamics(const Matrix<double,nx,1>& x_ref, const Matrix<double,nu,1>& u_ref,
+            Matrix<double,nx,nx>& Ae, Matrix<double,nx,nu>& Be, Matrix<double,nx,1>& Ce){
+        Ae.setZero();
+        Be.setZero();
+        Ce.setZero();
+        if (regression_pool_.empty()) return;
+
+        Matrix<double,8,1> z0;
+        z0 << x_ref(0), x_ref(1), x_ref(2), x_ref(3), x_ref(4), x_ref(5), u_ref(0), u_ref(1);
+
+        const int pool_n = (int)regression_pool_.size();
+        vector<pair<double,int>> ranked;
+        ranked.reserve(pool_n);
+        for (int j = 0; j < pool_n; ++j){
+            const RegressionSample& rs = regression_pool_[j];
+            Matrix<double,8,1> zj;
+            zj << rs.x(0), rs.x(1), rs.x(2), rs.x(3), rs.x(4), rs.x(5), rs.u(0), rs.u(1);
+            Matrix<double,8,1> diff = z0 - zj;
+            wrap_angle(diff(2), 0.0);   // psi
+            wrap_angle(diff(5), 0.0);   // beta
+            double rho2 = diff.transpose() * regression_Q_ * diff;
+            ranked.emplace_back(rho2, j);
+        }
+        int m = min(regression_M_, pool_n);
+        partial_sort(ranked.begin(), ranked.begin()+m, ranked.end());
+
+        MatrixXd Z(m, 6), Y(m, 3);
+        VectorXd w(m);
+        const double h2 = regression_h_ * regression_h_;
+        for (int k = 0; k < m; ++k){
+            double rho = sqrt(max(ranked[k].first, 0.0));
+            const RegressionSample& rs = regression_pool_[ranked[k].second];
+            Z(k,0) = rs.x(3);   // v
+            Z(k,1) = rs.x(4);   // omega
+            Z(k,2) = rs.x(5);   // beta
+            Z(k,3) = rs.u(0);   // a
+            Z(k,4) = rs.u(1);   // delta
+            Z(k,5) = 1.0;
+            Y.row(k) = rs.y_bar.transpose();
+            w(k) = (rho < regression_h_) ? 0.75*(1.0 - (rho*rho)/h2) : 0.0;
+        }
+
+        MatrixXd ZtW = Z.transpose() * w.asDiagonal();
+        Matrix<double,6,6> ZtWZ = ZtW*Z + regression_lambda_*Matrix<double,6,6>::Identity();
+        Matrix<double,6,3> ZtWY = ZtW*Y;
+        Matrix<double,6,3> ThetaT = ZtWZ.ldlt().solve(ZtWY);
+
+        for (int r = 0; r < 3; ++r){
+            Ae(3+r, 3) = ThetaT(0, r);   // d(v,omega,beta)/dv
+            Ae(3+r, 4) = ThetaT(1, r);   // d(v,omega,beta)/domega
+            Ae(3+r, 5) = ThetaT(2, r);   // d(v,omega,beta)/dbeta
+            Be(3+r, 0) = ThetaT(3, r);   // d(v,omega,beta)/da
+            Be(3+r, 1) = ThetaT(4, r);   // d(v,omega,beta)/ddelta
+            Ce(3+r, 0) = ThetaT(5, r);
+        }
+    }
+
     // verbatim from LMPC.cpp (visualization block kept as border-line
     // computation into border_lines_; only the rviz publish is gone)
     void solve_MPC(const Matrix<double,nx,1>& terminal_candidate){
+        // NOT from LMPC.cpp: per-phase timing instrumentation, added purely
+        // as measurement -- no control-flow or numerical change below.
+        using clk = std::chrono::steady_clock;
+        auto elapsed_ms = [](clk::time_point t0){
+            return std::chrono::duration<double, std::milli>(clk::now() - t0).count();
+        };
+        double t_rollout_lin = 0.0, t_regression = 0.0, t_set_params = 0.0;
+
         vector<Sample> terminal_CSS;
         double s_t = track_->findTheta(terminal_candidate(0), terminal_candidate(1), 0, true);
+        auto t_knn0 = clk::now();
         select_convex_safe_set(terminal_CSS, iter_-2, iter_-1, s_t);
+        last_knn_ms_ = elapsed_ms(t_knn0);
 
         /** MPC variables: z = [x0, ..., xN, u0, ..., uN-1, s0, ..., sN, lambda0, ....., lambda(2*K_NEAR), s_t1, s_t2, .. s_t6]*
          *  constraints: dynamics, track bounds, input limits, acceleration limit, slack, lambdas, terminal state, sum of lambda's*/
@@ -626,7 +816,25 @@ private:
             x_k_ref = QPSolution_.segment<nx>(i*nx);
             u_k_ref = QPSolution_.segment<nu>((N+1)*nx + i*nu);
             double s_ref = track_->findTheta(x_k_ref(0), x_k_ref(1), 0, true);
+            auto t_lin0 = clk::now();
             get_linearized_dynamics(Ad, Bd, hd, x_k_ref, u_k_ref, use_dyn_);
+            t_rollout_lin += elapsed_ms(t_lin0);
+            if (regression_enabled_ && i < N) {
+                // u_N does not exist, so the error model is only added for i<N.
+                auto t_reg0 = clk::now();
+                Matrix<double,nx,nx> Ae;
+                Matrix<double,nx,nu> Be;
+                Matrix<double,nx,1> Ce;
+                regress_error_dynamics(x_k_ref, u_k_ref, Ae, Be, Ce);
+                Ad += Ae;
+                Bd += Be;
+                hd += Ce;
+                t_regression += elapsed_ms(t_reg0);
+                if (i == 0) {
+                    last_regression_correction_norm_ = Ae.norm() + Be.norm() + Ce.norm();
+                }
+            }
+            auto t_params0 = clk::now();
             /* form Hessian entries*/
             // cost does not depend on x0, only 1 to N
             if (i>0) {
@@ -742,7 +950,12 @@ private:
             constraintMatrix.insert((N+1)*nx + 2*(N+1) + N*nu + (N+1) + i, (N+1)*nx+N*nu +i) = 1.0;
             lower((N+1)*nx + 2*(N+1) + N*nu  + (N+1) + i) = 0;
             upper((N+1)*nx + 2*(N+1) + N*nu  + (N+1) + i) = OsqpEigen::INFTY;
+            t_set_params += elapsed_ms(t_params0);
         }
+        last_rollout_lin_ms_ = t_rollout_lin;
+        last_regression_ms_ = t_regression;
+
+        auto t_params1 = clk::now();
         int numOfConstraintsSoFar = (N+1)*nx + 2*(N+1) + N*nu + (N+1) + (N+1);
 
         // lamda's >= 0
@@ -816,6 +1029,7 @@ private:
         SparseMatrix<double> sparse_I((N+1)*nx+ N*nu + (N+1)+ (2*K_NEAR) +nx, (N+1)*nx+ N*nu + (N+1)+ (2*K_NEAR) +nx);
         sparse_I.setIdentity();
         HessianMatrix = 0.5*(HessianMatrix + H_t) + 0.0000001*sparse_I;
+        t_set_params += elapsed_ms(t_params1);
 
         OsqpEigen::Solver solver;
         solver.settings()->setWarmStart(true);
@@ -826,6 +1040,8 @@ private:
         if (osqp_eps_prim_inf_ > 0) solver.settings()->setPrimalInfeasibilityTolerance(osqp_eps_prim_inf_);
         if (osqp_eps_abs_ > 0) solver.settings()->setAbsoluteTolerance(osqp_eps_abs_);
         if (osqp_eps_rel_ > 0) solver.settings()->setRelativeTolerance(osqp_eps_rel_);
+
+        auto t_params2 = clk::now();
         solver.data()->setNumberOfVariables((N+1)*nx+ N*nu + (N+1)+ 2*K_NEAR +nx);
         solver.data()->setNumberOfConstraints((N+1)*nx+ 2*(N+1) + N*nu + (N+1) + (N+1) + 2*K_NEAR + 2*nx+1);
 
@@ -834,11 +1050,16 @@ private:
         if (!solver.data()->setLinearConstraintsMatrix(constraintMatrix)) throw"fail to set constraint matrix";
         if (!solver.data()->setLowerBound(lower)){throw "fail to set lower bound";}
         if (!solver.data()->setUpperBound(upper)){throw "fail to set upper bound";}
+        t_set_params += elapsed_ms(t_params2);
+        last_set_params_ms_ = t_set_params;
 
+        auto t_solve0 = clk::now();
         bool init_ok = solver.initSolver();
         if (!init_ok){ cout<< "fail to initialize solver"<<endl;}
+        bool solve_failed = !init_ok || !solver.solve();
+        last_solver_ms_ = elapsed_ms(t_solve0);
 
-        if(!init_ok || !solver.solve()) {
+        if(solve_failed) {
             // ---- debug dump (diagnostics only; controller behavior unchanged:
             // on failure the previous QPSolution_ keeps being used, as in the
             // original code) ----
@@ -886,12 +1107,15 @@ private:
                 }
             }
             last_solve_ok_ = false;
+            last_postcheck_ms_ = 0.0;
             return;
         }
+        auto t_post0 = clk::now();
         last_solve_ok_ = true;
         QPSolution_ = solver.getSolution();
 
         solver.clearSolver();
+        last_postcheck_ms_ = elapsed_ms(t_post0);
     }
 };
 

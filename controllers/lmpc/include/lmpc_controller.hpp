@@ -11,6 +11,7 @@ namespace lmpc {
 struct ControllerTimings {
   double rollout_lin_ms = 0.0;
   double knn_ms = 0.0;
+  double regression_ms = 0.0;
   double set_params_ms = 0.0;
   double solver_ms = 0.0;
   double postcheck_ms = 0.0;
@@ -46,6 +47,8 @@ public:
   const casadi::DM &last_terminal_slack_value() const;
   bool last_solve_ok() const;
   bool using_dynamic_model() const;
+  int regression_pool_size() const;
+  double last_regression_correction_norm() const;
 
 private:
   struct Impl;

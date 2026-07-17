@@ -7,6 +7,15 @@
 
 namespace lmpc {
 
+namespace detail {
+inline std::vector<double> DefaultRegressionQ() {
+  std::vector<double> q(64, 0.0);
+  for (int i = 0; i < 8; ++i)
+    q[i * 8 + i] = 1.0;
+  return q;
+}
+} // namespace detail
+
 struct VehicleParams {
   double mu = 1.0489;
   double C_Sf = 4.718;
@@ -58,6 +67,17 @@ struct LmpcConfig {
   double initial_x = 0.0;
   double initial_y = 0.0;
   double initial_yaw = 0.0;
+
+  // Dynamics-error regression (additive correction to the nominal model's
+  // one-step v/omega/beta prediction, learned only in those rows -- see
+  // plan.md and ref/lmpc.tex). M, h, lambda have no default: pick them from
+  // data before enabling.
+  bool regression_enabled = false;
+  long long regression_num_neighbors = 0; // M
+  double regression_bandwidth = 0.0;      // h
+  double regression_regularization = 0.0; // lambda
+  std::vector<double> regression_Q =
+      detail::DefaultRegressionQ(); // 8x8, row-major
 };
 
 } // namespace lmpc

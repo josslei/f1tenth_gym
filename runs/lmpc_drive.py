@@ -50,7 +50,7 @@ MAX_ITERATIONS = 20
 # step -- recom.md asks for exactly this profiling breakdown but explicitly
 # wants percentiles, not just an average, so a single periodic block is both
 # the more useful view and the one that keeps stdout readable.
-PERF_REPORT_INTERVAL_STEPS = 200
+PERF_REPORT_INTERVAL_STEPS = 1000
 SAFE_SET_K = 16
 MU = 1.0489
 C_SF = 4.718
@@ -83,6 +83,22 @@ OSQP_SCALING = -1
 OSQP_EPS_PRIM_INF = 0.0
 OSQP_EPS_ABS = 0.0
 OSQP_EPS_REL = 0.0
+# Dynamics-error regression (plan.md / ref/lmpc.tex): local weighted ridge
+# regression correcting the nominal model's one-step v/omega/beta
+# prediction. Off by default -- M/h/lambda need to be picked from data
+# before this is worth turning on, not guessed, so they're left at 0 here;
+# the native validator raises if regression_enabled=True and any of them
+# is left non-positive.
+REGRESSION_ENABLED = False
+REGRESSION_NUM_NEIGHBORS = 32
+REGRESSION_BANDWIDTH = 0.6
+REGRESSION_REGULARIZATION = 1.0
+# Neighbor-distance metric over z=(x,y,psi,v,omega,beta,a,delta) in R^8 --
+# Q must be symmetric PSD (validated natively). Identity is the paper's own
+# choice (plan.md: "I will not introduce arbitrary feature scales into the
+# mathematical specification"); edit only with a deliberate reason to weight
+# some state/control dimensions over others in neighbor selection.
+REGRESSION_Q = np.eye(8)
 
 CONFIG_OVERRIDES: dict[str, Any] = {
     "K": SAFE_SET_K,
@@ -115,6 +131,11 @@ CONFIG_OVERRIDES: dict[str, Any] = {
     "osqp_eps_prim_inf": OSQP_EPS_PRIM_INF,
     "osqp_eps_abs": OSQP_EPS_ABS,
     "osqp_eps_rel": OSQP_EPS_REL,
+    "regression_enabled": REGRESSION_ENABLED,
+    "regression_num_neighbors": REGRESSION_NUM_NEIGHBORS,
+    "regression_bandwidth": REGRESSION_BANDWIDTH,
+    "regression_regularization": REGRESSION_REGULARIZATION,
+    "regression_Q": REGRESSION_Q,
 }
 ZOOM = 1.0  # > 1 -> Zoom out; < 1 -> Zoom in
 WINDOW_WIDTH = 1000
@@ -179,6 +200,7 @@ class PerfMonitor:
     METRICS = (
         "rollout+lin",
         "knn",
+        "regression",
         "set-params",
         "solver",
         "postcheck",
@@ -198,14 +220,24 @@ class PerfMonitor:
         self._interval_steps = interval_steps
         self._samples: dict[str, list[float]] = {name: [] for name in self.METRICS}
         self._terminal_slack_samples: list[np.ndarray] = []
+        self._regression_correction_samples: list[float] = []
+        self._regression_pool_size = 0
 
     def record(
-        self, *, terminal_slack: np.ndarray | None = None, **metrics_ms: float
+        self,
+        *,
+        terminal_slack: np.ndarray | None = None,
+        regression_pool_size: int = 0,
+        regression_correction_norm: float = 0.0,
+        **metrics_ms: float,
     ) -> None:
         for name in self.METRICS:
             self._samples[name].append(metrics_ms[name])
         if terminal_slack is not None:
             self._terminal_slack_samples.append(terminal_slack)
+        self._regression_pool_size = regression_pool_size
+        if regression_pool_size > 0:
+            self._regression_correction_samples.append(regression_correction_norm)
         if len(self._samples["env"]) >= self._interval_steps:
             self.report()
 
@@ -214,25 +246,25 @@ class PerfMonitor:
         if n == 0:
             return
         rows = [
-            f"{'metric':<12}{'n':>5}{'mean':>8}{'p50':>8}{'p95':>8}{'p99':>8}{'max':>8}"
+            f"{'metric':<12}{'n':>5}{'mean':>9}{'p50':>9}{'p95':>9}{'p99':>9}{'max':>9}"
         ]
         total = np.zeros(n)
         for name in self.METRICS:
             values = np.asarray(self._samples[name])
             total += values
             rows.append(
-                f"{name:<12}{n:>5}{values.mean():>8.2f}"
-                f"{np.percentile(values, 50):>8.2f}"
-                f"{np.percentile(values, 95):>8.2f}"
-                f"{np.percentile(values, 99):>8.2f}"
-                f"{values.max():>8.2f}"
+                f"{name:<12}{n:>5}{values.mean():>9.4f}"
+                f"{np.percentile(values, 50):>9.4f}"
+                f"{np.percentile(values, 95):>9.4f}"
+                f"{np.percentile(values, 99):>9.4f}"
+                f"{values.max():>9.4f}"
             )
         rows.append(
-            f"{'total':<12}{n:>5}{total.mean():>8.2f}"
-            f"{np.percentile(total, 50):>8.2f}"
-            f"{np.percentile(total, 95):>8.2f}"
-            f"{np.percentile(total, 99):>8.2f}"
-            f"{total.max():>8.2f}"
+            f"{'total':<12}{n:>5}{total.mean():>9.4f}"
+            f"{np.percentile(total, 50):>9.4f}"
+            f"{np.percentile(total, 95):>9.4f}"
+            f"{np.percentile(total, 99):>9.4f}"
+            f"{total.max():>9.4f}"
         )
         print(f"--- perf (last {n} steps, ms) ---")
         print("\n".join(rows))
@@ -252,6 +284,15 @@ class PerfMonitor:
             )
             print("\n".join(slack_rows))
             self._terminal_slack_samples.clear()
+        if self._regression_correction_samples:
+            norms = np.asarray(self._regression_correction_samples)
+            print(
+                f"regression: pool_size={self._regression_pool_size} "
+                f"active_fraction={np.mean(norms > 1e-9):.2f} "
+                f"correction_norm p50={np.percentile(norms, 50):.4f} "
+                f"p95={np.percentile(norms, 95):.4f} max={norms.max():.4f}"
+            )
+            self._regression_correction_samples.clear()
         for name in self.METRICS:
             self._samples[name].clear()
 
@@ -352,6 +393,8 @@ def main() -> None:
                 env=(t_env1 - t_env0) * 1000.0,
                 render=(t_render1 - t_env1) * 1000.0,
                 terminal_slack=terminal_slack,
+                regression_pool_size=controller.regression_pool_size(),
+                regression_correction_norm=controller.last_regression_correction_norm(),
             )
 
             crashed = bool(f110_env.collisions[ego_idx]) or truncated

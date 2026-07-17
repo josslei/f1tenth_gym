@@ -174,6 +174,12 @@ class LMPCController(Controller):
             if name == "vehicle_params":
                 for vehicle_name, vehicle_value in value.items():
                     setattr(config.vehicle_params, vehicle_name, vehicle_value)
+            elif name == "regression_Q":
+                # LmpcConfig.regression_Q is a flat 64-entry row-major list;
+                # accept a natural 8x8 array/nested list here.
+                config.regression_Q = (
+                    np.asarray(value, dtype=np.float64).flatten().tolist()
+                )
             else:
                 mapped_name = aliases.get(name, name)
                 mapped_value = -value if name == "DECELERATION_MAX" else value
@@ -243,11 +249,18 @@ class LMPCController(Controller):
     def last_solve_ok(self) -> bool:
         return self._last_solve_ok
 
+    def regression_pool_size(self) -> int:
+        return int(self._native.regression_pool_size())
+
+    def last_regression_correction_norm(self) -> float:
+        return float(self._native.last_regression_correction_norm())
+
     def last_timings(self) -> dict[str, float]:
         timings = self._native.last_timings()
         return {
             "rollout+lin": timings.rollout_lin_ms,
             "knn": timings.knn_ms,
+            "regression": timings.regression_ms,
             "set-params": timings.set_params_ms,
             "solver": timings.solver_ms,
             "postcheck": timings.postcheck_ms,
