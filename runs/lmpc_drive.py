@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import time
 from typing import Any
 
@@ -12,13 +13,7 @@ import f110_gym  # noqa: F401 - registers f110-v0
 from controllers.controller_base import VehicleState
 from controllers.lmpc.lmpc import LMPCController
 from f110_gym.envs.base_classes import Integrator
-from f110_gym.viewer import F110Viewer
-from utils.waypoint_view import (
-    DrivenLineOverlay,
-    RecedingHorizonOverlay,
-    WaypointOverlay,
-    initial_pose_from_waypoints,
-)
+from utils.waypoint_view import initial_pose_from_waypoints
 
 MAP = "maps/custom/barc_oval/barc_oval_map"
 # Raw geometric centerline, not a mintime raceline -- must be the SAME file
@@ -89,7 +84,7 @@ OSQP_EPS_REL = 0.0
 # before this is worth turning on, not guessed, so they're left at 0 here;
 # the native validator raises if regression_enabled=True and any of them
 # is left non-positive.
-REGRESSION_ENABLED = False
+REGRESSION_ENABLED = True
 REGRESSION_NUM_NEIGHBORS = 32
 REGRESSION_BANDWIDTH = 0.6
 REGRESSION_REGULARIZATION = 1.0
@@ -297,7 +292,17 @@ class PerfMonitor:
             self._samples[name].clear()
 
 
-def main() -> None:
+def main(headless: bool = False, show_perf: bool = True) -> list[dict[str, Any]]:
+    """Drive barc_oval, returning one result record per completed/attempted lap.
+
+    headless: skip the pyglet viewer entirely -- just run and collect data
+        (no window, no render calls). Imports F110Viewer/overlays lazily so
+        a headless run doesn't need pyglet installed at all, matching
+        scripts/lmpc_collect_seed_lap.py's own --visualize convention.
+    show_perf: whether PerfMonitor collects/prints the per-phase timing and
+        terminal-slack/regression diagnostics blocks. Independent of
+        headless -- either can be on/off regardless of the other.
+    """
     env = gym.make(
         "f110-v0",
         map=MAP,
@@ -323,17 +328,27 @@ def main() -> None:
     )
 
     initial_pose = initial_pose_from_waypoints(controller.waypoints)
-    waypoint_overlay = WaypointOverlay(controller.waypoints)
-    driven_line_overlay = DrivenLineOverlay()
-    horizon_overlay = RecedingHorizonOverlay(controller)
-    viewer = F110Viewer.from_env(
-        f110_env,
-        width=WINDOW_WIDTH,
-        height=WINDOW_HEIGHT,
-        target_fps=60.0,
-        initial_zoom=ZOOM,
-        callbacks=[waypoint_overlay, driven_line_overlay, horizon_overlay],
-    )
+
+    viewer = None
+    if not headless:
+        from f110_gym.viewer import F110Viewer
+        from utils.waypoint_view import (
+            DrivenLineOverlay,
+            RecedingHorizonOverlay,
+            WaypointOverlay,
+        )
+
+        waypoint_overlay = WaypointOverlay(controller.waypoints)
+        driven_line_overlay = DrivenLineOverlay()
+        horizon_overlay = RecedingHorizonOverlay(controller)
+        viewer = F110Viewer.from_env(
+            f110_env,
+            width=WINDOW_WIDTH,
+            height=WINDOW_HEIGHT,
+            target_fps=60.0,
+            initial_zoom=ZOOM,
+            callbacks=[waypoint_overlay, driven_line_overlay, horizon_overlay],
+        )
 
     # Single full-episode reset -- everything after this point drives
     # continuously across lap boundaries (module docstring has the
@@ -344,14 +359,16 @@ def main() -> None:
 
     state = obs_to_vehicle_state(obs)
     controller.update(state, sim_t)
-    viewer.update(obs)
-    viewer.render()
+    if viewer is not None:
+        viewer.update(obs)
+        viewer.render()
 
     crashed = False
-    perf = PerfMonitor()
+    perf = PerfMonitor() if show_perf else None
+    results: list[dict[str, Any]] = []
 
     for iteration in range(MAX_ITERATIONS):
-        if crashed or viewer.closed:
+        if crashed or (viewer is not None and viewer.closed):
             break
         lap_start_t = sim_t
         # No env.reset() happens between iterations, so gym's cumulative
@@ -362,7 +379,7 @@ def main() -> None:
         target_lap_count = float(iteration + 1)
         lap_done = False
 
-        while not (lap_done or crashed or viewer.closed):
+        while not (lap_done or crashed or (viewer is not None and viewer.closed)):
             # control() never raises for a failed SOLVE (ported 2026-07-16
             # to match ref/LearningMPC's own failure handling exactly): on
             # a solve failure it reapplies the previous control unchanged,
@@ -377,25 +394,26 @@ def main() -> None:
                     f"iteration {iteration} step: QP solve failed, "
                     "reapplying previous control"
                 )
-            terminal_slack = controller.last_terminal_slack()
             acceleration = cmd.velocity
             action = np.array([[cmd.steering, acceleration]], dtype=np.float64)
 
-            t_env0 = time.perf_counter()
+            t_env0 = time.perf_counter() if perf is not None else 0.0
             obs, _reward, _terminated, truncated, _info = env.step(action)
-            t_env1 = time.perf_counter()
+            t_env1 = time.perf_counter() if perf is not None else 0.0
             sim_t += dt
-            viewer.update(obs)
-            viewer.render()
-            t_render1 = time.perf_counter()
-            perf.record(
-                **controller.last_timings(),
-                env=(t_env1 - t_env0) * 1000.0,
-                render=(t_render1 - t_env1) * 1000.0,
-                terminal_slack=terminal_slack,
-                regression_pool_size=controller.regression_pool_size(),
-                regression_correction_norm=controller.last_regression_correction_norm(),
-            )
+            if viewer is not None:
+                viewer.update(obs)
+                viewer.render()
+            if perf is not None:
+                t_render1 = time.perf_counter()
+                perf.record(
+                    **controller.last_timings(),
+                    env=(t_env1 - t_env0) * 1000.0,
+                    render=(t_render1 - t_env1) * 1000.0,
+                    terminal_slack=controller.last_terminal_slack(),
+                    regression_pool_size=controller.regression_pool_size(),
+                    regression_correction_norm=controller.last_regression_correction_norm(),
+                )
 
             crashed = bool(f110_env.collisions[ego_idx]) or truncated
             if not crashed:
@@ -405,27 +423,60 @@ def main() -> None:
                 not crashed and float(obs["lap_counts"][ego_idx]) >= target_lap_count
             )
 
-        if viewer.closed:
+        if viewer is not None and viewer.closed:
             break
+        lap_time = sim_t - lap_start_t
         if crashed:
             print(
-                f"iteration {iteration}: crashed after {sim_t - lap_start_t:.2f}s "
-                "-- lap NOT added"
+                f"iteration {iteration}: crashed after {lap_time:.2f}s -- lap NOT added"
+            )
+            results.append(
+                {"iteration": iteration, "lap_time_s": lap_time, "crashed": True}
             )
             break
 
         print(
-            f"iteration {iteration}: lap completed in {sim_t - lap_start_t:.2f}s "
+            f"iteration {iteration}: lap completed in {lap_time:.2f}s "
             "(safe set updated internally)"
         )
+        results.append(
+            {"iteration": iteration, "lap_time_s": lap_time, "crashed": False}
+        )
 
-    perf.report()  # flush whatever partial window hasn't hit the interval yet
+    if perf is not None:
+        perf.report()  # flush whatever partial window hasn't hit the interval yet
 
-    while not viewer.closed:
-        viewer.render()
+    if viewer is not None:
+        while not viewer.closed:
+            viewer.render()
 
     env.close()
 
+    completed = [r for r in results if not r["crashed"]]
+    print(
+        f"--- summary: {len(completed)}/{len(results)} laps completed, "
+        f"total sim time {sim_t:.2f}s ---"
+    )
+    for record in results:
+        status = "CRASHED" if record["crashed"] else "ok"
+        print(
+            f"  iteration {record['iteration']}: {record['lap_time_s']:.2f}s [{status}]"
+        )
+
+    return results
+
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Drive barc_oval with LearningMPC")
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Run without the pyglet viewer -- just run and collect result/data",
+    )
+    parser.add_argument(
+        "--no-perf",
+        action="store_true",
+        help="Disable performance-metrics reporting (timing/slack/regression blocks)",
+    )
+    args = parser.parse_args()
+    main(headless=args.headless, show_perf=not args.no_perf)
