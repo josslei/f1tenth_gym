@@ -30,6 +30,7 @@
 #include <map>
 #include <algorithm>
 #include <chrono>
+#include <functional>
 #include <stdexcept>
 #include <utility>
 
@@ -69,6 +70,28 @@ struct RegressionSample{
     Matrix<double,3,1> y_bar;
 };
 
+// Which underlying vehicle dynamics model is active. New physics models
+// (e.g. a nonlinear tire model) register here.
+enum class DynamicsKind {
+    kKinematic,
+    kDynamic,
+};
+
+// Computes the continuous-time dynamics and Jacobians for one model.
+using DynamicsFunctor = std::function<void(
+    const Matrix<double,nx,1>& /*x_op*/, const Matrix<double,nu,1>& /*u_op*/,
+    VectorXd& /*dynamics*/, Matrix<double,nx,nx>& /*A*/, Matrix<double,nx,nu>& /*B*/)>;
+
+// Picks the active DynamicsKind for the current speed, given which
+// DynamicsKind was active before.
+using ModeSelector = std::function<DynamicsKind(
+    double /*speed*/, DynamicsKind /*previous*/, double /*vel_threshold*/)>;
+
+enum class ModelMode {
+    kDynamic,   // switch between kinematic and dynamic based on speed
+    kKinematic,  // always kinematic
+};
+
 // verbatim from LMPC.cpp
 void wrap_angle(double& angle, const double angle_ref){
     while(angle - angle_ref > M_PI) {angle -= 2*M_PI;}
@@ -83,8 +106,11 @@ public:
              double resolution, double origin_x, double origin_y,
              const std::string& waypoint_file,
              const std::string& init_data_file,
-             double x0, double y0, double yaw0){
+             double x0, double y0, double yaw0,
+             const std::string& model_mode){
 
+        setup_dynamics_registries();
+        active_mode_selector_ = mode_registry_.at(mode_names_.at(model_mode));
         getParameters(params);
 
         /* init_occupancy_grid() equivalent: grid passed in, then inflated
@@ -136,13 +162,10 @@ public:
         yawdot_ = yawdot;
         slip_angle_ = atan2(vy, vx);
 
-        /** STATE MACHINE: check if dynamic model should be used based on current speed **/
-        if ((!use_dyn_) && (vel_ > VEL_THRESHOLD)){
-            use_dyn_ = true;
-        }
-        if(use_dyn_ && (vel_< VEL_THRESHOLD*0.5)){
-            use_dyn_ = false;
-        }
+        // Pick this step's dynamics model.
+        active_dynamics_kind_ = active_mode_selector_(vel_, active_dynamics_kind_, VEL_THRESHOLD);
+        active_dynamics_functor_ = dynamics_registry_.at(active_dynamics_kind_);
+        use_dyn_ = (active_dynamics_kind_ == DynamicsKind::kDynamic);
         if (vel_ > 4.5) {
             R(0,0) = 1.3 * r_accel;
             R(1,1) = 1.8 * r_steer;
@@ -277,6 +300,15 @@ private:
 
     // use dynamic model or not
     bool use_dyn_;
+
+    // active_dynamics_functor_ is looked up once per set_state() call, so
+    // the per-horizon-stage solve loop just calls it -- no branching there.
+    std::map<DynamicsKind, DynamicsFunctor> dynamics_registry_;
+    std::map<ModelMode, ModeSelector> mode_registry_;
+    std::map<std::string, ModelMode> mode_names_;  // config string -> ModelMode
+    DynamicsKind active_dynamics_kind_;
+    DynamicsFunctor active_dynamics_functor_;
+    ModeSelector active_mode_selector_;
 
     //Sample Safe set
     vector<vector<Sample>> SS_;
@@ -545,10 +577,41 @@ private:
         return Vector3d(pos(0), pos(1), yaw);
     }
 
-    // verbatim from LMPC.cpp
-    void get_linearized_dynamics(Matrix<double,nx,nx>& Ad, Matrix<double,nx, nu>& Bd, Matrix<double,nx,1>& hd,
-            Matrix<double,nx,1>& x_op, Matrix<double,nu,1>& u_op, bool use_dyn){
+    // Kinematic bicycle model: no slip, valid down to v=0.
+    void kinematic_dynamics(const Matrix<double,nx,1>& x_op, const Matrix<double,nu,1>& u_op,
+            VectorXd& dynamics, Matrix<double,nx,nx>& A, Matrix<double,nx,nu>& B){
+        double yaw = x_op(2);
+        double v = x_op(3);
+        double accel = u_op(0);
+        double steer = u_op(1);
 
+        dynamics(0) = v * cos(yaw);
+        dynamics(1) = v * sin(yaw);
+        dynamics(2) = v * tan(steer)/car.wheelbase;
+        dynamics(3) = accel;
+        dynamics(4) = 0;
+        dynamics(5) = 0;
+
+        A <<    0.0, 0.0, -v*sin(yaw),  cos(yaw),       0.0,  0.0,
+                0.0, 0.0,  v*cos(yaw),  sin(yaw),       0.0,  0.0,
+                0.0, 0.0,         0.0,   tan(steer)/car.wheelbase,     0.0,  0.0,
+                0.0, 0.0,         0.0,       0.0,       0.0,  0.0,
+                0.0, 0.0,         0.0,       0.0,       0.0,  0.0,
+                0.0, 0.0,         0.0,       0.0,       0.0,  0.0;
+
+        B <<    0.0, 0.0,
+                0.0, 0.0,
+                0.0, v / (cos(steer) * cos(steer) * car.wheelbase),
+                1.0, 0.0,
+                0.0, 0.0,
+                0.0, 0.0;
+    }
+
+    // Single-track dynamic model with a linear tire model: captures
+    // yaw-rate/slip-angle dynamics, but singular as v -> 0 (several terms
+    // divide by v), which is why the kinematic model exists for low speed.
+    void single_track_dynamics(const Matrix<double,nx,1>& x_op, const Matrix<double,nu,1>& u_op,
+            VectorXd& dynamics, Matrix<double,nx,nx>& A, Matrix<double,nx,nu>& B){
         double yaw = x_op(2);
         double v = x_op(3);
         double accel = u_op(0);
@@ -556,102 +619,119 @@ private:
         double yaw_dot = x_op(4);
         double slip_angle = x_op(5);
 
+        double g = 9.81;
+        double rear_val = g * car.l_r - accel * car.h_cg;
+        double front_val = g * car.l_f + accel * car.h_cg;
+
+        dynamics(0) = v * cos(yaw+slip_angle);
+        dynamics(1) = v * sin(yaw+slip_angle);
+        dynamics(2) = yaw_dot;
+        dynamics(3) = accel;
+        dynamics(4) = (car.friction_coeff * car.mass / (car.I_z * car.wheelbase)) *
+                      (car.l_f * car.cs_f * steer * (rear_val) +
+                       slip_angle * (car.l_r * car.cs_r * (front_val) - car.l_f * car.cs_f * (rear_val)) -
+                       (yaw_dot/v) * (pow(car.l_f, 2) * car.cs_f * (rear_val) + pow(car.l_r, 2) * car.cs_r * (front_val)));        // yaw_dot dynamics
+        dynamics(5) = (car.friction_coeff / (v * (car.l_r + car.l_f))) *
+                      (car.cs_f * steer * rear_val - slip_angle * (car.cs_r * front_val + car.cs_f * rear_val) +
+                              (yaw_dot/v) * (car.cs_r * car.l_r * front_val - car.cs_f * car.l_f * rear_val)) - yaw_dot;        // slip_angle dynamics
+
+        double dfyawdot_dv, dfyawdot_dyawdot, dfyawdot_dslip, dfslip_dv, dfslip_dyawdot, dfslip_dslip;
+        double dfyawdot_da, dfyawdot_dsteer, dfslip_da, dfslip_dsteer;
+
+        dfyawdot_dv = (car.friction_coeff * car.mass / (car.I_z * car.wheelbase))
+                * (pow(car.l_f, 2) * car.cs_f * (rear_val) + pow(car.l_r, 2) * car.cs_r * (front_val))
+                * yaw_dot / pow(v, 2);
+
+        dfyawdot_dyawdot = -(car.friction_coeff * car.mass / (car.I_z * car.wheelbase))
+                           * (pow(car.l_f, 2) * car.cs_f * (rear_val) + pow(car.l_r, 2) * car.cs_r * (front_val))/v;
+
+        dfyawdot_dslip = (car.friction_coeff * car.mass / (car.I_z * car.wheelbase))
+                            * (car.l_r * car.cs_r * (front_val) - car.l_f * car.cs_f * (rear_val));
+
+        dfslip_dv = -(car.friction_coeff / (car.l_r + car.l_f)) *
+                    (car.cs_f * steer * rear_val - slip_angle * (car.cs_r * front_val + car.cs_f * rear_val))/pow(v,2)
+                -2*(car.friction_coeff / (car.l_r + car.l_f)) * (car.cs_r * car.l_r * front_val - car.cs_f * car.l_f * rear_val) * yaw_dot/pow(v,3);
+
+        dfslip_dyawdot = (car.friction_coeff / (pow(v,2) * (car.l_r + car.l_f))) * (car.cs_r * car.l_r * front_val - car.cs_f * car.l_f * rear_val) - 1;
+
+        dfslip_dslip = -(car.friction_coeff / (v * (car.l_r + car.l_f)))*(car.cs_r * front_val + car.cs_f * rear_val);
+
+        dfyawdot_da = (car.friction_coeff * car.mass / (car.I_z * car.wheelbase))
+                *(-car.l_f*car.cs_f*car.h_cg*steer + car.l_r*car.cs_r*car.h_cg*slip_angle + car.l_f*car.cs_f*car.h_cg*slip_angle
+                  - (yaw_dot/v)*(-pow(car.l_f,2)*car.cs_f*car.h_cg) + pow(car.l_r,2)*car.cs_r*car.h_cg);
+
+        dfyawdot_dsteer = (car.friction_coeff * car.mass / (car.I_z * car.wheelbase)) *
+                      (car.l_f * car.cs_f * rear_val);
+
+        dfslip_da = (car.friction_coeff / (v * (car.l_r + car.l_f))) *
+                (-car.cs_f*car.h_cg*steer - (car.cs_r*car.h_cg - car.cs_f*car.h_cg)*slip_angle +
+                (car.cs_r*car.h_cg*car.l_r + car.cs_f*car.h_cg*car.l_f)*(yaw_dot/v));
+
+        dfslip_dsteer = (car.friction_coeff / (v * (car.l_r + car.l_f))) *
+                (car.cs_f * rear_val);
+
+        A <<    0.0, 0.0, -v*sin(yaw+slip_angle), cos(yaw+slip_angle),                 0.0,  -v*sin(yaw+slip_angle),
+                0.0, 0.0,  v*cos(yaw+slip_angle), sin(yaw+slip_angle),                 0.0,   v*cos(yaw+slip_angle),
+                0.0, 0.0,                       0.0,                   0.0,                 1.0,                       0.0,
+                0.0, 0.0,                       0.0,                   0.0,                 0.0,                       0.0,
+                0.0, 0.0,                       0.0,           dfyawdot_dv,     dfyawdot_dyawdot,           dfyawdot_dslip,
+                0.0, 0.0,                       0.0,             dfslip_dv,       dfslip_dyawdot,             dfslip_dslip;
+
+        B <<    0.0, 0.0,
+                0.0, 0.0,
+                0.0, 0.0,
+                1.0, 0.0,
+                dfyawdot_da, dfyawdot_dsteer,
+                dfslip_da,     dfslip_dsteer;
+    }
+
+    // Registers each physics model and each model setting. To add one,
+    // add an entry here -- no other code needs to change.
+    void setup_dynamics_registries(){
+        dynamics_registry_[DynamicsKind::kKinematic] =
+            [this](const Matrix<double,nx,1>& x_op, const Matrix<double,nu,1>& u_op,
+                   VectorXd& dynamics, Matrix<double,nx,nx>& A, Matrix<double,nx,nu>& B){
+                kinematic_dynamics(x_op, u_op, dynamics, A, B);
+            };
+        dynamics_registry_[DynamicsKind::kDynamic] =
+            [this](const Matrix<double,nx,1>& x_op, const Matrix<double,nu,1>& u_op,
+                   VectorXd& dynamics, Matrix<double,nx,nx>& A, Matrix<double,nx,nu>& B){
+                single_track_dynamics(x_op, u_op, dynamics, A, B);
+            };
+
+        // "dynamic": switch to the dynamic model above VEL_THRESHOLD, back
+        // to kinematic below half that (hysteresis avoids chattering at the
+        // boundary).
+        mode_registry_[ModelMode::kDynamic] =
+            [](double speed, DynamicsKind previous, double vel_threshold) -> DynamicsKind {
+                bool was_dynamic = (previous == DynamicsKind::kDynamic);
+                if (!was_dynamic && speed > vel_threshold) return DynamicsKind::kDynamic;
+                if (was_dynamic && speed < vel_threshold*0.5) return DynamicsKind::kKinematic;
+                return previous;
+            };
+        // "kinematic": always kinematic, regardless of speed.
+        mode_registry_[ModelMode::kKinematic] =
+            [](double /*speed*/, DynamicsKind /*previous*/, double /*vel_threshold*/) -> DynamicsKind {
+                return DynamicsKind::kKinematic;
+            };
+
+        mode_names_["dynamic"] = ModelMode::kDynamic;
+        mode_names_["kinematic"] = ModelMode::kKinematic;
+
+        active_dynamics_kind_ = DynamicsKind::kKinematic;
+        active_dynamics_functor_ = dynamics_registry_.at(active_dynamics_kind_);
+        active_mode_selector_ = mode_registry_.at(ModelMode::kDynamic);
+    }
+
+    // Evaluates `model`, then discretizes it via zero-order hold.
+    void get_linearized_dynamics(Matrix<double,nx,nx>& Ad, Matrix<double,nx, nu>& Bd, Matrix<double,nx,1>& hd,
+            Matrix<double,nx,1>& x_op, Matrix<double,nu,1>& u_op, const DynamicsFunctor& model){
+
         VectorXd dynamics(6), h(6);
         Matrix<double, nx, nx> A, M12;
         Matrix<double, nx, nu> B;
 
-        if (!use_dyn) {
-            // Kinematic Model
-            dynamics(0) = v * cos(yaw);
-            dynamics(1) = v * sin(yaw);
-            dynamics(2) = v * tan(steer)/car.wheelbase;
-            dynamics(3) = accel;
-            dynamics(4) = 0;
-            dynamics(5) = 0;
-
-            A <<    0.0, 0.0, -v*sin(yaw),  cos(yaw),       0.0,  0.0,
-                    0.0, 0.0,  v*cos(yaw),  sin(yaw),       0.0,  0.0,
-                    0.0, 0.0,         0.0,   tan(steer)/car.wheelbase,     0.0,  0.0,
-                    0.0, 0.0,         0.0,       0.0,       0.0,  0.0,
-                    0.0, 0.0,         0.0,       0.0,       0.0,  0.0,
-                    0.0, 0.0,         0.0,       0.0,       0.0,  0.0;
-
-            B <<    0.0, 0.0,
-                    0.0, 0.0,
-                    0.0, v / (cos(steer) * cos(steer) * car.wheelbase),
-                    1.0, 0.0,
-                    0.0, 0.0,
-                    0.0, 0.0;
-        }
-        else{
-            // Single Track Dynamic Model
-
-            double g = 9.81;
-            double rear_val = g * car.l_r - accel * car.h_cg;
-            double front_val = g * car.l_f + accel * car.h_cg;
-
-            dynamics(0) = v * cos(yaw+slip_angle);
-            dynamics(1) = v * sin(yaw+slip_angle);
-            dynamics(2) = yaw_dot;
-            dynamics(3) = accel;
-            dynamics(4) = (car.friction_coeff * car.mass / (car.I_z * car.wheelbase)) *
-                          (car.l_f * car.cs_f * steer * (rear_val) +
-                           slip_angle * (car.l_r * car.cs_r * (front_val) - car.l_f * car.cs_f * (rear_val)) -
-                           (yaw_dot/v) * (pow(car.l_f, 2) * car.cs_f * (rear_val) + pow(car.l_r, 2) * car.cs_r * (front_val)));        // yaw_dot dynamics
-            dynamics(5) = (car.friction_coeff / (v * (car.l_r + car.l_f))) *
-                          (car.cs_f * steer * rear_val - slip_angle * (car.cs_r * front_val + car.cs_f * rear_val) +
-                                  (yaw_dot/v) * (car.cs_r * car.l_r * front_val - car.cs_f * car.l_f * rear_val)) - yaw_dot;        // slip_angle dynamics
-
-            double dfyawdot_dv, dfyawdot_dyawdot, dfyawdot_dslip, dfslip_dv, dfslip_dyawdot, dfslip_dslip;
-            double dfyawdot_da, dfyawdot_dsteer, dfslip_da, dfslip_dsteer;
-
-            dfyawdot_dv = (car.friction_coeff * car.mass / (car.I_z * car.wheelbase))
-                    * (pow(car.l_f, 2) * car.cs_f * (rear_val) + pow(car.l_r, 2) * car.cs_r * (front_val))
-                    * yaw_dot / pow(v, 2);
-
-            dfyawdot_dyawdot = -(car.friction_coeff * car.mass / (car.I_z * car.wheelbase))
-                               * (pow(car.l_f, 2) * car.cs_f * (rear_val) + pow(car.l_r, 2) * car.cs_r * (front_val))/v;
-
-            dfyawdot_dslip = (car.friction_coeff * car.mass / (car.I_z * car.wheelbase))
-                                * (car.l_r * car.cs_r * (front_val) - car.l_f * car.cs_f * (rear_val));
-
-            dfslip_dv = -(car.friction_coeff / (car.l_r + car.l_f)) *
-                        (car.cs_f * steer * rear_val - slip_angle * (car.cs_r * front_val + car.cs_f * rear_val))/pow(v,2)
-                    -2*(car.friction_coeff / (car.l_r + car.l_f)) * (car.cs_r * car.l_r * front_val - car.cs_f * car.l_f * rear_val) * yaw_dot/pow(v,3);
-
-            dfslip_dyawdot = (car.friction_coeff / (pow(v,2) * (car.l_r + car.l_f))) * (car.cs_r * car.l_r * front_val - car.cs_f * car.l_f * rear_val) - 1;
-
-            dfslip_dslip = -(car.friction_coeff / (v * (car.l_r + car.l_f)))*(car.cs_r * front_val + car.cs_f * rear_val);
-
-            dfyawdot_da = (car.friction_coeff * car.mass / (car.I_z * car.wheelbase))
-                    *(-car.l_f*car.cs_f*car.h_cg*steer + car.l_r*car.cs_r*car.h_cg*slip_angle + car.l_f*car.cs_f*car.h_cg*slip_angle
-                      - (yaw_dot/v)*(-pow(car.l_f,2)*car.cs_f*car.h_cg) + pow(car.l_r,2)*car.cs_r*car.h_cg);
-
-            dfyawdot_dsteer = (car.friction_coeff * car.mass / (car.I_z * car.wheelbase)) *
-                          (car.l_f * car.cs_f * rear_val);
-
-            dfslip_da = (car.friction_coeff / (v * (car.l_r + car.l_f))) *
-                    (-car.cs_f*car.h_cg*steer - (car.cs_r*car.h_cg - car.cs_f*car.h_cg)*slip_angle +
-                    (car.cs_r*car.h_cg*car.l_r + car.cs_f*car.h_cg*car.l_f)*(yaw_dot/v));
-
-            dfslip_dsteer = (car.friction_coeff / (v * (car.l_r + car.l_f))) *
-                    (car.cs_f * rear_val);
-
-
-            A <<    0.0, 0.0, -v*sin(yaw+slip_angle), cos(yaw+slip_angle),                 0.0,  -v*sin(yaw+slip_angle),
-                    0.0, 0.0,  v*cos(yaw+slip_angle), sin(yaw+slip_angle),                 0.0,   v*cos(yaw+slip_angle),
-                    0.0, 0.0,                       0.0,                   0.0,                 1.0,                       0.0,
-                    0.0, 0.0,                       0.0,                   0.0,                 0.0,                       0.0,
-                    0.0, 0.0,                       0.0,           dfyawdot_dv,     dfyawdot_dyawdot,           dfyawdot_dslip,
-                    0.0, 0.0,                       0.0,             dfslip_dv,       dfslip_dyawdot,             dfslip_dslip;
-
-            B <<    0.0, 0.0,
-                    0.0, 0.0,
-                    0.0, 0.0,
-                    1.0, 0.0,
-                    dfyawdot_da, dfyawdot_dsteer,
-                    dfslip_da,     dfslip_dsteer;
-        }
+        model(x_op, u_op, dynamics, A, B);
 
         /**  Discretize using Zero-Order Hold **/
         Matrix<double,nx+nx,nx+nx> aux, M;
@@ -678,12 +758,14 @@ private:
             const Sample& s1 = lap[i+1];
             Matrix<double,nx,1> x_op = s0.x;
             Matrix<double,nu,1> u_op = s0.u;
-            bool dyn = x_op(3) > VEL_THRESHOLD;
+            // Pick this sample's model from its own recorded speed.
+            DynamicsKind kind = active_mode_selector_(x_op(3), DynamicsKind::kKinematic, VEL_THRESHOLD);
+            const DynamicsFunctor& model = dynamics_registry_.at(kind);
 
             Matrix<double,nx,nx> Adj;
             Matrix<double,nx,nu> Bdj;
             Matrix<double,nx,1> hdj;
-            get_linearized_dynamics(Adj, Bdj, hdj, x_op, u_op, dyn);
+            get_linearized_dynamics(Adj, Bdj, hdj, x_op, u_op, model);
             Matrix<double,nx,1> f_pred = Adj*x_op + Bdj*u_op + hdj;
 
             RegressionSample rs;
@@ -817,7 +899,7 @@ private:
             u_k_ref = QPSolution_.segment<nu>((N+1)*nx + i*nu);
             double s_ref = track_->findTheta(x_k_ref(0), x_k_ref(1), 0, true);
             auto t_lin0 = clk::now();
-            get_linearized_dynamics(Ad, Bd, hd, x_k_ref, u_k_ref, use_dyn_);
+            get_linearized_dynamics(Ad, Bd, hd, x_k_ref, u_k_ref, active_dynamics_functor_);
             t_rollout_lin += elapsed_ms(t_lin0);
             if (regression_enabled_ && i < N) {
                 // u_N does not exist, so the error model is only added for i<N.
@@ -1125,12 +1207,13 @@ PYBIND11_MODULE(lmpc_core, m){
         .def(py::init<const std::map<std::string,double>&, py::array_t<int8_t>,
                       uint32_t, uint32_t, double, double, double,
                       const std::string&, const std::string&,
-                      double, double, double>(),
+                      double, double, double, const std::string&>(),
              py::arg("params"), py::arg("grid_data"),
              py::arg("width"), py::arg("height"),
              py::arg("resolution"), py::arg("origin_x"), py::arg("origin_y"),
              py::arg("waypoint_file"), py::arg("init_data_file"),
-             py::arg("x0"), py::arg("y0"), py::arg("yaw0"))
+             py::arg("x0"), py::arg("y0"), py::arg("yaw0"),
+             py::arg("model_mode"))
         .def("set_state", &LMPCCore::set_state,
              py::arg("x"), py::arg("y"), py::arg("yaw"),
              py::arg("vx"), py::arg("vy"), py::arg("yawdot"))

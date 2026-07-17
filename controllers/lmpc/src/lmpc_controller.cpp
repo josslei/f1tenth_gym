@@ -75,7 +75,8 @@ struct LMPCController::Impl {
         make_params(config), grid, config.map_width, config.map_height,
         config.map_resolution, config.map_origin_x, config.map_origin_y,
         config.reference_waypoint_csv_path, config.reference_seed_lap_csv_path,
-        config.initial_x, config.initial_y, config.initial_yaw);
+        config.initial_x, config.initial_y, config.initial_yaw,
+        config.model_mode);
     prediction = casadi::DM::zeros(6, config.horizon_steps + 1);
     terminal_slack = casadi::DM::zeros(6, 1);
     solved = true;

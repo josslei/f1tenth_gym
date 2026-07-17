@@ -77,6 +77,7 @@ PYBIND11_MODULE(lmpc_native, module) {
       .def_readwrite("v_max", &lmpc::LmpcConfig::v_max)
       .def_readwrite("velocity_threshold",
                      &lmpc::LmpcConfig::velocity_threshold)
+      .def_readwrite("model_mode", &lmpc::LmpcConfig::model_mode)
       .def_readwrite("map_margin", &lmpc::LmpcConfig::map_margin)
       .def_readwrite("waypoint_space", &lmpc::LmpcConfig::waypoint_space)
       .def_readwrite("r_accel", &lmpc::LmpcConfig::r_accel)

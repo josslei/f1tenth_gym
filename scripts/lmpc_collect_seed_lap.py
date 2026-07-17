@@ -84,7 +84,7 @@ SIM_TIMESTEP = 0.025
 # not 0.25) rather than sitting right at the edge, where run-to-run
 # floating-point non-associativity (documented elsewhere in this project)
 # could tip a marginal speed into the danger band on a different run.
-SEED_LAP_SPEED = 1.5
+SEED_LAP_SPEED = 1.0
 
 ZOOM = 1.0
 WINDOW_WIDTH = 1000

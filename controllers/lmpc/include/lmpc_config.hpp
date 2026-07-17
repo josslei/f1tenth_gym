@@ -41,6 +41,9 @@ struct LmpcConfig {
   double delta_max = 0.41;
   double v_max = 10.0;
   double velocity_threshold = 0.8;
+  // "dynamic" (default) switches between the kinematic and dynamic model
+  // based on speed; "kinematic" always uses the kinematic model.
+  std::string model_mode = "dynamic";
   double map_margin = 0.1;
   double waypoint_space = 0.2;
   double r_accel = 1.5;

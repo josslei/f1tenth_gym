@@ -61,6 +61,9 @@ DELTA_MIN = -0.4189
 DELTA_MAX = 0.4189
 V_MAX = 20.0
 VELOCITY_THRESHOLD = 0.8
+# "dynamic" switches between the kinematic and dynamic model based on
+# speed; "kinematic" always uses the kinematic model.
+MODEL_MODE = "kinematic"
 # The QP constrains the vehicle center, so inflate walls beyond the 0.155 m
 # half-width. The BARC oval's minimum half-width is 0.488 m; 0.22 m retains a
 # feasible center corridor while allowing for modest heading error.
@@ -113,6 +116,7 @@ CONFIG_OVERRIDES: dict[str, Any] = {
     "delta_max": DELTA_MAX,
     "v_max": V_MAX,
     "velocity_threshold": VELOCITY_THRESHOLD,
+    "model_mode": MODEL_MODE,
     "map_margin": MAP_MARGIN,
     "waypoint_space": WAYPOINT_SPACE,
     "terminal_slack_weight": TERMINAL_SLACK_WEIGHT,
