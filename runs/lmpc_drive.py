@@ -47,6 +47,12 @@ MAX_ITERATIONS = 20
 # the more useful view and the one that keeps stdout readable.
 PERF_REPORT_INTERVAL_STEPS = 1000
 SAFE_SET_K = 16
+# Simulator's REAL tire friction coefficient (gym/f110_gym/envs/f110_env.py's
+# DEFAULT_PARAMS default -- 1.0489 here just matches that default, not
+# derived from it). Independent of MU below: this drives the actual physics
+# the car experiences; MU only feeds the LMPC's internal prediction model.
+# Change this to test the controller under a different real-world grip.
+SIM_MU = 1.0489
 MU = 1.0489
 C_SF = 4.718
 C_SR = 5.4562
@@ -314,6 +320,7 @@ def main(headless: bool = False, show_perf: bool = True) -> list[dict[str, Any]]
         timestep=SIM_TIMESTEP,
         integrator=Integrator.RK4,
         direct_accel_control=True,
+        params={"mu": SIM_MU},
     )
     f110_env: Any = env.unwrapped
     ego_idx = 0
